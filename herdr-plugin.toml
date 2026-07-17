@@ -1,0 +1,31 @@
+# herdr-drover — cloud sync plugin for herdr
+# marketplace 掲載: GitHub topic `herdr-plugin` を付与するだけ（無審査・約30分毎索引）
+id = "4noha.drover"
+name = "herdr-drover"
+version = "0.1.0"
+min_herdr_version = "0.7.4"
+description = "Cloud session sync: view and control your herdr sessions from any PC, browser, or phone"
+
+[[actions]]
+id = "install"
+title = "Install herdr-drover (daemon + launchd)"
+command = ["sh", "scripts/install-action.sh"]
+
+[[actions]]
+id = "status"
+title = "Show drover daemon / cloud sync status"
+command = ["bin/herdr-drover", "status"]
+
+# events は常駐不可（hook=一発 spawn・64KB cap）のため nudge 専用:
+# 発火→ daemon の即時 re-scan を促すだけ。常駐本体は launchd。
+[[events]]
+on = "pane.created"
+command = ["bin/herdr-drover", "nudge"]
+
+[[events]]
+on = "pane.closed"
+command = ["bin/herdr-drover", "nudge"]
+
+[[events]]
+on = "pane.agent_status_changed"
+command = ["bin/herdr-drover", "nudge"]
