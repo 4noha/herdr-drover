@@ -27,6 +27,37 @@
 
 設計詳細は [DESIGN.md](DESIGN.md)。
 
+## 使い方
+
+### claude シム（cwd 自動 attach / 新規起動）
+
+`herdr-drover claude [args...]` は claude-master `start` の C 案（自動 attach/
+復帰）を herdr 世界で再現するシム:
+
+- herdr server が居なければ detached 自動起動（ping 応答まで最大 10s 待ち）。
+  これは**ユーザーの herdr server の代理起動**であって drover の管理下には
+  置かない（drover は止めない・監督しない。停止は `herdr server stop`）。
+  同時 2 シムの二重起動は herdr 自身の単一インスタンス制御に委ねる
+  （実測 0.7.4: 2 本目は "already running" exit 1・socket 強奪なし）
+- 引数なし: **cwd 完全一致**の既存 claude セッション（agent 名 `claude` /
+  `claude-<数字>` の構造 exact-match のみ）へ attach。複数あれば番号 picker
+  （Enter=先頭 / n か 0=新規 / 数字=指定）。無ければ新規 pane で起動。
+  cwd は物理パスへ正規化（symlink 経路 `/tmp` 等でも dup を作らない）
+- agent 名は herdr の一意制約（実測 `agent_name_taken`）に合わせ
+  `claude` → `claude-2` → … と自動採番
+- 引数あり（TTY）: 常に新規 pane（明示指定の尊重＝既存 attach で横取りしない）
+- 引数あり（非 TTY）: herdr を経由せず**素の claude へプロセス置換**
+  （`echo prompt | claude -p …` の pipe stdin/stdout 契約を透過）
+- 引数なし×非 TTY（CI/パイプ）: attach せず pane_id/terminal_id を表示して
+  exit 0（自動化スクリプトから呼ばれても dup セッションを作らない）
+- attach は `herdr terminal attach` へのプロセス置換（detach は herdr 標準の
+  Ctrl+B q）。実 claude バイナリは `exec.LookPath("claude")` で絶対パス解決
+  （shell alias に非依存）
+
+```sh
+alias claude='~/.herdr-drover/bin/herdr-drover claude'
+```
+
 ## Status
 
 Phase 1（一覧同期）・Phase 2（Web ターミナル）・Phase 4（プラグイン化・

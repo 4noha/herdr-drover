@@ -90,6 +90,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		return 0
+	case "claude":
+		// claude シム（claudeshim.go）。rest は実 claude へそのまま渡す
+		// 引数列なので余分引数チェックはしない。
+		if err := cmdClaude(rest, stdout, stderr); err != nil {
+			fmt.Fprintf(stderr, "herdr-drover claude: %v\n", err)
+			return 1
+		}
+		return 0
 	case "attach":
 		// DESIGN.md のリポジトリ構成に載る後続フェーズのコマンド。存在は
 		// 予約しつつ、未実装は明示エラーで返す（黙って no-op にしない）。
@@ -114,6 +122,12 @@ func usage(w io.Writer) {
   herdr-drover enroll <code> --relay wss://<host>
                           Web「＋ 端末を追加」のコードで SA 鍵と設定を自動配置
                           （表示コマンドは claude-master 用＝code と --relay を読み替える）
+  herdr-drover claude [args...]
+                          claude シム（cm start の C案）: server 自動起動＋cwd
+                          完全一致の既存 claude セッションへ attach／複数は番号
+                          picker（Enter=先頭・n/0=新規・数字=指定）／無し or
+                          引数あり(TTY)は新規 pane／引数あり×非 TTY は素の
+                          claude へ透過（alias claude='herdr-drover claude'）
   herdr-drover update     selfupdate（GitHub Releases・sha256 検証・原子置換）
   herdr-drover version    バージョン表示
   herdr-drover help       このヘルプ
