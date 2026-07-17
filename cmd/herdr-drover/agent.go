@@ -15,14 +15,28 @@ import (
 	"io"
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
 	"syscall"
 	"time"
 
 	"github.com/4noha/herdr-drover/internal/cloud/state"
+	"github.com/4noha/herdr-drover/internal/commands"
 	"github.com/4noha/herdr-drover/internal/herdrapi"
+	"github.com/4noha/herdr-drover/internal/selfupdate"
 	"github.com/4noha/herdr-drover/internal/session"
 )
+
+// restartSelf は launchd 配下の自分を kickstart -k で強制再起動する
+// （cm restartDaemons の drover 版＝単一 agent なので 1 本だけ）。
+// ラベルは install.go の launchdLabel（plist を書く側と同一定数＝不一致で
+// 遠隔再起動が空振りする事故を構造的に防ぐ）。launchd 外での実行（開発時
+// の手動 agent）では失敗するが、CommandRunner が Ack 先行済みなので監査は
+// done で残る（cm と同じ規律）。
+func restartSelf() error {
+	dom := fmt.Sprintf("gui/%d", os.Getuid())
+	return exec.Command("launchctl", "kickstart", "-k", dom+"/"+launchdLabel).Run()
+}
 
 // knownProtocol は実測で挙動検証済みの herdr ndjson protocol
 // （v0.7.4 の ping 応答＝herdrapi パッケージの採取値）。
@@ -89,7 +103,16 @@ func cmdAgent(stdout, stderr io.Writer) error {
 	signal.Notify(nudge, syscall.SIGUSR1)
 	defer signal.Stop(nudge)
 
-	st, err := state.New(ctx, cfg.Project, cfg.PCID)
+	// 資格情報はクライアント個別に注入する（enroll が書く設定ファイル由来の
+	// SA 鍵パスはプロセス env に無い＝ADC では見えないため。env
+	// GOOGLE_APPLICATION_CREDENTIALS 由来でも同じ鍵を指すだけで等価）。
+	// エミュレータ時は資格情報を渡さない（不要かつ client 生成オプションの
+	// 非互換を踏まないため。e2e はこの経路）。
+	creds := cfg.Credentials
+	if os.Getenv("FIRESTORE_EMULATOR_HOST") != "" {
+		creds = ""
+	}
+	st, err := state.NewWithCredentials(ctx, cfg.Project, cfg.PCID, creds)
 	if err != nil {
 		return fmt.Errorf("Firestore 接続失敗（GCP_PROJECT=%s）: %w", cfg.Project, err)
 	}
@@ -123,6 +146,35 @@ func cmdAgent(stdout, stderr io.Writer) error {
 		wt.start(ctx)
 		lg.Printf("webterm: WatchWake 起動（relay=%s）", cfg.RelayURL)
 	}
+
+	// 遠隔命令制御線（cm runOneCloud と同型の常時・無料 listener。owner
+	// 限定は web 側・多層防御の revocation 再検査は CommandRunner 内）。
+	// 写像（DESIGN「遠隔命令」）:
+	//   restart-agent → launchctl kickstart -k（自己。Ack 先行）
+	//   self-update   → selfupdate.Update → Ack 先行 → os.Exit(0)
+	//                   （launchd KeepAlive が新バイナリで再起動。graceful
+	//                    drain を通らないのは意図＝pidfile は flock 自動解放
+	//                    ＋読み手の pidAlive が stale を担保する既定の設計）
+	//   restart-proxy → 当該 sid の bridge respawn（webterm）。Web ターミナル
+	//                   無効（wt=nil）や未知 sid は status=error で Ack
+	cr := &commands.CommandRunner{
+		St:        st,
+		DoRestart: func(context.Context) error { return restartSelf() },
+		DoUpdate: func(context.Context) (string, bool, error) {
+			return selfupdate.Update(version)
+		},
+		DoExit: func() { os.Exit(0) },
+	}
+	if wt != nil {
+		cr.DoProxy = func(_ context.Context, sid string) error {
+			return wt.respawn(sid)
+		}
+	}
+	go func() {
+		if err := cr.Run(ctx); err != nil && ctx.Err() == nil {
+			lg.Printf("command watcher 終了: %v", err)
+		}
+	}()
 
 	// producer 契約（internal/session と統合済み。シグネチャ不整合は
 	// コンパイルで露見する方針＝ここを黙ってスタブで満たさない。実バイナリ

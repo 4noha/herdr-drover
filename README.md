@@ -29,7 +29,13 @@
 
 ## Status
 
-Phase 1（セッション一覧のクラウド同期）実装中。
+Phase 1（一覧同期）・Phase 2（Web ターミナル）・Phase 4（プラグイン化・
+遠隔命令・install/launchd・配布）実装済み。**Phase 3（リモート pane 注入＝
+↗窓相当）は未実装**（DESIGN.md 参照・次期）。各フェーズは実 herdr 隔離
+サーバ＋実 Firestore エミュレータ＋実 relay（cm 無改変 build）の常設 e2e
+gate（`test/`）で検証している。実 launchd へのロード（カットオーバー）は
+`herdr-drover install` を手動実行（テストは `--no-launchctl`＋隔離 HOME
+のみ＝実環境不可侵）。
 
 ## Requirements
 

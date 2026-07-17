@@ -124,7 +124,10 @@ type testServer struct {
 
 // startHerdr は隔離 herdr サーバを起動する。短い /tmp dir（sun_path 104B
 // 制約）＋XDG_CONFIG_HOME 隔離。herdr 不在の環境は Skip（CI 耐性）。
-func startHerdr(t *testing.T) (*testServer, *herdrapi.Client) {
+// extraEnv は KEY=VALUE を server と CLI（testServer.env）へ追加する
+// （重複キーは後勝ち＝os/exec の仕様。plugin link gate が HOME/XDG_STATE_HOME
+// を隔離するために使う。既存呼出しは無引数＝挙動不変）。
+func startHerdr(t *testing.T, extraEnv ...string) (*testServer, *herdrapi.Client) {
 	t.Helper()
 	bin, err := exec.LookPath("herdr")
 	if err != nil {
@@ -142,9 +145,9 @@ func startHerdr(t *testing.T) (*testServer, *herdrapi.Client) {
 		t:    t,
 		bin:  bin,
 		sock: filepath.Join(dir, "h.sock"),
-		env: append(os.Environ(),
+		env: append(append(os.Environ(),
 			"HERDR_SOCKET_PATH="+filepath.Join(dir, "h.sock"),
-			"XDG_CONFIG_HOME="+xdg),
+			"XDG_CONFIG_HOME="+xdg), extraEnv...),
 	}
 	t.Cleanup(func() {
 		s.stop()

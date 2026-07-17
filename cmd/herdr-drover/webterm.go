@@ -22,6 +22,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"strings"
 	"sync"
@@ -37,6 +38,20 @@ import (
 // レイテンシ＋再接続間隔をカバーする短さ＝漏洩 grant の悪用窓を最小化）。
 const sourceGrantTTL = 60 * time.Second
 
+// respawnStopWait は respawn（restart-proxy 遠隔命令）が旧 bridge の停止を
+// 待つ上限。bridge は ctx cancel で observe kill→conn close まで確実に戻る
+// 設計だが、万一戻らない時に命令を pending 滞留させず error Ack へ落とす。
+const respawnStopWait = 10 * time.Second
+
+// bridgeRun は稼働中 bridge 1 本のハンドル（respawn 用）。cancel はその
+// bridge 専用 ctx を切る（conn/observe が確実に死ぬ）。done は handleWake
+// が active map から自分を消した**後**に閉じる＝done 受信後の再 spawn が
+// 二重ブリッジ dedup に誤爆しない順序保証。
+type bridgeRun struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
 // webTerm は Web ターミナル経路の agent 側状態（WatchWake＋sid 毎 bridge）。
 type webTerm struct {
 	relayURL string
@@ -46,8 +61,9 @@ type webTerm struct {
 	lg       *log.Logger
 
 	mu     sync.Mutex
-	active map[string]bool // 同 sid の二重ブリッジ防止（cm agent と同じ）
-	wg     sync.WaitGroup  // WatchWake＋全 bridge の停止待ち（drain 用）
+	ctx    context.Context       // start() の親 ctx（respawn の再 spawn 用）
+	active map[string]*bridgeRun // 同 sid の二重ブリッジ防止＋respawn ハンドル
+	wg     sync.WaitGroup        // WatchWake＋全 bridge の停止待ち（drain 用）
 }
 
 func newWebTerm(relayURL string, idle time.Duration, st *state.Client, hcli *herdrapi.Client, lg *log.Logger) *webTerm {
@@ -57,7 +73,7 @@ func newWebTerm(relayURL string, idle time.Duration, st *state.Client, hcli *her
 		st:       st,
 		hcli:     hcli,
 		lg:       lg,
-		active:   map[string]bool{},
+		active:   map[string]*bridgeRun{},
 	}
 }
 
@@ -65,6 +81,11 @@ func newWebTerm(relayURL string, idle time.Duration, st *state.Client, hcli *her
 // handleWake を goroutine 起動（watcher は止めない＝cm Agent.Run と同型）。
 // WatchWake は内部で再購読 backoff を持ち ctx 終了まで戻らない（watch.go）。
 func (w *webTerm) start(ctx context.Context) {
+	// respawn（遠隔命令）が新 bridge を張るときの親 ctx を保存（mu 下＝
+	// 命令 goroutine からの読みと data race にしない）。
+	w.mu.Lock()
+	w.ctx = ctx
+	w.mu.Unlock()
 	w.wg.Add(1)
 	go func() {
 		defer w.wg.Done()
@@ -95,32 +116,42 @@ func (w *webTerm) handleWake(ctx context.Context, sid string) {
 	// 注意: WatchWake は初回 snapshot でも既在 doc で発火する（契約）ので、
 	// agent 再起動直後に古い wake が来ても、この dedup と bridge 側の
 	// 失敗即終了で無害に収束する。
+	//
+	// respawn（restart-proxy 遠隔命令）用に bridge 専用の子 ctx と完了
+	// チャネルを持つ。defer の実行順（LIFO）が生命線:
+	//   conn.Close（後で登録）→ active 削除＋close(done) → bcancel
+	// ＝done を見た respawn が再 spawn する時点で active は必ず空いている。
+	bctx, bcancel := context.WithCancel(ctx)
+	defer bcancel()
+	done := make(chan struct{})
 	w.mu.Lock()
-	if w.active[sid] {
+	if w.active[sid] != nil {
 		w.mu.Unlock()
+		bcancel()
 		w.lg.Printf("webterm: 多重 wake 無視 sid=%q（bridge 稼働中）", sid)
 		return
 	}
-	w.active[sid] = true
+	w.active[sid] = &bridgeRun{cancel: bcancel, done: done}
 	w.mu.Unlock()
 	defer func() {
 		w.mu.Lock()
 		delete(w.active, sid)
 		w.mu.Unlock()
+		close(done)
 	}()
 
 	// ③公開 /session 認可のための短命 source グラント（SA を持つ正規 agent
 	// だけが書ける＝relay が CheckRelayGrant で検証）。cm parity: エラーは
 	// 無視して dial へ進む（grant 不備なら relay が 403 で落とす＝fail-closed
 	// は relay 側が担保）。
-	_ = w.st.PutRelayGrant(ctx, sid, "source", sourceGrantTTL)
+	_ = w.st.PutRelayGrant(bctx, sid, "source", sourceGrantTTL)
 
 	// ④データ線: relay へ source として WSS dial → bridge へ渡す。
 	// dial 契約は cm relay.Dial の byte 同一コピー（relayclient.go）:
 	// URL = baseURL + "/session?sid=" + sid + "&role=source"（sid は
 	// エスケープしない・DialOptions{} 既定）→ NetConn(MessageBinary)。
 	// conn の寿命は ctx に束縛（cancel＝SIGTERM で read/write が死ぬ）。
-	conn, err := relayclient.Dial(ctx, w.relayURL, sid, "source")
+	conn, err := relayclient.Dial(bctx, w.relayURL, sid, "source")
 	if err != nil {
 		w.lg.Printf("webterm: relay dial 失敗 sid=%q: %v", sid, err)
 		return
@@ -154,11 +185,49 @@ func (w *webTerm) handleWake(ctx context.Context, sid string) {
 	b.Logf = func(format string, args ...any) {
 		w.lg.Printf("webterm: bridge sid=%q: "+format, append([]any{sid}, args...)...)
 	}
-	if err := b.Run(ctx); err != nil && ctx.Err() == nil {
+	// bctx（bridge 専用）で回す: SIGTERM（親 cancel 連鎖）でも respawn
+	// （bcancel 単独）でも必ず戻る。respawn 由来の切断はエラー扱いしない。
+	if err := b.Run(bctx); err != nil && bctx.Err() == nil {
 		w.lg.Printf("webterm: bridge 終了 sid=%q: %v", sid, err)
 		return
 	}
 	w.lg.Printf("webterm: bridge 終了 sid=%q（正常）", sid)
+}
+
+// respawn は restart-proxy 遠隔命令の実体: 当該 sid の**稼働中** bridge を
+// 停止（observe subprocess も掃除される）し、同 sid で新しい bridge を
+// 張り直す（cm の proxy --resume 再起動に対応する drover 版）。
+//
+//   - 稼働 bridge が無い sid は error（呼び手 CommandRunner が status=error
+//     で Ack＝pending 滞留させない。ヒューリスティックな探索はしない＝
+//     active map の exact-match のみ）
+//   - 新 bridge は relay へ source として dial し「初回 RESIZE magic 待ち」
+//     から始まる。viewer 側は relay の同 sid takeover semantics で再接続
+//     すれば新 full frame を受ける（誰も来なければ quiescence が畳む）
+func (w *webTerm) respawn(sid string) error {
+	w.mu.Lock()
+	h := w.active[sid]
+	ctx := w.ctx
+	w.mu.Unlock()
+	if h == nil {
+		return fmt.Errorf("sid %q の稼働 bridge が無い（Web ターミナル未接続の sid は respawn 不能）", sid)
+	}
+	w.lg.Printf("webterm: respawn 要求 sid=%q（旧 bridge を停止→張り直し）", sid)
+	h.cancel()
+	select {
+	case <-h.done:
+	case <-time.After(respawnStopWait):
+		return fmt.Errorf("sid %q の旧 bridge が %s 以内に停止しない（respawn 中断）", sid, respawnStopWait)
+	}
+	if ctx == nil || ctx.Err() != nil {
+		return fmt.Errorf("agent 停止中のため respawn しない")
+	}
+	w.wg.Add(1)
+	go func() {
+		defer w.wg.Done()
+		w.handleWake(ctx, sid)
+	}()
+	return nil
 }
 
 // drain は SIGTERM 後の graceful 猶予: ctx cancel で WatchWake と全 bridge が

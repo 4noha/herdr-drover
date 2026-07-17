@@ -62,8 +62,10 @@ func TestDispatchUnknown(t *testing.T) {
 }
 
 // 未実装コマンドは黙って no-op にせず明示エラー（任務要件）。
+// install/uninstall は launchd フェーズで実装済み＝このリストから卒業
+// （実装テストは install_test.go）。
 func TestDispatchUnimplemented(t *testing.T) {
-	for _, cmd := range []string{"attach", "enroll", "install"} {
+	for _, cmd := range []string{"attach"} {
 		code, _, errb := runCapture(t, cmd)
 		if code != 2 {
 			t.Fatalf("%s: exit=%d want 2", cmd, code)
@@ -87,7 +89,10 @@ func TestDispatchRejectsExtraArgs(t *testing.T) {
 // ============ 設定解決 ============
 
 // clearDroverEnv は本テストが読む環境変数を全て空にする（t.Setenv の
-// 空文字は「未設定」と同義に扱う実装）。
+// 空文字は「未設定」と同義に扱う実装）。HOME も一時 dir へ隔離する:
+// resolveConfig が ~/.herdr-drover/config.json（enroll の永続設定）を
+// 読むようになったため、実 HOME の設定ファイルでテスト結果が変わらない
+// ようにする（hermetic）。
 func clearDroverEnv(t *testing.T) {
 	t.Helper()
 	for _, k := range []string{
@@ -97,6 +102,7 @@ func clearDroverEnv(t *testing.T) {
 	} {
 		t.Setenv(k, "")
 	}
+	t.Setenv("HOME", t.TempDir())
 }
 
 func TestResolveConfigDefaults(t *testing.T) {

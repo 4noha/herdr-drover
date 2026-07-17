@@ -106,6 +106,16 @@ internal/selfupdate/          cm からコピー（stdlib のみ）
 test/fixtures/                実 herdr の ndjson/フレーム録画（実行時出力のみ＝AGPL 衛生）
 ```
 
+設定ファイルは 2 系統あり、**install は両方を読む**（優先順:
+env > `~/.herdr-drover/config` > `~/.herdr-drover/config.json`）:
+
+- `config.json`（JSON・4 キー exact-match）: enroll が書く永続設定。
+  agent/status の resolveConfig と install の双方が読む＝正規動線
+  enroll→install が env なしで成立する（片方しか読まないと install だけが
+  GCP_PROJECT 未解決で拒否する実バグになる・修正済み）
+- `config`（KEY=VALUE・手動）: install 専用の解決元（agent は直接読まない
+  ＝launchd plist へ焼かれた env として届く）
+
 ## 実装フェーズ（各ゲートは実環境・合成不可）
 
 1. **一覧同期**: 実 herdr＋実 Firestore＋実 Chrome で herdr PC カード表示・

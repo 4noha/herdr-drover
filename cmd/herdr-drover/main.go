@@ -7,6 +7,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -25,9 +26,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	cmd, rest := args[0], args[1:]
 	switch cmd {
-	case "agent", "status", "nudge":
-		// 現サブコマンドは全て引数なし。黙って無視すると typo（例:
-		// `nudge now`）が成功に見えるので明示エラーにする。
+	case "agent", "status", "nudge", "update":
+		// これらは引数なし。黙って無視すると typo（例: `nudge now`）が
+		// 成功に見えるので明示エラーにする（enroll は引数を取る）。
 		if len(rest) != 0 {
 			fmt.Fprintf(stderr, "herdr-drover %s: 余分な引数 %v（引数は取らない）\n", cmd, rest)
 			return 2
@@ -58,10 +59,41 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "help", "-h", "--help":
 		usage(stdout)
 		return 0
-	case "attach", "enroll", "install":
+	case "install":
+		// install はフラグ（--dry-run/--no-launchctl）を取るので rest を渡す
+		//（install.go が flag.FlagSet で解析）。
+		if err := cmdInstall(rest, stdout, stderr); err != nil {
+			fmt.Fprintf(stderr, "herdr-drover install: %v\n", err)
+			return 1
+		}
+		return 0
+	case "uninstall":
+		if err := cmdUninstall(rest, stdout, stderr); err != nil {
+			fmt.Fprintf(stderr, "herdr-drover uninstall: %v\n", err)
+			return 1
+		}
+		return 0
+	case "enroll":
+		// enroll は位置引数＋--relay を取る（rest を渡す）。使い方エラーは
+		// errUsage sentinel で exit 2 に振り分ける。
+		if err := cmdEnroll(rest, stdout); err != nil {
+			fmt.Fprintf(stderr, "herdr-drover enroll: %v\n", err)
+			if errors.Is(err, errUsage) {
+				return 2
+			}
+			return 1
+		}
+		return 0
+	case "update":
+		if err := cmdUpdate(stdout); err != nil {
+			fmt.Fprintf(stderr, "herdr-drover update: %v\n", err)
+			return 1
+		}
+		return 0
+	case "attach":
 		// DESIGN.md のリポジトリ構成に載る後続フェーズのコマンド。存在は
 		// 予約しつつ、未実装は明示エラーで返す（黙って no-op にしない）。
-		fmt.Fprintf(stderr, "herdr-drover %s: 未実装（DESIGN.md の後続フェーズ。現在使えるのは agent/status/nudge/version/help）\n", cmd)
+		fmt.Fprintf(stderr, "herdr-drover %s: 未実装（DESIGN.md の後続フェーズ。現在使えるのは agent/status/nudge/enroll/update/install/uninstall/version/help）\n", cmd)
 		return 2
 	default:
 		fmt.Fprintf(stderr, "herdr-drover: 未知のサブコマンド %q\n\n", cmd)
@@ -77,10 +109,16 @@ func usage(w io.Writer) {
   herdr-drover agent      常駐 daemon（launchd から起動。周期 tick＋SIGUSR1 で即時 re-scan）
   herdr-drover status     daemon 生存・herdr 接続・設定の充足を表示
   herdr-drover nudge      稼働中 daemon へ SIGUSR1（herdr plugin events からの即時 re-scan）
+  herdr-drover install    launchd 常駐を登録（--dry-run / --no-launchctl。ProcessType は焼かない）
+  herdr-drover uninstall  launchd 常駐を解除（plist・稼働バイナリ除去。設定とログは残す）
+  herdr-drover enroll <code> --relay wss://<host>
+                          Web「＋ 端末を追加」のコードで SA 鍵と設定を自動配置
+                          （表示コマンドは claude-master 用＝code と --relay を読み替える）
+  herdr-drover update     selfupdate（GitHub Releases・sha256 検証・原子置換）
   herdr-drover version    バージョン表示
   herdr-drover help       このヘルプ
 
-環境変数（agent/status が参照）:
+環境変数（agent/status が参照。enroll 後は ~/.herdr-drover/config.json でも可＝env が優先）:
   GCP_PROJECT                     Firestore の GCP プロジェクト（agent 必須）
   CLOUD_RELAY_URL                 Cloud Run relay の WSS URL（Phase 2 以降で必要）
   GOOGLE_APPLICATION_CREDENTIALS  SA 鍵パス（未設定なら ADC / FIRESTORE_EMULATOR_HOST）
@@ -89,6 +127,6 @@ func usage(w io.Writer) {
   DROVER_TICK                     producer 周期（Go duration 形式。既定 5s）
   DROVER_IDLE                     Web ターミナル quiescence 自切断の無通信時間（既定 30s）
 
-未実装（後続フェーズ）: attach / enroll / install
+未実装（後続フェーズ）: attach
 `, version)
 }

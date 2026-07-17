@@ -1,8 +1,12 @@
 package main
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -26,8 +30,14 @@ type Config struct {
 	Idle        time.Duration // DROVER_IDLE（Web ターミナル quiescence 自切断。0=bridge 既定 30s）
 }
 
-// resolveConfig は環境変数から Config を解決する。エラー時も判明した分は
-// 埋めた Config を返す（status が「壊れた設定でも残りを表示」できるように）。
+// resolveConfig は Config を解決する。優先順位はキー単位で
+// **env > 設定ファイル（~/.herdr-drover/config.json）> 既定**。
+// 設定ファイルは enroll が書く永続設定（launchd plist の
+// EnvironmentVariables 手転記より単純な経路）で、対象キーは
+// gcp_project / cloud_relay_url / google_application_credentials / pc_id
+// のみ（DROVER_TICK 等の運用 knob は従来どおり env 専用）。
+// エラー時も判明した分は埋めた Config を返す（status が「壊れた設定でも
+// 残りを表示」できるように）。
 func resolveConfig() (Config, error) {
 	cfg := Config{
 		Project:     os.Getenv("GCP_PROJECT"),
@@ -36,6 +46,28 @@ func resolveConfig() (Config, error) {
 		PCID:        os.Getenv("PC_ID"),
 		SocketPath:  herdrapi.ResolveSocketPath(""),
 		Tick:        defaultTick,
+	}
+	// 設定ファイル: env に無いキーだけ補完（env > file）。壊れたファイルは
+	// エラーとして返すが解決は続行する（沈黙で無視すると enroll 済のはずが
+	// 未設定で動く事故になる。契約: 判明分は埋めて返す）。
+	var fileErr error
+	if path, perr := configFilePath(); perr == nil {
+		fc, ferr := readFileConfig(path)
+		if ferr != nil {
+			fileErr = ferr
+		}
+		if cfg.Project == "" {
+			cfg.Project = fc.GCPProject
+		}
+		if cfg.RelayURL == "" {
+			cfg.RelayURL = fc.CloudRelayURL
+		}
+		if cfg.Credentials == "" {
+			cfg.Credentials = fc.GoogleApplicationCredentials
+		}
+		if cfg.PCID == "" {
+			cfg.PCID = fc.PCID
+		}
 	}
 	if cfg.PCID == "" {
 		host, err := os.Hostname()
@@ -69,7 +101,75 @@ func resolveConfig() (Config, error) {
 		}
 		cfg.Idle = d
 	}
-	return cfg, nil
+	return cfg, fileErr
+}
+
+// configFilePath は ~/.herdr-drover/config.json（enroll が書く永続設定）。
+func configFilePath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("home ディレクトリ不明（設定ファイル置き場を決められない）: %w", err)
+	}
+	return filepath.Join(home, ".herdr-drover", "config.json"), nil
+}
+
+// fileConfig は設定ファイルのスキーマ（キー名は env 名の小文字 snake_case
+// ＝対応が一目で分かる exact-match。未知キーは無視される）。
+type fileConfig struct {
+	GCPProject                   string `json:"gcp_project,omitempty"`
+	CloudRelayURL                string `json:"cloud_relay_url,omitempty"`
+	GoogleApplicationCredentials string `json:"google_application_credentials,omitempty"`
+	PCID                         string `json:"pc_id,omitempty"`
+}
+
+// readFileConfig は設定ファイルを読む。不在はゼロ値＋nil（enroll 前の
+// 素の env 運用と完全同挙動＝後方互換）。壊れた JSON はエラー。
+func readFileConfig(path string) (fileConfig, error) {
+	b, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return fileConfig{}, nil
+	}
+	if err != nil {
+		return fileConfig{}, err
+	}
+	var fc fileConfig
+	if err := json.Unmarshal(b, &fc); err != nil {
+		return fileConfig{}, fmt.Errorf("設定ファイル %s が壊れている（JSON 解析失敗）: %w", path, err)
+	}
+	return fc, nil
+}
+
+// writeFileConfig は設定ファイルを tmp→rename で原子的に書く（cm
+// WriteStatus 教訓: truncate 直書きは 0B の瞬間が実観測される）。0600＝
+// SA 鍵パス等を含むため所有者のみ。
+func writeFileConfig(path string, fc fileConfig) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	b, err := json.MarshalIndent(fc, "", "  ")
+	if err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(dir, filepath.Base(path)+".*.tmp") // 0600 で作られる
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	if _, err := f.Write(append(b, '\n')); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // defaultPCID は hostname から既定 pc id を作る。

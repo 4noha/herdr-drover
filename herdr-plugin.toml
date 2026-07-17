@@ -5,10 +5,26 @@ name = "herdr-drover"
 version = "0.1.0"
 min_herdr_version = "0.7.4"
 description = "Cloud session sync: view and control your herdr sessions from any PC, browser, or phone"
+# platforms 省略は link 時に警告『manifest does not declare platforms』（herdr 0.7.4
+# 実測）＝明示する。Windows は out-of-scope（DESIGN: direct attach 非対応）。
+# linux は agent/status/nudge が動く（常駐化は launchd 相当を手動整備）。
+platforms = ["macos", "linux"]
 
+# [[build]] は GitHub `herdr plugin install` 時のみ実行される（`plugin link` では
+# 走らない・実測）。cwd=checkout の manifest_root・HERDR_* runtime env は scrub
+# 済み（素のユーザ環境）・失敗すると install 中止。
+# ⚠ build が herdr-plugin.toml を書き換えると preview 不一致で install 中止になる
+# ため、build.sh は bin/ 以外に書かない。
+[[build]]
+command = ["sh", "scripts/build.sh"]
+
+# install は launchd 登録＝macOS のみ（項目 platforms がトップレベルを上書き）。
+# 常駐本体は launchd: herdr プラグイン機構は常駐不可（hook/action=一発 spawn・
+# stdout/stderr 64KB cap・supervision 無し＝実測）。
 [[actions]]
 id = "install"
 title = "Install herdr-drover (daemon + launchd)"
+platforms = ["macos"]
 command = ["sh", "scripts/install-action.sh"]
 
 [[actions]]
@@ -16,8 +32,17 @@ id = "status"
 title = "Show drover daemon / cloud sync status"
 command = ["bin/herdr-drover", "status"]
 
-# events は常駐不可（hook=一発 spawn・64KB cap）のため nudge 専用:
-# 発火→ daemon の即時 re-scan を促すだけ。常駐本体は launchd。
+[[actions]]
+id = "nudge"
+title = "Nudge drover daemon (immediate re-scan)"
+command = ["bin/herdr-drover", "nudge"]
+
+# events は常駐不可のため nudge（SIGUSR1 → daemon 即時 re-scan）専用。
+# 発火は合図でしかなく差分の権威ではない（周期 poll backstop が daemon 側に常設）。
+# 網羅の根拠（herdr 0.7.4 実測）:
+#   - pane.created は workspace create の root pane でも発火する（作成系はこれで足りる）
+#   - pane.closed は `pane close` では発火するが **`workspace close` では発火しない**
+#     （実測の穴）＝ workspace.closed / tab.closed / pane.exited も購読して消滅を取りこぼさない
 [[events]]
 on = "pane.created"
 command = ["bin/herdr-drover", "nudge"]
@@ -27,5 +52,17 @@ on = "pane.closed"
 command = ["bin/herdr-drover", "nudge"]
 
 [[events]]
+on = "pane.exited"
+command = ["bin/herdr-drover", "nudge"]
+
+[[events]]
 on = "pane.agent_status_changed"
+command = ["bin/herdr-drover", "nudge"]
+
+[[events]]
+on = "tab.closed"
+command = ["bin/herdr-drover", "nudge"]
+
+[[events]]
+on = "workspace.closed"
 command = ["bin/herdr-drover", "nudge"]
