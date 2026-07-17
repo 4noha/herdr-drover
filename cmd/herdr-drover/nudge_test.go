@@ -125,7 +125,7 @@ func TestAcquirePidfileSingleWinner(t *testing.T) {
 // TestWritePidfileConcurrentWriters: writer が並行しても writePidfile は
 // 全員成功し、最終内容はいずれかの完全な pid になる（tmp 名の衝突なし）。
 // 旧実装（固定 path+".tmp"）は tmp を共有して rename が ENOENT で失敗した
-//（実バイナリ 8 並行起動 ×10 ラウンドの実測で全ラウンド発生＝レビュー指摘。
+// （実バイナリ 8 並行起動 ×10 ラウンドの実測で全ラウンド発生＝レビュー指摘。
 // 本テストも旧実装で FAIL することを確認済み）。
 func TestWritePidfileConcurrentWriters(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "agent.pid")

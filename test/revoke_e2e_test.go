@@ -11,7 +11,6 @@ package e2e
 // 本テストは旧コード（失効無検査）で FAIL することを確認済み（鉄則2）。
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -87,7 +86,10 @@ func TestE2ERevokedAgentDormant(t *testing.T) {
 	}
 	agent := exec.Command(bin, "agent")
 	agent.Env = env
-	var stderr bytes.Buffer
+	// agent 稼働中に dormant ログを String() で検査する（131 行目付近）ため、
+	// exec の pipe pump goroutine と競合しない syncBuf が必須（素の
+	// bytes.Buffer は go test -race が実 FAIL する・検出済み）。
+	var stderr syncBuf
 	agent.Stderr = &stderr
 	if err := agent.Start(); err != nil {
 		t.Fatalf("agent start: %v", err)

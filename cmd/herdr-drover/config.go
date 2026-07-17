@@ -23,6 +23,7 @@ type Config struct {
 	PCID        string        // PC_ID（既定 <hostname 短縮小文字>-herdr）
 	SocketPath  string        // HERDR_SOCKET_PATH（解決は herdrapi.ResolveSocketPath と同一規則）
 	Tick        time.Duration // DROVER_TICK（既定 5s）
+	Idle        time.Duration // DROVER_IDLE（Web ターミナル quiescence 自切断。0=bridge 既定 30s）
 }
 
 // resolveConfig は環境変数から Config を解決する。エラー時も判明した分は
@@ -52,6 +53,21 @@ func resolveConfig() (Config, error) {
 			return cfg, fmt.Errorf("DROVER_TICK は正の期間であること: %q", v)
 		}
 		cfg.Tick = d
+	}
+	// DROVER_IDLE は Web ターミナルの quiescence 自切断（無通信でデータ線を
+	// 自分から閉じる＝near-$0 の要）。未設定=0 は bridge 既定 30s（cm 本番
+	// IdleClose と同値）。負値（quiescence 無効）は env からは許さない:
+	// 常時接続化は near-$0 設計を壊すため、無効化はテストが bridge.Idle を
+	// 直接触る時だけの内部 knob とする。
+	if v := os.Getenv("DROVER_IDLE"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return cfg, fmt.Errorf("DROVER_IDLE が不正（Go duration 形式。例 30s）: %q: %w", v, err)
+		}
+		if d <= 0 {
+			return cfg, fmt.Errorf("DROVER_IDLE は正の期間であること（quiescence 無効化は不可＝near-$0 設計）: %q", v)
+		}
+		cfg.Idle = d
 	}
 	return cfg, nil
 }

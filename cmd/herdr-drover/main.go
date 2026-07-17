@@ -87,6 +87,7 @@ func usage(w io.Writer) {
   PC_ID                           端末 id（既定 <hostname 短縮小文字>-herdr。cm agent と同一 id 禁止）
   HERDR_SOCKET_PATH               herdr ndjson API socket（既定 ~/.config/herdr/herdr.sock）
   DROVER_TICK                     producer 周期（Go duration 形式。既定 5s）
+  DROVER_IDLE                     Web ターミナル quiescence 自切断の無通信時間（既定 30s）
 
 未実装（後続フェーズ）: attach / enroll / install
 `, version)

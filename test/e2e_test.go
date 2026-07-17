@@ -16,7 +16,6 @@
 package e2e
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"net"
@@ -283,7 +282,10 @@ func TestE2EAgentLifecycle(t *testing.T) {
 	}
 	agent := exec.Command(bin, "agent")
 	agent.Env = env
-	var stderr, stdout bytes.Buffer
+	// 正常経路は Wait 完了後にのみ読むが、SIGTERM timeout の失敗経路
+	// （376 行目付近の Fatalf）は稼働中に String() を評価する＝syncBuf に
+	// 統一（revoke_e2e_test.go の -race 実検出と同根）。
+	var stderr, stdout syncBuf
 	agent.Stderr = &stderr
 	agent.Stdout = &stdout
 	if err := agent.Start(); err != nil {

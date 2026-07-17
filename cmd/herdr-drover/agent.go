@@ -113,6 +113,17 @@ func cmdAgent(stdout, stderr io.Writer) error {
 	}
 	lg.Printf("agent 開始: pc=%s project=%s tick=%s version=%s", cfg.PCID, cfg.Project, cfg.Tick, version)
 
+	// Phase 2 Web ターミナル: CLOUD_RELAY_URL 設定時のみ制御線（WatchWake）
+	// を起動する（未設定なら Phase 1 一覧同期のみ＝warnConfig が案内済み）。
+	// SIGTERM は ctx cancel → WatchWake/全 bridge 停止 → 下の drain で
+	// bounded 待ち（配線と規律は webterm.go）。
+	var wt *webTerm
+	if cfg.RelayURL != "" {
+		wt = newWebTerm(cfg.RelayURL, cfg.Idle, st, hcli, lg)
+		wt.start(ctx)
+		lg.Printf("webterm: WatchWake 起動（relay=%s）", cfg.RelayURL)
+	}
+
 	// producer 契約（internal/session と統合済み。シグネチャ不整合は
 	// コンパイルで露見する方針＝ここを黙ってスタブで満たさない。実バイナリ
 	// の一気通貫〔起動→pane 作成→doc 出現→pane 終了→doc 消滅→SIGTERM
@@ -153,6 +164,9 @@ func cmdAgent(stdout, stderr io.Writer) error {
 	}
 
 	runAgentLoop(ctx, cfg.Tick, nudge, tickFn, lg)
+	if wt != nil {
+		wt.drain(3 * time.Second)
+	}
 	lg.Printf("agent 終了（graceful）")
 	return nil
 }

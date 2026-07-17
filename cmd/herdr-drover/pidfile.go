@@ -62,9 +62,9 @@ func writePidfile(path string, pid int) error {
 //
 // 旧実装の readPidfile→pidAlive→writePidfile は check-then-write の TOCTOU
 // で、同時起動（launchd KeepAlive と手動起動の競合等）に対しゲートが破れる
-//（実バイナリ 8 並行起動 ×10 ラウンドの実測で 9 ラウンドが多重通過＝
+// （実バイナリ 8 並行起動 ×10 ラウンドの実測で 9 ラウンドが多重通過＝
 // レビュー指摘で確定）。二重 agent は producer の in-memory 差分検出を壊す
-//（agent.go の不変条件）ため、判定は flock(LOCK_EX|LOCK_NB) の成否のみに
+// （agent.go の不変条件）ため、判定は flock(LOCK_EX|LOCK_NB) の成否のみに
 // 一本化する:
 //   - flock はカーネルがプロセス消滅（SIGKILL 含む）で自動解放する＝stale
 //     lock が存在しない。O_CREATE|O_EXCL 方式に必要な「stale を unlink して
@@ -73,6 +73,7 @@ func writePidfile(path string, pid int) error {
 //   - pidfile 本体は従来どおり nudge/status の読み物として tmp→rename で
 //     書く（ロックとは分離。SIGKILL 後に stale な pid が残るのは従来同様で、
 //     読む側の pidAlive 検査が引き続き担保する）。
+//
 // 回帰: TestAcquirePidfileSingleWinner（本パッケージ）＋
 // TestE2EConcurrentStartSingleWinner（test/・実バイナリ 8 並行起動）。
 func acquirePidfile(path string, pid int) (*os.File, error) {

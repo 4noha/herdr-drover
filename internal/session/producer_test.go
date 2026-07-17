@@ -450,7 +450,7 @@ func TestTickScanErrorKeepsCloudState(t *testing.T) {
 // pane 10 個）では、herdr は session.json の復元が完了するまで API socket
 // への dial 自体を受け付けず、観測は常に「dial 失敗 → 完全な list」の直接
 // 遷移だった＝空/部分 list の窓は存在しない。よって producer 側の遅延削除
-//（1 tick confirm）は不要と裁定し、代わりに本テストがその前提を将来の
+// （1 tick confirm）は不要と裁定し、代わりに本テストがその前提を将来の
 // herdr version 変化に対して見張る（窓が生まれれば delCalls>0 で FAIL）。
 func TestTickServerRestartNoFlap(t *testing.T) {
 	s, hc := startHerdr(t)

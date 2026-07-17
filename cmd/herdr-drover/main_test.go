@@ -92,7 +92,8 @@ func clearDroverEnv(t *testing.T) {
 	t.Helper()
 	for _, k := range []string{
 		"GCP_PROJECT", "CLOUD_RELAY_URL", "GOOGLE_APPLICATION_CREDENTIALS",
-		"PC_ID", "HERDR_SOCKET_PATH", "DROVER_TICK", "FIRESTORE_EMULATOR_HOST",
+		"PC_ID", "HERDR_SOCKET_PATH", "DROVER_TICK", "DROVER_IDLE",
+		"FIRESTORE_EMULATOR_HOST",
 	} {
 		t.Setenv(k, "")
 	}
@@ -106,6 +107,11 @@ func TestResolveConfigDefaults(t *testing.T) {
 	}
 	if cfg.Tick != defaultTick {
 		t.Fatalf("tick 既定: got %s want %s", cfg.Tick, defaultTick)
+	}
+	if cfg.Idle != 0 {
+		// 0=「bridge 既定 30s に委譲」（webterm.go が b.Idle へそのまま渡し、
+		// bridge.Run が 0 を DefaultIdle に解決する契約）。
+		t.Fatalf("idle 既定: got %s want 0（bridge 既定へ委譲）", cfg.Idle)
 	}
 	if !strings.HasSuffix(cfg.PCID, "-herdr") {
 		t.Fatalf("PC_ID 既定に -herdr サフィックスが無い: %q", cfg.PCID)
@@ -126,13 +132,15 @@ func TestResolveConfigEnvOverrides(t *testing.T) {
 	t.Setenv("PC_ID", "custom-herdr")
 	t.Setenv("HERDR_SOCKET_PATH", "/tmp/hx.sock")
 	t.Setenv("DROVER_TICK", "750ms")
+	t.Setenv("DROVER_IDLE", "3s")
 	cfg, err := resolveConfig()
 	if err != nil {
 		t.Fatalf("resolveConfig: %v", err)
 	}
 	if cfg.Project != "proj-x" || cfg.RelayURL != "wss://relay.example/session" ||
 		cfg.Credentials != "/tmp/sa.json" || cfg.PCID != "custom-herdr" ||
-		cfg.SocketPath != "/tmp/hx.sock" || cfg.Tick != 750*time.Millisecond {
+		cfg.SocketPath != "/tmp/hx.sock" || cfg.Tick != 750*time.Millisecond ||
+		cfg.Idle != 3*time.Second {
 		t.Fatalf("env 上書きが反映されていない: %+v", cfg)
 	}
 }
@@ -143,6 +151,18 @@ func TestResolveConfigBadTick(t *testing.T) {
 		t.Setenv("DROVER_TICK", bad)
 		if _, err := resolveConfig(); err == nil {
 			t.Fatalf("DROVER_TICK=%q でエラーにならない", bad)
+		}
+	}
+}
+
+// DROVER_IDLE の負値/0 は quiescence 無効化＝near-$0 設計破壊なので拒否
+// （config.go のコメント参照。無効化はテスト専用の bridge.Idle 直接指定のみ）。
+func TestResolveConfigBadIdle(t *testing.T) {
+	clearDroverEnv(t)
+	for _, bad := range []string{"abc", "-1s", "0s"} {
+		t.Setenv("DROVER_IDLE", bad)
+		if _, err := resolveConfig(); err == nil {
+			t.Fatalf("DROVER_IDLE=%q でエラーにならない", bad)
 		}
 	}
 }
