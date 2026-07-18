@@ -413,7 +413,7 @@ func (b *Bridge) readConn(resizeCh chan winSize, connDone chan<- error) {
 					if len(carry) > 0 {
 						data = append(carry, data...)
 					}
-					data, carry = splitIncompleteRune(data)
+					data, carry = SplitIncompleteRune(data)
 					if len(data) == 0 {
 						continue // 断片のみ＝次 read で再結合
 					}

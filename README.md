@@ -65,9 +65,33 @@
   （`echo prompt | claude -p …` の pipe stdin/stdout 契約を透過）
 - 引数なし×非 TTY（CI/パイプ）: attach せず pane_id/terminal_id を表示して
   exit 0（自動化スクリプトから呼ばれても dup セッションを作らない）
-- attach は `herdr terminal attach` へのプロセス置換（detach は herdr 標準の
-  Ctrl+B q）。実 claude バイナリは `exec.LookPath("claude")` で絶対パス解決
-  （shell alias に非依存）
+- 接続は**自動 min ローカルビューア**（`internal` 非依存の
+  `cmd/herdr-drover/localview.go`）。単一 pane をメインアプリ（herdr TUI）と
+  起動元端末の両方で下部まで見せるには、pane grid を**両者の小さい方**に
+  合わせるしかない（単一 PTY は片方にしか厳密一致できない＝大きい側は余白）。
+  herdr 0.7.4 の実挙動（ソース確定）に基づき自動で切り替える:
+  - **起動元 ≥ grid**: `herdr terminal session observe`（`TerminalObserve`＝
+    **ロック非取得**・観測側サイズへ仮想描画・pane 実サイズを変えない）。
+    リサイズ権限をメインアプリに残す（メイン優先）。起動元が大きければ余白。
+  - **起動元 < grid**: `herdr terminal session control`（`ControlTerminal`＝
+    pane を起動元実寸へ resize＋`direct_attach_resize_locks` へ登録）で pane を
+    縮小＋ロック＝**起動元で下部入力まで見える**。メインはその pane を余白付きで
+    表示（ロックが有益な「メインが大きい側」だけロックを張る）。
+  - 旧実装の常時 `herdr terminal attach` は起動元サイズに pane を固定し、逆に
+    メインが小さいと下部が切れた（herdr 0.7.4 `src/ui/panes.rs`／
+    `server/headless.rs` で確定・ユーザー実測で裏取り）。常時 observe だと起動元が
+    小さいとき下部がクリップされた（実測）。自動 min はこの両方を解消する。
+
+  grid 行は `pane.get` の `scroll.viewport_rows`（非ロック時に真のメインサイズ）。
+  桁は API 非公開のため control には起動元端末の実桁を渡す（外部が両次元で
+  小さい一般ケースは完全 fit）。キー入力は両モードとも ndjson API の
+  `pane.send_text`（byte-perfect）で注入。detach は Ctrl+B q（末尾 Ctrl-B は次
+  入力へ保留・Ctrl-B Ctrl-B でリテラル送出）。SIGWINCH で mode を再評価し
+  respawn（observe 中は grid 行も再取得＝途中でメインをリサイズした場合の追随）。
+  実 claude バイナリは `exec.LookPath("claude")` で絶対パス解決（shell alias 非依存）。
+  ⚠残課題（稀）: control ロック中はメインの真サイズを読めず、ロック後にメインを
+  起動元より小さく縮めるとメイン側が下部クリップし得る（detach で解消）。
+  ⚠非 UTF-8 バイト（キーボードからは実質発生しない）は control fallback を使わず破棄
 
 ```sh
 alias claude='~/.herdr-drover/bin/herdr-drover claude'

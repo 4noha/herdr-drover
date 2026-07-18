@@ -3,6 +3,42 @@
 **開発の鉄則は DESIGN.md 末尾**（実テスト担保・旧コード FAIL 確認・
 exact-match・AGPL 衛生・silent 変更禁止）。
 
+## ✅ 完了: 自動 min ローカルビューア（2026-07-18・デプロイ済・未 commit）
+
+「起動元端末とメインアプリで縦幅が違うと片方の下部（claude 入力）が見えない」
+問題の根治。単一 pane を2ビューアで同時に下部まで見せるには pane grid を
+両者の min にするしかない（単一 PTY の構造制約・大きい側は余白）。
+
+**根因（コード＋実測二重確認）**: ①旧 `herdr terminal attach` は pane を
+`direct_attach_resize_locks` に固定＝メイン < 起動元だとメイン下部が切れた。
+②その修正で常時 `observe` にしたら、観測 < grid のとき herdr は grid 上端から
+観測行ぶんを描く**上寄せクリップ**（`render` の `while y<area.height &&
+rows.next()`・実 pane rows=20 observe で入力ボックスが範囲外を実測）で、今度は
+起動元 < メインのとき起動元下部が切れた。scrollback は履歴=上方向のみで到達不能。
+
+**修正（`cmd/herdr-drover/localview.go` 自動 min）**: 起動時に `pane.get` の
+`scroll.viewport_rows`（=grid 行）を threshold に取り、`pickStreamMode`:
+- `localRows >= gridRows` → `terminal session observe`（ロック非取得＝メイン優先・
+  起動元は余白）。※現行挙動を保持。
+- `localRows <  gridRows` → 隠し CLI `terminal session control --cols C --rows R`
+  （ControlTerminal＝attach と同じロック経路）で pane を起動元実寸へ縮小＋ロック
+  ＝起動元で下部まで見える／メインは pane を余白付き表示。**ロックが有益な
+  「メインが大きい側」だけロックを張る**。control は observe と同一 terminal.frame
+  ＝表示コード共通。stdin EOF で自動 Detach するので stdin パイプを開いたまま保持。
+  入力は両モードとも `pane.send_text`（ロック非依存）。SIGWINCH で mode 再評価
+  ＋observe 中は grid 行を再取得（メインを途中リサイズした場合の threshold 追随）。
+
+全10 pkg 緑・実 herdr 隔離サーバで **control が pane grid を local へ実縮小＋
+ロック**（`TestLocalViewControlShrinksGridWhenLocalSmaller`）／observe が
+viewport_rows 不変（`TestLocalViewObserveFramesAndLockFree`）／`pickStreamMode`
+純関数を機械確認。**残**: ①実 raw-mode TTY の full e2e はユーザー実端末で確認
+（pty ハーネス未自動化）②ユーザー確認後に git commit（デプロイ済 010b636-dirty）
+③既知の残課題（ユーザー承認済み「稀な動的リサイズ」）: control ロック中は
+pane.get が自分のロックサイズを返しメイン真サイズを読めない＝ロック後にメインを
+起動元より小さく縮めるとメイン下部が切れ得る（detach で解消）／幅方向 min は
+grid 桁が API 非公開のため未対応（control は起動元実桁を渡す＝混在次元のみ余白/
+クリップ）。詳細は memory `herdr-drover-project.md`。
+
 ## ✅ 完了: Tab 単位着地ルール（d63aca0・デプロイ済み 2026-07-18 10:21）
 
 下記 0-1 節の実装は完遂・全10 pkg 緑・レビュー serious 4 件修正済み・

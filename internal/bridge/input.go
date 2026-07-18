@@ -53,7 +53,7 @@ func utf8LeadLen(b byte) int {
 	}
 }
 
-// splitIncompleteRune は data 末尾が「不完全な UTF-8 rune の先頭断片」
+// SplitIncompleteRune は data 末尾が「不完全な UTF-8 rune の先頭断片」
 // （先頭バイト＋継続バイト 0-2 個で、宣言長に足りない）なら、その断片を
 // tail として分離する。cmwire の末尾孤立 0xff 繰越しと同じ規律の UTF-8 版:
 // relay は 32KB chunk で中継するため、CJK/絵文字ペーストは read 境界が
@@ -64,7 +64,10 @@ func utf8LeadLen(b byte) int {
 // 真に不正な列（不正先頭 0xFE/0xFF・孤立継続バイト・断片後の非継続バイト）
 // は繰り越さず即返す＝fallback（control bytes）行きの判定は utf8.Valid が
 // 従来どおり行う。
-func splitIncompleteRune(data []byte) (head, tail []byte) {
+// cmd/herdr-drover のロックフリー・ローカルビューア（localview.go）も同じ
+// 繰越し規律で stdin→pane.send_text を守るため export する（重複実装を避け、
+// bridge と localview で rune 割れ対処が乖離しないようにする）。
+func SplitIncompleteRune(data []byte) (head, tail []byte) {
 	n := len(data)
 	// 不完全断片は最大 3 バイト（utf8.UTFMax-1）＝末尾 3 バイトだけ見れば良い。
 	for i := n - 1; i >= 0 && i >= n-3; i-- {

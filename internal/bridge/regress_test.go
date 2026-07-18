@@ -233,9 +233,9 @@ func TestSplitIncompleteRune(t *testing.T) {
 		{"TestSendInputRouting の非UTF8列", "\xC3\x28\x80\xFEEND", "\xC3\x28\x80\xFEEND", ""},
 	}
 	for _, c := range cases {
-		head, tail := splitIncompleteRune([]byte(c.in))
+		head, tail := SplitIncompleteRune([]byte(c.in))
 		if string(head) != c.head || string(tail) != c.tail {
-			t.Errorf("%s: splitIncompleteRune(%q) = (%q, %q), want (%q, %q)",
+			t.Errorf("%s: SplitIncompleteRune(%q) = (%q, %q), want (%q, %q)",
 				c.name, c.in, head, tail, c.head, c.tail)
 		}
 	}

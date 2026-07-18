@@ -130,7 +130,7 @@ func cmdClaude(args []string, stdout, stderr io.Writer) error {
 		switch {
 		case len(cands) == 1:
 			fmt.Fprintf(stdout, "cwd 一致の既存 claude セッションへ接続します\n")
-			return attachOrReport(cands[0], stdout)
+			return attachOrReport(api, cands[0], stdout)
 		case len(cands) > 1:
 			if !stdinIsTTY() {
 				// 非 TTY は picker を出せない。勝手に attach も新規もせず
@@ -145,7 +145,7 @@ func cmdClaude(args []string, stdout, stderr io.Writer) error {
 				return err
 			}
 			if !startNew {
-				return attachOrReport(cands[idx], stdout)
+				return attachOrReport(api, cands[idx], stdout)
 			}
 			// startNew: 下の新規経路へ落ちる
 		}
@@ -158,7 +158,7 @@ func cmdClaude(args []string, stdout, stderr io.Writer) error {
 		return fmt.Errorf("agent.start: %w", err)
 	}
 	fmt.Fprintf(stdout, "claude セッションを新規起動しました\n")
-	return attachOrReport(*ag, stdout)
+	return attachOrReport(api, *ag, stdout)
 }
 
 // maxClaudeAgents は自動採番の上限（1 サーバに同時に持つ claude agent 数の
@@ -461,19 +461,28 @@ func runPicker(cands []herdrapi.AgentInfo, stdout io.Writer) (int, bool, error) 
 	}
 }
 
-// attachOrReport は TTY なら herdr terminal attach へプロセス置換、非 TTY なら
-// pane_id/terminal_id を表示して正常終了する（CI/スクリプト安全）。
-func attachOrReport(ag herdrapi.AgentInfo, stdout io.Writer) error {
+// attachOrReport は TTY なら自動 min ローカルビューア（runViewer→runLocalView）
+// で pane を映して操作させ、非 TTY なら pane_id/terminal_id を表示して正常終了
+// する（CI/スクリプト安全）。
+//
+// ⚠旧実装は `herdr terminal attach <terminal_id>` へ exec 置換していたが、
+// これは接続モード TerminalAttach で pane を direct_attach_resize_locks に
+// 登録し、**メインアプリがその pane をリサイズできなくなる**（起動元端末の
+// サイズに固定＝普段使いの herdr で下部入力が切れる。herdr 0.7.4 ソース
+// src/ui/panes.rs／server/headless.rs で確定・ユーザー実測で裏取り）。逆に
+// 常時 observe だと起動元端末が grid より小さいとき下部がクリップされて見えない
+// （実測）。localview は「自動 min」＝起動元端末が grid より小さいときだけ
+// control で pane を起動元実寸へ縮小＋ロック（メインは余白）、それ以外は observe
+// でリサイズ権限をメインに残す（localview.go 冒頭の根拠）。入力は両モードとも
+// pane.send_text。observe/control とも pane_id 対象（terminal_id ではない＝
+// bridge と同契約）なので ag.PaneID を渡す。
+func attachOrReport(api *herdrapi.Client, ag herdrapi.AgentInfo, stdout io.Writer) error {
 	if !stdinIsTTY() {
 		fmt.Fprintf(stdout, "pane_id=%s terminal_id=%s\n", ag.PaneID, ag.TerminalID)
 		return nil
 	}
-	herdrAbs, err := exec.LookPath("herdr")
-	if err != nil {
-		return fmt.Errorf("herdr が PATH に見つからない: %w", err)
-	}
-	// detach ヒントは exec 前に出す（置換後はこちらから何も出せない）。
-	fmt.Fprintf(stdout, "attach します（detach は Ctrl+B q）\n")
-	// env 継承で HERDR_SOCKET_PATH が透過＝シムと同じサーバへ attach する。
-	return execAttach(herdrAbs, []string{herdrAbs, "terminal", "attach", ag.TerminalID}, os.Environ())
+	// ヒントは raw mode/alt-screen へ入る前に出す（ビューア開始後は復帰まで
+	// この画面へは出せない）。
+	fmt.Fprintf(stdout, "接続します（ロックフリー・リサイズ権限はメインアプリに残る／detach は Ctrl+B q）\n")
+	return runViewer(api, ag.PaneID)
 }

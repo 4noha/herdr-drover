@@ -66,6 +66,17 @@ func swapSeams(t *testing.T, tty bool, execFn func(string, []string, []string) e
 	t.Cleanup(func() { stdinIsTTY, execAttach = oldTTY, oldExec })
 }
 
+// swapViewer は runViewer seam（TTY attach 経路のロックフリー・ローカル
+// observe ビューア）を差し替える（t.Cleanup で復元）。実 raw-mode e2e は
+// localview_test.go の pty ハーネスが担い、ここでは「どの pane_id に接続
+// したか」だけを機械検証する（実 TTY 非依存＝決定論）。
+func swapViewer(t *testing.T, fn func(*herdrapi.Client, string) error) {
+	t.Helper()
+	old := runViewer
+	runViewer = fn
+	t.Cleanup(func() { runViewer = old })
+}
+
 // claudeAgents は実サーバの agent.list をシムと同じ純関数（claudeCandidates）
 // で絞る＝テストと本体で判定基準が乖離しない。
 func claudeAgents(t *testing.T, api *herdrapi.Client, cwd string) []herdrapi.AgentInfo {
@@ -139,10 +150,13 @@ func TestClaudeShimRealHerdrLifecycle(t *testing.T) {
 	// --- args 非空（TTY）: 既存があっても常に新規（件数 +1）---
 	// 非 TTY×args は herdr 非経由の素 claude 透過に変わった
 	//（TestClaudeShimNonTTYArgsExecsClaudeDirectly）ため、このステップは
-	// TTY seam＋exec fake で「新規 pane＋attach」経路を検証する。
-	execCalled := 0
-	swapSeams(t, true, func(argv0 string, argv []string, env []string) error {
-		execCalled++
+	// TTY seam＋viewer fake で「新規 pane＋ロックフリー接続」経路を検証する。
+	var viewerPane string
+	viewerCalled := 0
+	swapSeams(t, true, nil) // TTY 判定のみ true（execAttach 実体は attach 経路で不使用）
+	swapViewer(t, func(_ *herdrapi.Client, paneID string) error {
+		viewerCalled++
+		viewerPane = paneID
 		return nil
 	})
 	code, out3, errb3 := runCapture(t, "claude", "--hd-shim-arg-test")
@@ -152,11 +166,22 @@ func TestClaudeShimRealHerdrLifecycle(t *testing.T) {
 	if !strings.Contains(out3, "新規起動") {
 		t.Fatalf("args 非空で新規起動の報告が無い:\n%s", out3)
 	}
-	if execCalled != 1 {
-		t.Fatalf("TTY 新規後の attach exec が呼ばれていない（called=%d）", execCalled)
+	if viewerCalled != 1 {
+		t.Fatalf("TTY 新規後のロックフリー接続（runViewer）が呼ばれていない（called=%d）", viewerCalled)
 	}
 	swapSeams(t, false, nil) // 以降のステップは非 TTY 経路に戻す
 	ags2 := waitClaudeAgents(t, api, work, 2)
+	// runViewer は observe/pane.send_text の対象 pane_id を受ける（terminal_id
+	// ではない）。新規 claude-2 の PaneID と一致することを確認する。
+	var claude2 herdrapi.AgentInfo
+	for _, a := range ags2 {
+		if a.Name == "claude-2" {
+			claude2 = a
+		}
+	}
+	if viewerPane == "" || viewerPane != claude2.PaneID {
+		t.Fatalf("runViewer に渡った pane_id=%q が新規 claude-2 の PaneID=%q と不一致", viewerPane, claude2.PaneID)
+	}
 	// agent 名一意制約（実測 agent_name_taken）への自動採番: 2 本目は
 	// encode 形 claude-2 になっている（encode/decode round-trip の実サーバ確認）
 	names := map[string]bool{}
@@ -181,28 +206,34 @@ func TestClaudeShimRealHerdrLifecycle(t *testing.T) {
 	}
 }
 
-// ============ 実 herdr: exec seam（TTY attach 経路の引数列） ============
+// ============ 実 herdr: viewer seam（TTY ロックフリー接続経路） ============
 
-func TestClaudeShimExecSeamTTYAttach(t *testing.T) {
+// TestClaudeShimViewerSeamTTY は TTY 分岐がロックフリー・ローカル observe
+// ビューア（runViewer）へ、observe/pane.send_text の対象 pane_id と「シムと
+// 同じサーバ socket を持つ api」を渡すことを機械検証する。旧 attach 経路
+// （herdr terminal attach <terminal_id>＝TerminalAttach でリサイズロックを
+// 張る）から observe（ロック非取得・pane_id 対象）へ切り替えた回帰点。
+func TestClaudeShimViewerSeamTTY(t *testing.T) {
 	sock := startHerdrForTest(t)
 	t.Setenv("HERDR_SOCKET_PATH", sock)
 	stub := installStubClaude(t)
 	work := chdirPhysical(t)
 
 	api := herdrapi.New(sock)
-	// 既存 1 件を API 直で用意（attach 経路だけを切り出して検証）。
+	// 既存 1 件を API 直で用意（接続経路だけを切り出して検証）。
 	ag, err := api.AgentStart("claude", []string{stub}, &herdrapi.AgentStartOptions{Cwd: work})
 	if err != nil {
 		t.Fatalf("agent.start: %v", err)
 	}
 	waitClaudeAgents(t, api, work, 1)
 
-	var gotArgv0 string
-	var gotArgv, gotEnv []string
+	var gotAPI *herdrapi.Client
+	var gotPane string
 	called := 0
-	swapSeams(t, true, func(argv0 string, argv []string, env []string) error {
+	swapSeams(t, true, nil)
+	swapViewer(t, func(a *herdrapi.Client, paneID string) error {
 		called++
-		gotArgv0, gotArgv, gotEnv = argv0, argv, env
+		gotAPI, gotPane = a, paneID
 		return nil
 	})
 
@@ -211,33 +242,19 @@ func TestClaudeShimExecSeamTTYAttach(t *testing.T) {
 		t.Fatalf("exit=%d\nstdout=%s\nstderr=%s", code, out, errb)
 	}
 	if called != 1 {
-		t.Fatalf("execAttach 呼び出し回数=%d want 1", called)
+		t.Fatalf("runViewer 呼び出し回数=%d want 1", called)
 	}
-	herdrAbs, err := exec.LookPath("herdr")
-	if err != nil {
-		t.Fatalf("herdr LookPath: %v", err)
+	// observe/send_text は pane_id 対象（terminal_id ではない）。既存 agent の
+	// PaneID が渡ること＝旧 attach（terminal_id）からの切替の要。
+	if gotPane != ag.PaneID {
+		t.Fatalf("runViewer pane_id=%q want %q（terminal_id=%q を渡していないか）", gotPane, ag.PaneID, ag.TerminalID)
 	}
-	if !strings.HasPrefix(ag.TerminalID, "term_") {
-		t.Fatalf("実 herdr の terminal_id 形でない: %q", ag.TerminalID)
+	// api.SocketPath がシムの socket と同一＝ビューアがシムと同じサーバの
+	// pane を観る根拠（旧 exec の env 継承と同役割）。
+	if gotAPI == nil || gotAPI.SocketPath != sock {
+		t.Fatalf("runViewer api.SocketPath がシムと不一致: got %v want %s", gotAPI, sock)
 	}
-	if gotArgv0 != herdrAbs {
-		t.Fatalf("argv0=%q want %q", gotArgv0, herdrAbs)
-	}
-	want := []string{herdrAbs, "terminal", "attach", ag.TerminalID}
-	if !reflect.DeepEqual(gotArgv, want) {
-		t.Fatalf("exec 引数列: got %v want %v", gotArgv, want)
-	}
-	// env 継承＝HERDR_SOCKET_PATH 透過（attach 先がシムと同じサーバになる根拠）
-	found := false
-	for _, e := range gotEnv {
-		if e == "HERDR_SOCKET_PATH="+sock {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("exec env に HERDR_SOCKET_PATH=%s が透過していない", sock)
-	}
-	// detach ヒントは exec（プロセス置換）前に出ている必要がある
+	// 接続ヒント（detach 案内）は raw-mode/alt-screen へ入る前に出ている必要がある
 	if !strings.Contains(out, "Ctrl+B q") {
 		t.Fatalf("detach ヒントが無い:\n%s", out)
 	}
