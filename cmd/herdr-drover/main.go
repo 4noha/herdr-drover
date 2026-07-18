@@ -107,10 +107,16 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 		return 0
 	case "attach":
-		// DESIGN.md のリポジトリ構成に載る後続フェーズのコマンド。存在は
-		// 予約しつつ、未実装は明示エラーで返す（黙って no-op にしない）。
-		fmt.Fprintf(stderr, "herdr-drover %s: 未実装（DESIGN.md の後続フェーズ。現在使えるのは agent/status/nudge/enroll/update/install/uninstall/version/help）\n", cmd)
-		return 2
+		// リモート pane 注入の viewer client（reconcile が注入 pane 内で起動する
+		// 内部コマンド。attach.go）。手動起動もできるが通常は reconcile 経由。
+		if err := cmdAttach(rest, stdout, stderr); err != nil {
+			fmt.Fprintf(stderr, "herdr-drover attach: %v\n", err)
+			if errors.Is(err, errUsage) {
+				return 2
+			}
+			return 1
+		}
+		return 0
 	default:
 		fmt.Fprintf(stderr, "herdr-drover: 未知のサブコマンド %q\n\n", cmd)
 		usage(stderr)

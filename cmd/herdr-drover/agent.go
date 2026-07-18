@@ -170,8 +170,6 @@ func cmdAgent(stdout, stderr io.Writer) error {
 // relay/command は全クラウドで動く＝primary は未使用）。ctx 終了で graceful
 // 戻り。err 返却＝初期化失敗（呼び手が単一なら fail-fast、複数なら log 継続）。
 func runOneCloud(ctx context.Context, cfg Config, cl Cloud, primary bool, hcli *herdrapi.Client, nudge <-chan os.Signal, tag string, lg *log.Logger) error {
-	_ = primary // Phase 3 リモート pane 注入の primary 限定用に予約
-
 	// 資格情報はクラウド個別に注入する（GOOGLE_APPLICATION_CREDENTIALS は
 	// process global で 1 つ＝複数クラウド併存には option.WithCredentialsFile
 	// が必須＝これが fan-out の肝）。エミュレータ時は資格情報を渡さない
@@ -204,6 +202,15 @@ func runOneCloud(ctx context.Context, cfg Config, cl Cloud, primary bool, hcli *
 		wt = newWebTerm(cl.RelayURL, cfg.Idle, st, hcli, lg)
 		wt.start(ctx)
 		lg.Printf("%swebterm: WatchWake 起動（relay=%s）", tag, cl.RelayURL)
+	}
+
+	// Phase 3 リモート pane 注入（↗窓相当）: **primary（先頭）クラウドのみ**が
+	// 他 PC のセッションをローカル herdr へ注入 pane として同期する（複数クラウドが
+	// 同一 herdr へ同 pane を注入する二重窓・競合を構造的に防ぐ）。relay 必須
+	// （注入 pane 内の attach viewer がリモート relay へ繋ぐ）。
+	if primary && cl.RelayURL != "" {
+		go runRemoteInject(ctx, hcli, st, cl.PCName, lg)
+		lg.Printf("%sリモート pane 注入 起動（他 PC のセッションを↗注入・primary）", tag)
 	}
 
 	// 遠隔命令制御線。DoRestart/DoUpdate/DoExit はプロセス単位（どのクラウドの

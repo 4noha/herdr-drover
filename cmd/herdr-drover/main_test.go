@@ -64,15 +64,15 @@ func TestDispatchUnknown(t *testing.T) {
 // 未実装コマンドは黙って no-op にせず明示エラー（任務要件）。
 // install/uninstall は launchd フェーズで実装済み＝このリストから卒業
 // （実装テストは install_test.go）。
-func TestDispatchUnimplemented(t *testing.T) {
-	for _, cmd := range []string{"attach"} {
-		code, _, errb := runCapture(t, cmd)
-		if code != 2 {
-			t.Fatalf("%s: exit=%d want 2", cmd, code)
-		}
-		if !strings.Contains(errb, "未実装") {
-			t.Fatalf("%s: 未実装エラーが無い: %q", cmd, errb)
-		}
+// attach（リモート pane 注入の viewer）は実装済み。通常は reconcile が注入 pane
+// 内で `attach <pc> <sid>` を起動する内部コマンドで、引数不足は usage エラー(exit 2)。
+func TestAttachUsageError(t *testing.T) {
+	code, _, errb := runCapture(t, "attach")
+	if code != 2 {
+		t.Fatalf("attach（引数なし）: exit=%d want 2", code)
+	}
+	if !strings.Contains(errb, "usage: herdr-drover attach") {
+		t.Fatalf("attach の usage エラーが無い: %q", errb)
 	}
 }
 

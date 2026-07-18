@@ -368,3 +368,11 @@ func (c *Client) WorkspaceClose(workspaceID string) error {
 		WorkspaceID string `json:"workspace_id"`
 	}{workspaceID}, nil)
 }
+
+// PaneClose は 1 pane を閉じる（中のプロセスは終了）。リモート pane 注入の
+// reconcile が、リモートで消えたセッション／重複注入 pane の除去に使う。
+func (c *Client) PaneClose(paneID string) error {
+	return c.call("pane.close", struct {
+		PaneID string `json:"pane_id"`
+	}{paneID}, nil)
+}

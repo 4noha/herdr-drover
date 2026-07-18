@@ -166,13 +166,15 @@ herdr-drover organize --capture    # 現配置を exact ルールとして保存
 
 ## Status
 
-Phase 1（一覧同期）・Phase 2（Web ターミナル）・Phase 4（プラグイン化・
-遠隔命令・install/launchd・配布）実装済み。**Phase 3（リモート pane 注入＝
-↗窓相当）は未実装**（DESIGN.md 参照・次期）。各フェーズは実 herdr 隔離
-サーバ＋実 Firestore エミュレータ＋実 relay（cm 無改変 build）の常設 e2e
-gate（`test/`）で検証している。実 launchd へのロード（カットオーバー）は
-`herdr-drover install` を手動実行（テストは `--no-launchctl`＋隔離 HOME
-のみ＝実環境不可侵）。
+Phase 1（一覧同期）・Phase 2（Web ターミナル）・**Phase 3（リモート pane 注入＝
+↗窓相当）**・Phase 4（プラグイン化・遠隔命令・install/launchd・配布）実装済み。
+各フェーズは実 herdr 隔離サーバ＋実 Firestore エミュレータ＋実 relay
+（drover-cloud build）の常設 e2e gate（`test/`）で検証している。⚠ リモート pane
+注入の実クラウド 2 PC 越しの完全 e2e（他 PC の実セッションが↗注入されて打鍵往復）は
+2 つ目のクラウド/PC が要るため未実施（reconcile の pane 生成/冪等/自己修復/fail-safe は
+実 herdr で機械検証済み・attach viewer の cm-wire は Phase 2 viewer と同形式）。実
+launchd へのロード（カットオーバー）は `herdr-drover install` を手動実行（テストは
+`--no-launchctl`＋隔離 HOME のみ＝実環境不可侵）。
 
 ## Requirements
 
