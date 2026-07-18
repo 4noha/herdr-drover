@@ -1,7 +1,16 @@
-# 実装手順メモ（2026-07-18 セッション引き継ぎ）
+# 実装手順メモ（2026-07-18 更新）
 
-前セッションのリミット到達に備えた引き継ぎ。**開発の鉄則は DESIGN.md 末尾**
-（実テスト担保・旧コード FAIL 確認・exact-match・AGPL 衛生・silent 変更禁止）。
+**開発の鉄則は DESIGN.md 末尾**（実テスト担保・旧コード FAIL 確認・
+exact-match・AGPL 衛生・silent 変更禁止）。
+
+## ✅ 完了: Tab 単位着地ルール（d63aca0・デプロイ済み 2026-07-18 10:21）
+
+下記 0-1 節の実装は完遂・全10 pkg 緑・レビュー serious 4 件修正済み・
+launchd 再起動済み。**次のタスクは「3. resume backstop」**（設計そのまま有効。
+Probe の一次事実: pane.move で pane_id は変わるが terminal_id 安定・旧 pane_id
+は alias 解決・tab.move は同一 WS reorder 専用＝WS 間は pane.move が唯一）。
+ユーザー向け案内済み事項: organize --dry-run → organize で旧・間借り pane の
+正規化を推奨。
 
 ## 0. 現在の in-flight 状態（最優先で確認）
 
