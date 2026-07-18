@@ -49,47 +49,33 @@ func cmdAttach(args []string, stdout, stderr io.Writer) error {
 	remotePC, sid := args[0], args[1]
 	injSid := sid + "#inj"
 
-	cfg, err := resolveConfig()
-	if err != nil {
-		return err
-	}
-	clouds := cfg.LoadClouds()
-	if len(clouds) == 0 {
-		return fmt.Errorf("接続先クラウドが無い（GCP_PROJECT / clouds.json 未設定）")
-	}
-	cl := clouds[0] // primary（reconcile と同じクラウドで他 PC を見ている）
-
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
-	creds := cl.SAKeyPath
-	if os.Getenv("FIRESTORE_EMULATOR_HOST") != "" {
-		creds = ""
+	out, _ := stdout.(*os.File)
+	if out == nil {
+		out = os.Stdout
 	}
-	st, err := state.NewWithCredentials(ctx, cl.Project, cl.PCName, creds)
-	if err != nil {
-		return fmt.Errorf("Firestore 接続失敗（project=%s）: %w", cl.Project, err)
-	}
-	defer st.Close()
-
-	out := stdout.(*os.File)
 	in := os.Stdin
 	fmt.Fprintf(out, "\x1b[2J\x1b[H↗ %s / %s に接続中...\r\n", remotePC, sid)
 
+	// ⚠ この pane は reconcile が管理する（リモートセッション消滅で pane.close）。
+	// attach は **設定/Firestore/relay のどの失敗でも exit しない**（exit すると
+	// pane が死に→次周の reconcile が再作成→runaway churn になる。実障害で確認）。
+	// ctx cancel（SIGTERM / pane close で herdr が kill）だけで戻る＝生存し続けて
+	// backoff 再試行する。
 	backoff := 500 * time.Millisecond
 	for {
 		if ctx.Err() != nil {
 			return nil
 		}
 		start := time.Now()
-		attachOnce(ctx, st, cl.RelayURL, injSid, remotePC, in, out)
+		attachCycle(ctx, injSid, remotePC, in, out)
 		if ctx.Err() != nil {
 			return nil
 		}
-		// 5s 以上生きた接続は「正常に使えていた」＝backoff リセット（idle
-		// quiescence の定期再接続を素早く復帰させる）。短命連続失敗のみ伸ばす。
 		if time.Since(start) > 5*time.Second {
-			backoff = 500 * time.Millisecond
+			backoff = 500 * time.Millisecond // 正常に使えていた接続の切断は素早く復帰
 		}
 		select {
 		case <-ctx.Done():
@@ -100,6 +86,39 @@ func cmdAttach(args []string, stdout, stderr io.Writer) error {
 			backoff *= 2
 		}
 	}
+}
+
+// attachCycle は 1 サイクル（設定解決→state→grant/wake→dial→pump）。どの段階の
+// 失敗でも **exit せず戻る**（cmdAttach の backoff ループが再試行＝pane は生存）。
+// 設定は primary クラウド（reconcile が pane env に GCP_PROJECT 等を注入する。
+// env が無くても config.json / clouds.json から解決を試みる）。
+func attachCycle(ctx context.Context, injSid, remotePC string, in, out *os.File) {
+	cfg, err := resolveConfig()
+	if err != nil {
+		fmt.Fprintf(out, "\x1b[2J\x1b[H↗ %s: 設定解決失敗（再試行）: %v\r\n", remotePC, err)
+		return
+	}
+	clouds := cfg.LoadClouds()
+	if len(clouds) == 0 {
+		fmt.Fprintf(out, "\x1b[2J\x1b[H↗ %s: 接続先クラウド未設定（再試行）\r\n", remotePC)
+		return
+	}
+	cl := clouds[0] // primary（reconcile と同じクラウドで他 PC を見ている）
+
+	creds := cl.SAKeyPath
+	if os.Getenv("FIRESTORE_EMULATOR_HOST") != "" {
+		creds = ""
+	}
+	cctx, ccancel := context.WithCancel(ctx)
+	defer ccancel()
+	st, err := state.NewWithCredentials(cctx, cl.Project, cl.PCName, creds)
+	if err != nil {
+		fmt.Fprintf(out, "\x1b[2J\x1b[H↗ %s: Firestore 接続失敗（再試行）: %v\r\n", remotePC, err)
+		return
+	}
+	defer st.Close()
+
+	attachOnce(cctx, st, cl.RelayURL, injSid, remotePC, in, out)
 }
 
 // attachOnce は 1 接続の生存（grant→wake→dial→frame/input pump）。conn 切断か
@@ -115,7 +134,7 @@ func attachOnce(ctx context.Context, st *state.Client, relayURL, injSid, remoteP
 	defer dcancel()
 	conn, err := relayclient.Dial(dctx, relayURL, injSid, "viewer")
 	if err != nil {
-		fmt.Fprintf(out, "\x1b[2J\x1b[H↗ %s / %s: relay 接続失敗（再試行）\r\n", remotePC, injSid)
+		fmt.Fprintf(out, "\x1b[2J\x1b[H↗ %s / %s: relay 接続失敗（再試行）: %v\r\n", remotePC, injSid, err)
 		return
 	}
 	defer conn.Close()

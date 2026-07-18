@@ -209,7 +209,7 @@ func runOneCloud(ctx context.Context, cfg Config, cl Cloud, primary bool, hcli *
 	// 同一 herdr へ同 pane を注入する二重窓・競合を構造的に防ぐ）。relay 必須
 	// （注入 pane 内の attach viewer がリモート relay へ繋ぐ）。
 	if primary && cl.RelayURL != "" {
-		go runRemoteInject(ctx, hcli, st, cl.PCName, lg)
+		go runRemoteInject(ctx, hcli, st, cl, lg)
 		lg.Printf("%sリモート pane 注入 起動（他 PC のセッションを↗注入・primary）", tag)
 	}
 

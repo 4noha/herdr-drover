@@ -89,7 +89,7 @@ func TestReconcileRemoteInjectAndSelfHeal(t *testing.T) {
 	const selfPC = "self-herdr"
 
 	// 1 周目: 他 PC(remoteA) の 2 セッションが注入 pane として出現（自 PC は除外）。
-	reconcileRemote(ctx, api, fr, selfPC, stub, lg)
+	reconcileRemote(ctx, api, fr, Cloud{PCName: selfPC}, stub, lg)
 	waitCond(t, 15*time.Second, "他 PC の 2 セッションが注入 pane として出現", func() bool {
 		inj := injectedPanes(t, api)
 		return len(inj) == 2 && hasInj(inj, "remoteA", "w9:pA") && hasInj(inj, "remoteA", "w9:pB")
@@ -97,7 +97,7 @@ func TestReconcileRemoteInjectAndSelfHeal(t *testing.T) {
 
 	// 2 周目: 同一 state → 冪等（定常 CREATE=0＝pane 数不変・M8f2 教訓の機械確認）。
 	before := len(injectedPanes(t, api))
-	reconcileRemote(ctx, api, fr, selfPC, stub, lg)
+	reconcileRemote(ctx, api, fr, Cloud{PCName: selfPC}, stub, lg)
 	time.Sleep(700 * time.Millisecond)
 	if got := len(injectedPanes(t, api)); got != before {
 		t.Fatalf("冪等でない（2 周目で注入 pane 数が %d→%d）", before, got)
@@ -105,7 +105,7 @@ func TestReconcileRemoteInjectAndSelfHeal(t *testing.T) {
 
 	// remoteA の 1 本消滅 → その注入 pane だけ close（もう 1 本は維持）。
 	fr.sessions["remoteA"] = []map[string]any{fakeSess("w9:pA", "projA")}
-	reconcileRemote(ctx, api, fr, selfPC, stub, lg)
+	reconcileRemote(ctx, api, fr, Cloud{PCName: selfPC}, stub, lg)
 	waitCond(t, 15*time.Second, "消滅セッションの注入 pane が close・残りは維持", func() bool {
 		inj := injectedPanes(t, api)
 		return len(inj) == 1 && hasInj(inj, "remoteA", "w9:pA") && !hasInj(inj, "remoteA", "w9:pB")
@@ -113,7 +113,7 @@ func TestReconcileRemoteInjectAndSelfHeal(t *testing.T) {
 
 	// 全消滅 → 注入 pane ゼロ。
 	fr.sessions["remoteA"] = nil
-	reconcileRemote(ctx, api, fr, selfPC, stub, lg)
+	reconcileRemote(ctx, api, fr, Cloud{PCName: selfPC}, stub, lg)
 	waitCond(t, 15*time.Second, "全リモートセッション消滅で注入 pane ゼロ", func() bool {
 		return len(injectedPanes(t, api)) == 0
 	})
@@ -132,11 +132,11 @@ func TestReconcileRemoteAbortKeepsPanesOnError(t *testing.T) {
 		pcs:      []string{"remoteA"},
 		sessions: map[string][]map[string]any{"remoteA": {fakeSess("w9:pA", "projA")}},
 	}
-	reconcileRemote(ctx, api, fr, "self", stub, lg)
+	reconcileRemote(ctx, api, fr, Cloud{PCName: "self"}, stub, lg)
 	waitCond(t, 15*time.Second, "注入 pane 出現", func() bool { return len(injectedPanes(t, api)) == 1 })
 
 	fr.pcsErr = fmt.Errorf("firestore down")
-	reconcileRemote(ctx, api, fr, "self", stub, lg)
+	reconcileRemote(ctx, api, fr, Cloud{PCName: "self"}, stub, lg)
 	time.Sleep(700 * time.Millisecond)
 	if n := len(injectedPanes(t, api)); n != 1 {
 		t.Fatalf("ListPCs エラー周に注入 pane が %d になった（fail-safe 違反＝kill してはならない）", n)

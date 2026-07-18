@@ -14,6 +14,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"log"
 	"os"
 	"time"
@@ -64,9 +66,31 @@ type remoteSource interface {
 	ListSessions(ctx context.Context, pc string) ([]map[string]any, error)
 }
 
+// injPaneEnv は注入 pane（attach プロセス）へ渡すクラウド設定 env。attach は
+// daemon の launchd env を継承せず config.json も無いことがあるため、reconcile が
+// primary クラウドの設定を pane env で明示注入する（これが無いと attach が
+// 「クラウド未設定」で失敗し続ける＝実障害で確認）。空値は入れない。
+func injPaneEnv(cl Cloud) map[string]string {
+	env := map[string]string{}
+	set := func(k, v string) {
+		if v != "" {
+			env[k] = v
+		}
+	}
+	set("GCP_PROJECT", cl.Project)
+	set("CLOUD_RELAY_URL", cl.RelayURL)
+	set("GOOGLE_APPLICATION_CREDENTIALS", cl.SAKeyPath)
+	set("PC_ID", cl.PCName)
+	return env
+}
+
 // reconcileRemote は他 PC のセッションをローカル herdr の注入 pane へ同期する 1 周。
+// cl は primary クラウド（selfPC=cl.PCName で自 PC を除外・pane env に設定を注入）。
 func reconcileRemote(ctx context.Context, api *herdrapi.Client, st remoteSource,
-	selfPC, selfExe string, lg *log.Logger) {
+	cl Cloud, selfExe string, lg *log.Logger) {
+
+	selfPC := cl.PCName
+	env := injPaneEnv(cl)
 
 	// cur: 既存の注入 pane（metadata token pc/sid 付き）。list 失敗は abort＝
 	// 「注入 pane ゼロ」と誤認して毎周全作成する runaway を防ぐ。
@@ -141,7 +165,7 @@ func reconcileRemote(ctx context.Context, api *herdrapi.Client, st remoteSource,
 				wsID = id
 			}
 			argv := []string{selfExe, "attach", d.pc, d.sid}
-			pid, aerr := applyClaudeTab(api, wsID, injTabName(d.dir), argv, "")
+			pid, aerr := applyInjectPane(api, wsID, injTabName(d.dir), argv, env)
 			if aerr != nil {
 				lg.Printf("[reconcile] CREATE 失敗 %s/%s: %v", d.pc, d.sid, aerr)
 				continue
@@ -171,7 +195,7 @@ func reconcileRemote(ctx context.Context, api *herdrapi.Client, st remoteSource,
 // 戻る。**primary クラウドのみ**が呼ぶ（複数クラウドが同一 herdr へ同 pane を注入する
 // 二重窓・競合を構造的に防ぐ＝runOneCloud の primary 分岐から起動）。
 func runRemoteInject(ctx context.Context, api *herdrapi.Client, st *state.Client,
-	selfPC string, lg *log.Logger) {
+	cl Cloud, lg *log.Logger) {
 
 	selfExe, err := os.Executable()
 	if err != nil {
@@ -214,7 +238,41 @@ func runRemoteInject(ctx context.Context, api *herdrapi.Client, st *state.Client
 			case <-ctx.Done():
 				return
 			}
-			reconcileRemote(ctx, api, st, selfPC, selfExe, lg)
+			reconcileRemote(ctx, api, st, cl, selfExe, lg)
 		}
 	}
+}
+
+// applyInjectPane は layout.apply で「wsID に新 tab＋argv 直接実行 pane 1 枚」を
+// **env 付き**で作る（applyClaudeTab の注入版＝pane に GCP_PROJECT 等を注入して
+// attach が primary クラウドを解決できるようにする）。focus は奪わない。
+func applyInjectPane(api *herdrapi.Client, wsID, tabLabel string, argv []string, env map[string]string) (string, error) {
+	type layoutPane struct {
+		Type    string            `json:"type"`
+		Command []string          `json:"command"`
+		Env     map[string]string `json:"env,omitempty"`
+	}
+	raw, err := api.Call("layout.apply", struct {
+		WorkspaceID string     `json:"workspace_id"`
+		TabLabel    string     `json:"tab_label"`
+		Focus       bool       `json:"focus"`
+		Root        layoutPane `json:"root"`
+	}{wsID, tabLabel, false, layoutPane{Type: "pane", Command: argv, Env: env}})
+	if err != nil {
+		return "", fmt.Errorf("layout.apply: %w", err)
+	}
+	var out struct {
+		Layout struct {
+			Root struct {
+				PaneID string `json:"pane_id"`
+			} `json:"root"`
+		} `json:"layout"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return "", fmt.Errorf("layout_apply decode: %w", err)
+	}
+	if out.Layout.Root.PaneID == "" {
+		return "", fmt.Errorf("layout.apply 応答に root pane_id が無い")
+	}
+	return out.Layout.Root.PaneID, nil
 }
