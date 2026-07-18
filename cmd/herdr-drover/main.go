@@ -117,6 +117,17 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		return 0
+	case "ssh-forward":
+		// owner の ssh-agent を slave へ relay 越しに一時転送（GitHub 操作。
+		// sshforward.go / DESIGN_SSH_FORWARD.md）。秘密鍵は owner から出ない。
+		if err := cmdSSHForward(rest, stdout, stderr); err != nil {
+			fmt.Fprintf(stderr, "herdr-drover ssh-forward: %v\n", err)
+			if errors.Is(err, errUsage) {
+				return 2
+			}
+			return 1
+		}
+		return 0
 	case "mv-tab":
 		// mv-tab は対話ピッカ（引数なし＝TTY 必須）or --src-tab/--dst-ws フラグ非対話。
 		if err := cmdMvTab(rest, os.Stdin, stdout, stderr); err != nil {
@@ -180,6 +191,12 @@ func usage(w io.Writer) {
                           明示エラー）。plugin action mv-tab は drawer から新 Tab を
                           開いて対話モードを走らせる。成功後は受入先 WS/新 Tab に
                           自動フォーカス移動
+  herdr-drover ssh-forward <pc> [label]
+                          owner の ssh-agent を slave へ relay 越しに一時転送
+                          （GitHub 操作）。秘密鍵は owner から出ず署名は owner Mac が
+                          実行。表示された ~/.herdr-drover/agent-fwd/*.sock を slave で
+                          SSH_AUTH_SOCK に指定して git。Ctrl-C で撤去（推奨: 専用
+                          deploy key を ssh-add -c で confirm 付き登録）
   herdr-drover update     selfupdate（GitHub Releases・sha256 検証・原子置換）
   herdr-drover version    バージョン表示
   herdr-drover help       このヘルプ

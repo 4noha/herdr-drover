@@ -116,6 +116,13 @@ func (w *webTerm) handleWake(ctx context.Context, sid string) {
 	if w.st.IsSelfRevoked(ctx) {
 		return
 	}
+	// ①.5 afSid（ssh-forward 用）の wake は bridge でなく SSH エージェント転送へ
+	// 分岐（DESIGN_SSH_FORWARD.md）。exact-prefix 判定＝非ヒューリスティック。
+	// dedup（active map）・grant・dialSource は共有するので分岐後も同一規律。
+	if isSSHForwardSid(sid) {
+		w.handleSSHForwardWake(ctx, sid)
+		return
+	}
 	// ②sid 毎 1 本: 既にデータ線が開いている sid の wake は無視。
 	// 注意: WatchWake は初回 snapshot でも既在 doc で発火する（契約）ので、
 	// agent 再起動直後に古い wake が来ても、この dedup と bridge 側の
