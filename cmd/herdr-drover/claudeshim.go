@@ -151,6 +151,22 @@ func cmdClaude(args []string, stdout, stderr io.Writer) error {
 		}
 	}
 
+	// resume backstop: `claude --resume <uuid>` の 2 回目が新プロセスを作る dup
+	// （同一会話 jsonl に 2 プロセス＝cm で実害のあった型）を防ぐ。herdr は各
+	// claude pane の会話 uuid を agent_session.value（source=herdr:claude・kind=id）
+	// で公開するので、同 uuid の live pane があれば新規作成せず attach する
+	// （exact-match・非ヒューリスティック＝権威は herdr の検出値）。「args 非空→
+	// 常に新規」の唯一の例外＝--resume（他フラグは従来どおり新規）。非 TTY×args は
+	// 上流(94 行)で素通し済＝ここは TTY のみ。
+	if uuid := parseResumeUUID(args); uuid != "" {
+		if p, ferr := findClaudePaneByResumeUUID(api, uuid); ferr == nil && p != nil {
+			fmt.Fprintf(stdout, "会話 %s を実行中の既存セッションへ接続します（新規プロセスを作りません）\n", uuid)
+			return attachOrReport(api, herdrapi.AgentInfo{PaneID: p.PaneID, TerminalID: p.TerminalID}, stdout)
+		}
+		// 一致なし＝その会話はまだ herdr で起動していない → 下の新規経路で
+		// --resume 付き起動（claude が jsonl から会話を復元する）。
+	}
+
 	// 新規: 実 claude の絶対パスを argv[0] に渡す。exec.LookPath は shell
 	// alias の影響を受けず、herdr server 側の PATH 差異にも免疫になる。
 	ag, err := startClaudeAgent(api, append([]string{claudeAbs}, args...), cwd)
@@ -459,6 +475,65 @@ func runPicker(cands []herdrapi.AgentInfo, stdout io.Writer) (int, bool, error) 
 		}
 		return idx, startNew, nil
 	}
+}
+
+// parseResumeUUID は args 中の `claude --resume <uuid>` / `--resume=<uuid>` /
+// `-r <uuid>` から会話 uuid を取り出す純関数。uuid が続かない（対話 picker 起動）
+// や非 uuid 値は "" を返す＝backstop を発火させない（新規/対話に委ねる）。厳密な
+// uuid 形（8-4-4-4-12 hex）だけを受ける＝`-r report.md` 等の誤検出を防ぐ。
+func parseResumeUUID(args []string) string {
+	for i, a := range args {
+		var cand string
+		switch {
+		case a == "--resume" || a == "-r":
+			if i+1 < len(args) {
+				cand = args[i+1]
+			}
+		case strings.HasPrefix(a, "--resume="):
+			cand = strings.TrimPrefix(a, "--resume=")
+		}
+		if isUUID(cand) {
+			return cand
+		}
+	}
+	return ""
+}
+
+// isUUID は 8-4-4-4-12 の 16 進 uuid か（大小文字許容）。
+func isUUID(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i := 0; i < 36; i++ {
+		c := s[i]
+		if i == 8 || i == 13 || i == 18 || i == 23 {
+			if c != '-' {
+				return false
+			}
+			continue
+		}
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
+// findClaudePaneByResumeUUID は uuid の会話を実行中の live claude pane を返す
+// （無ければ nil,nil）。判定は herdr の検出値 agent_session の exact-match のみ
+// （value==uuid かつ kind=="id"＝会話 uuid の権威。ヒューリスティック分類なし）。
+func findClaudePaneByResumeUUID(api *herdrapi.Client, uuid string) (*herdrapi.PaneInfo, error) {
+	panes, err := api.PaneList()
+	if err != nil {
+		return nil, err
+	}
+	for i := range panes {
+		p := &panes[i]
+		if p.AgentSession.Kind == "id" && p.AgentSession.Value == uuid {
+			return p, nil
+		}
+	}
+	return nil, nil
 }
 
 // attachOrReport は TTY なら自動 min ローカルビューア（runViewer→runLocalView）

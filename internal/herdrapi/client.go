@@ -315,6 +315,20 @@ func (c *Client) PaneReportMetadata(paneID, source string, m ReportMetadata) err
 	}{paneID, source, m.Title, m.Tokens}, nil)
 }
 
+// ReportAgentSession は pane のエージェントセッション識別子を報告する
+// （herdr の claude 検出が本来設定する agent_session を明示設定する口）。
+// sessionID を渡すと agent_session が `{source, agent, kind:"id", value:sessionID}`
+// になり pane.list/pane.get で読める。シム本体は herdr の自動検出に任せるため
+// 通常は呼ばないが、resume backstop の回帰テストが claude 検出を模すのに使う。
+func (c *Client) ReportAgentSession(paneID, source, agent, sessionID string) error {
+	return c.call("pane.report_agent_session", struct {
+		PaneID         string `json:"pane_id"`
+		Source         string `json:"source"`
+		Agent          string `json:"agent"`
+		AgentSessionID string `json:"agent_session_id,omitempty"`
+	}{paneID, source, agent, sessionID}, nil)
+}
+
 // WorkspaceCreate は新 workspace（root pane 付き）を作る。params は空で
 // よい（実測）。テスト・reconcile の pane 生成起点。
 func (c *Client) WorkspaceCreate() (*WorkspaceCreated, error) {

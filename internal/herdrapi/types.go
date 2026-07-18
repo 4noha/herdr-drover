@@ -64,7 +64,18 @@ type PaneInfo struct {
 	AgentStatus   string            `json:"agent_status"` // "unknown"|"idle"|"working"|"blocked"（CLI help の列挙）
 	Tokens        map[string]string `json:"tokens,omitempty"`
 	Scroll        ScrollInfo        `json:"scroll"`
+	AgentSession  AgentSession      `json:"agent_session"`
 	Revision      int               `json:"revision"`
+}
+
+// AgentSession は herdr が検出したエージェントのセッション識別子。claude では
+// `{source:"herdr:claude", agent:"claude", kind:"id", value:<会話 uuid>}` で、
+// value が `claude --resume <uuid>` の uuid と一致する（実測・resume backstop の権威）。
+type AgentSession struct {
+	Source string `json:"source"`
+	Agent  string `json:"agent"`
+	Kind   string `json:"kind"` // "id"（uuid）｜"path"
+	Value  string `json:"value"`
 }
 
 // AgentInfo は agent.list / agent.start に現れる agent 情報。
