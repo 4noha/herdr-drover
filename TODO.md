@@ -82,6 +82,22 @@ launchctl kickstart -k gui/$(id -u)/com.4noha.herdr-drover
   会話切替の stale token も解消）。Probe findings（journal）に手掛かりあり
 - 注意: Tab 版が claudeshim.go を触っているため**必ず Tab 版着地後に実装**
 
+## 3.5 次々タスク: 同居 Tab の丸ごと引っ越し（ユーザー承認済みの合成操作）
+
+organize の同居 Tab 処理を「claude だけ切り出し」から「**Tab 丸ごと引っ越し**」へ
+格上げする（ユーザー提案・実測事実で成立確認済み）:
+
+- 合成手順: ①`pane.layout`（ndjson 実在確認済み）で元 Tab の分割トポロジーを
+  読む ②先頭 pane を `pane.move {type:new_tab, workspace_id, label:元タブ名}` で
+  移す ③残り pane を tree 順に `pane.move {type:tab, tab_id, target_pane_id,
+  split, ratio}` で再構築 ④空になった元 Tab は自動 close（実測済み）
+- 根拠（実測済み）: pane.move の tab 宛先形態・ソース tab の空自動 close・
+  terminal_id/agent 名/セッションの移動跨ぎ維持
+- 実装時の確認: pane.layout 応答の ratio 有無（無ければ均等割で妥協し明記）・
+  途中失敗時の半端状態の報告（非トランザクション＝1 pane ごとに検証・
+  失敗は loud に報告して停止）
+- 曖昧ケース（1 Tab に別 cwd の claude 複数）は従来どおり skip＋報告
+
 ## 4. 残バックログ（優先順）
 
 1. Phase 3: リモート pane 注入（↗窓相当）。設計は DESIGN.md「リモート pane
