@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/4noha/herdr-drover/internal/herdrapi"
+	"github.com/4noha/herdr-drover/internal/wsmap"
 )
 
 type fakeRemote struct {
@@ -28,7 +29,7 @@ type fakeRemote struct {
 	sessErr  error
 }
 
-func (f *fakeRemote) ListPCs(context.Context) ([]string, error) { return f.pcs, f.pcsErr }
+func (f *fakeRemote) DroverPCs(context.Context) ([]string, error) { return f.pcs, f.pcsErr }
 func (f *fakeRemote) ListSessions(_ context.Context, pc string) ([]map[string]any, error) {
 	return f.sessions[pc], f.sessErr
 }
@@ -117,6 +118,47 @@ func TestReconcileRemoteInjectAndSelfHeal(t *testing.T) {
 	waitCond(t, 15*time.Second, "全リモートセッション消滅で注入 pane ゼロ", func() bool {
 		return len(injectedPanes(t, api)) == 0
 	})
+}
+
+// TestReconcileDoesNotReapTokenlessInjectWorkspacePanes は「注入 workspace 内の
+// token 無し pane を reconcile が掃除してはならない」不変条件の見張り。注入 workspace
+// には WorkspaceCreate 由来の**構造 root pane（token 無し）**が常駐する（実 herdr 0.7.4
+// で実測）。「token 無し＝孤児」で一括掃除すると root pane を毎周 kill する退行になる
+// （敵対的再レビューで危うく導入しかけた穴）。再起動で token を失った pane は attach の
+// 自己再表明で治すのが設計＝reconcile は token 無し pane に手を出さない。
+func TestReconcileDoesNotReapTokenlessInjectWorkspacePanes(t *testing.T) {
+	sock := startHerdrForTest(t)
+	api := herdrapi.New(sock)
+	lg := log.New(io.Discard, "", 0)
+	stub := reconcileStub(t)
+	ctx := context.Background()
+
+	// 注入 workspace に token 無し pane を置く（構造 root pane / 再起動で token を
+	// 失った復元 pane を模す）。
+	wsID, err := wsmap.ResolveWorkspaceID(api, injWorkspace)
+	if err != nil {
+		t.Fatalf("resolve inject ws: %v", err)
+	}
+	tokenless, err := applyInjectPane(api, wsID, injTabName("rootlike"), []string{stub}, nil)
+	if err != nil {
+		t.Fatalf("token 無し pane 生成: %v", err)
+	}
+
+	// desired 空で reconcile → token 無し pane は kill してはならない。
+	fr := &fakeRemote{pcs: []string{"remoteA"}, sessions: map[string][]map[string]any{}}
+	reconcileRemote(ctx, api, fr, Cloud{PCName: "self"}, stub, lg)
+	time.Sleep(700 * time.Millisecond)
+
+	panes, err := api.PaneList()
+	if err != nil {
+		t.Fatalf("pane.list: %v", err)
+	}
+	for i := range panes {
+		if panes[i].PaneID == tokenless {
+			return // 生存＝OK
+		}
+	}
+	t.Fatalf("token 無し pane %s が掃除された（注入 ws の構造 root pane を殺す退行）", tokenless)
 }
 
 // ListPCs 失敗周は既存注入 pane を kill しない（fail-safe＝desired 空誤認で全 kill

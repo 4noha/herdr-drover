@@ -52,6 +52,10 @@ type StateClient interface {
 type HerdrClient interface {
 	PaneList() ([]herdrapi.PaneInfo, error)
 	AgentList() ([]herdrapi.AgentInfo, error)
+	// WorkspaceList は注入専用 workspace（InjWorkspaceLabel）の pane を同期対象
+	// から外すため workspace_id→label を解決するのに使う（token に依らない注入判定
+	// ＝create race・再起動 token 消失に強い）。
+	WorkspaceList() ([]herdrapi.WorkspaceInfo, error)
 }
 
 // Producer は herdr pane/agent → session map → state push/delete の 1 PC
@@ -121,7 +125,9 @@ func isActive(agentStatus string) bool {
 // （contentHash はこの 3 キーを除外して計算する＝state.go で確認）なので
 // producer は載せない。pid は herdr pane に存在しないため載せない
 // （偽値の捏造はしない）。
-func BuildSessions(panes []herdrapi.PaneInfo, agents []herdrapi.AgentInfo) []map[string]any {
+// injWsIDs は注入専用 workspace の workspace_id 集合（BuildSessions が注入 pane を
+// 同期対象から外すのに使う）。呼び手が WorkspaceList から InjWorkspaceLabel で解決する。
+func BuildSessions(panes []herdrapi.PaneInfo, agents []herdrapi.AgentInfo, injWsIDs map[string]bool) []map[string]any {
 	// pane_id → agent の対応（agent の name/status を優先採用するため）。
 	agentByPane := make(map[string]herdrapi.AgentInfo, len(agents))
 	for _, a := range agents {
@@ -131,6 +137,15 @@ func BuildSessions(panes []herdrapi.PaneInfo, agents []herdrapi.AgentInfo) []map
 	for _, p := range panes {
 		if p.PaneID == "" {
 			// pane_id 無しは同期キーを作れない（doc id 不能）。捏造せず落とす。
+			continue
+		}
+		// リモート pane 注入（reconcile）が作った注入 pane＝他 PC のセッションの
+		// viewer であって自 PC のセッションではない。Firestore へ push すると peer PC が
+		// ListSessions で拾って再注入し、その注入 pane を自分の producer がまた push…と
+		// cross-PC で無限増殖する（DESIGN の不変条件・敵対的レビューで確認済みの
+		// critical 経路）。**判定の権威は注入専用 workspace 所属**（生成時原子・再起動
+		// 保持）＝token race や再起動 token 消失に強い。token は belt-and-suspenders で併用。
+		if injWsIDs[p.WorkspaceID] || p.Tokens[herdrapi.InjTokenPC] != "" {
 			continue
 		}
 		status := p.AgentStatus
@@ -187,6 +202,19 @@ func (p *Producer) Tick(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("session: agent.list 失敗（tick skip・前回状態維持）: %w", err)
 	}
+	// 注入専用 workspace の id 集合を解決（注入 pane を push 対象から外す権威）。
+	// これも scan の一部＝失敗は skip（前回状態維持）。resolve を怠って空集合で
+	// 進むと注入 pane を push し得る＝cross-PC 増殖の穴なので、握り潰さず skip する。
+	wss, err := p.Herdr.WorkspaceList()
+	if err != nil {
+		return fmt.Errorf("session: workspace.list 失敗（tick skip・前回状態維持）: %w", err)
+	}
+	injWsIDs := make(map[string]bool)
+	for _, w := range wss {
+		if w.Label == herdrapi.InjWorkspaceLabel {
+			injWsIDs[w.WorkspaceID] = true
+		}
+	}
 
 	if !p.seeded {
 		keys, serr := p.State.OwnSessionKeys(ctx)
@@ -200,7 +228,7 @@ func (p *Producer) Tick(ctx context.Context) error {
 		p.seeded = true
 	}
 
-	ss := BuildSessions(panes, agents)
+	ss := BuildSessions(panes, agents, injWsIDs)
 	cur := make(map[string]bool, len(ss))
 	for _, s := range ss {
 		cur[s["key"].(string)] = true

@@ -183,6 +183,20 @@ func (c *Client) AgentList() ([]AgentInfo, error) {
 	return out.Agents, nil
 }
 
+// WorkspaceList は全 workspace を列挙する。result: {"type":"workspace_list","workspaces":[...]}
+// producer が「注入専用 workspace（InjWorkspaceLabel）の pane を同期対象から外す」
+// ために workspace_id→label を解決する用途で使う（token に依らない注入判定＝
+// create race・再起動 token 消失に強い）。
+func (c *Client) WorkspaceList() ([]WorkspaceInfo, error) {
+	var out struct {
+		Workspaces []WorkspaceInfo `json:"workspaces"`
+	}
+	if err := c.call("workspace.list", nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Workspaces, nil
+}
+
 // PaneGet は 1 pane の情報。result: {"type":"pane_info","pane":{...}}
 func (c *Client) PaneGet(paneID string) (*PaneInfo, error) {
 	var out struct {

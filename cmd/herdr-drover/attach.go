@@ -27,18 +27,46 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/4noha/drover-cloud/relayclient"
 	"github.com/4noha/drover-cloud/state"
+	"github.com/4noha/herdr-drover/internal/herdrapi"
 )
 
 // injGrantTTL は viewer grant の寿命（webterm の source grant sourceGrantTTL と
 // 同値＝relay grant 検証窓を対称に保つ）。
 const injGrantTTL = 60 * time.Second
+
+// connHolder は「現在の接続」を保持し、常駐 stdin reader が接続切替を跨いで現接続
+// へ書けるようにする（reader を cycle ごとに作らない＝キーストローク奪い合い防止）。
+// 未接続(nil)中の入力は破棄する（次の接続確立後の入力から届く）。
+type connHolder struct {
+	mu sync.Mutex
+	c  net.Conn
+}
+
+func (h *connHolder) set(c net.Conn) {
+	h.mu.Lock()
+	h.c = c
+	h.mu.Unlock()
+}
+
+func (h *connHolder) write(p []byte) error {
+	h.mu.Lock()
+	c := h.c
+	h.mu.Unlock()
+	if c == nil {
+		return nil // 未接続中の入力は破棄（次の接続から届く）
+	}
+	_, err := c.Write(p)
+	return err
+}
 
 // cmdAttach は `herdr-drover attach <pc> <sid>`。ctx 終了（SIGTERM/pane close で
 // herdr が kill）まで backoff 再接続し続ける。
@@ -56,8 +84,38 @@ func cmdAttach(args []string, stdout, stderr io.Writer) error {
 	if out == nil {
 		out = os.Stdout
 	}
-	in := os.Stdin
 	fmt.Fprintf(out, "\x1b[2J\x1b[H↗ %s / %s に接続中...\r\n", remotePC, sid)
+
+	// この pane 自身に注入 identity token を再表明する（自己治癒）。herdr サーバ
+	// 再起動で pane の report_metadata token は消える（実 herdr 0.7.4 で実測）が、
+	// pane の argv（attach pc sid）と HERDR_PANE_ID は復元されるので、復元後に
+	// 起動したここで token を貼り直せば reconcile が cur で認識でき **重複を作らない**
+	// （token 無し pane を一括掃除すると注入 ws の構造 root pane まで殺すため掃除は
+	// しない設計＝reconcile.go 参照）。初回は reconcile の post-create token と二重だが
+	// exact 値ゆえ冪等。best-effort（失敗しても relay 接続は続ける）。
+	if pid := os.Getenv("HERDR_PANE_ID"); pid != "" {
+		_ = herdrapi.New("").PaneReportMetadata(pid, injSource, herdrapi.ReportMetadata{
+			Tokens: map[string]string{herdrapi.InjTokenPC: remotePC, herdrapi.InjTokenSID: sid},
+		})
+	}
+
+	// stdin reader は **プロセス生存中 1 本だけ**（cycle ごとに spawn すると前
+	// reader が os.Stdin.Read でブロックしたまま残り、複数 reader がキーストローク
+	// を奪い合って取りこぼす＝敵対的レビューで確認）。現接続へ転送し、未接続中の
+	// 入力は破棄する。プロセス終了（pane close で herdr が kill）で goroutine も消える。
+	holder := &connHolder{}
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, rerr := os.Stdin.Read(buf)
+			if n > 0 {
+				_ = holder.write(buf[:n])
+			}
+			if rerr != nil {
+				return
+			}
+		}
+	}()
 
 	// ⚠ この pane は reconcile が管理する（リモートセッション消滅で pane.close）。
 	// attach は **設定/Firestore/relay のどの失敗でも exit しない**（exit すると
@@ -70,7 +128,7 @@ func cmdAttach(args []string, stdout, stderr io.Writer) error {
 			return nil
 		}
 		start := time.Now()
-		attachCycle(ctx, injSid, remotePC, in, out)
+		attachCycle(ctx, injSid, remotePC, holder, out)
 		if ctx.Err() != nil {
 			return nil
 		}
@@ -92,7 +150,7 @@ func cmdAttach(args []string, stdout, stderr io.Writer) error {
 // 失敗でも **exit せず戻る**（cmdAttach の backoff ループが再試行＝pane は生存）。
 // 設定は primary クラウド（reconcile が pane env に GCP_PROJECT 等を注入する。
 // env が無くても config.json / clouds.json から解決を試みる）。
-func attachCycle(ctx context.Context, injSid, remotePC string, in, out *os.File) {
+func attachCycle(ctx context.Context, injSid, remotePC string, holder *connHolder, out *os.File) {
 	cfg, err := resolveConfig()
 	if err != nil {
 		fmt.Fprintf(out, "\x1b[2J\x1b[H↗ %s: 設定解決失敗（再試行）: %v\r\n", remotePC, err)
@@ -118,12 +176,12 @@ func attachCycle(ctx context.Context, injSid, remotePC string, in, out *os.File)
 	}
 	defer st.Close()
 
-	attachOnce(cctx, st, cl.RelayURL, injSid, remotePC, in, out)
+	attachOnce(cctx, st, cl.RelayURL, injSid, remotePC, holder, out)
 }
 
 // attachOnce は 1 接続の生存（grant→wake→dial→frame/input pump）。conn 切断か
 // ctx 終了で戻る。エラーは画面に控えめに出し、上位の backoff ループが再接続する。
-func attachOnce(ctx context.Context, st *state.Client, relayURL, injSid, remotePC string, in, out *os.File) {
+func attachOnce(ctx context.Context, st *state.Client, relayURL, injSid, remotePC string, holder *connHolder, out *os.File) {
 	// viewer 許可を先に置き、リモート agent を起こす（source を bridge させる）。
 	gctx, gcancel := context.WithTimeout(ctx, 10*time.Second)
 	_ = st.PutRelayGrant(gctx, injSid, "viewer", injGrantTTL)
@@ -139,6 +197,12 @@ func attachOnce(ctx context.Context, st *state.Client, relayURL, injSid, remoteP
 	}
 	defer conn.Close()
 
+	// この接続を holder に載せ、常駐 stdin reader（cmdAttach）が入力を転送できる
+	// ようにする。切断で外す（未接続中の入力は破棄＝次接続から届く）。cycle ごとに
+	// stdin reader を作ると前 reader が残ってキーを奪い合う＝敵対的レビューで確認。
+	holder.set(conn)
+	defer holder.set(nil)
+
 	// 初回 RESIZE（cm-wire magic）で observe サイズを pane 実寸へ。以後 SIGWINCH
 	// で再送。RESIZE を送らないと bridge は初回 full frame を出さない（実測仕様）。
 	rows, cols := termSize(int(out.Fd()))
@@ -147,22 +211,6 @@ func attachOnce(ctx context.Context, st *state.Client, relayURL, injSid, remoteP
 	winch := make(chan os.Signal, 1)
 	signal.Notify(winch, syscall.SIGWINCH)
 	defer signal.Stop(winch)
-
-	// 入力: stdin（キーストローク）→ conn（cm-wire で bridge が pane.send へ）。
-	go func() {
-		buf := make([]byte, 4096)
-		for {
-			n, rerr := in.Read(buf)
-			if n > 0 {
-				if _, werr := conn.Write(buf[:n]); werr != nil {
-					return
-				}
-			}
-			if rerr != nil {
-				return
-			}
-		}
-	}()
 
 	// SIGWINCH: 最新サイズを RESIZE 再送（bridge が observe respawn＝新 full frame）。
 	go func() {

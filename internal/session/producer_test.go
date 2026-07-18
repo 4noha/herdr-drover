@@ -565,12 +565,17 @@ func (r *recordingState) OwnSessionKeys(ctx context.Context) ([]string, error) {
 type fakeHerdr struct {
 	panes    []herdrapi.PaneInfo
 	agents   []herdrapi.AgentInfo
+	wss      []herdrapi.WorkspaceInfo
 	paneErr  error
 	agentErr error
+	wsErr    error
 }
 
 func (f *fakeHerdr) PaneList() ([]herdrapi.PaneInfo, error)   { return f.panes, f.paneErr }
 func (f *fakeHerdr) AgentList() ([]herdrapi.AgentInfo, error) { return f.agents, f.agentErr }
+func (f *fakeHerdr) WorkspaceList() ([]herdrapi.WorkspaceInfo, error) {
+	return f.wss, f.wsErr
+}
 
 // TestTickScanErrorMakesNoStateCalls: 存在しない socket への**実 dial 失敗**
 // で、state 側が 1 回も呼ばれないことを呼出記録で確認（seed すら呼ばない
@@ -650,7 +655,7 @@ func TestBuildSessions(t *testing.T) {
 	agents := []herdrapi.AgentInfo{
 		{PaneID: "w1:p2", Name: "claude", AgentStatus: "working"},
 	}
-	ss := BuildSessions(panes, agents)
+	ss := BuildSessions(panes, agents, nil)
 	if len(ss) != 3 {
 		t.Fatalf("3 sessions のはず: %v", ss)
 	}
@@ -671,6 +676,52 @@ func TestBuildSessions(t *testing.T) {
 	if ss[2]["short_dir"] != "unknown" || ss[2]["window_name"] != "w2:p1" ||
 		ss[2]["is_active"] != false {
 		t.Fatalf("empty-cwd pane: %v", ss[2])
+	}
+}
+
+// TestBuildSessionsExcludesInjectedPanes は「リモート pane 注入（reconcile）が
+// 作った注入 pane を producer が Firestore へ push しない」不変条件の常設見張り。
+//
+// これが破れると cross-PC で無限増殖する（敵対的レビューで確認した critical 経路）:
+// PC-A の注入 pane（PC-B のセッションの viewer）を A の producer が push
+// → PC-B の reconcile が ListSessions で拾い B にも注入 pane を作る
+// → その pane を B の producer が push → A が拾って再注入 … と発散する。
+//
+// ⚠判定の権威は **注入専用 workspace 所属**（生成時原子・再起動保持）。token だけに
+// 頼ると 2 つの穴が開く（再レビューで実 herdr 0.7.4 検証済み）:
+//   - create↔token 付与の race 窓に producer が scan すると token 無しで push
+//   - herdr サーバ再起動で report_metadata token が消え、復元 pane を恒久 push
+// どちらも「token 無しだが注入 ws に居る」pane。BuildSessions は workspace 所属で
+// これらも落とすこと。
+func TestBuildSessionsExcludesInjectedPanes(t *testing.T) {
+	const injWS = "w9" // 注入専用 workspace の id（呼び手が WorkspaceList から解決する）
+	injWsIDs := map[string]bool{injWS: true}
+	panes := []herdrapi.PaneInfo{
+		{PaneID: "w1:p1", WorkspaceID: "w1", Cwd: "/Users/x/works/real", AgentStatus: "working"}, // 自 PC の本物
+		{ // token 付きの注入 pane（定常状態）
+			PaneID:      "w9:p1",
+			WorkspaceID: injWS,
+			AgentStatus: "working",
+			Tokens:      map[string]string{herdrapi.InjTokenPC: "other-pc", herdrapi.InjTokenSID: "w3:p2"},
+		},
+		{ // ★token 無しだが注入 ws に居る＝race 窓 / 再起動 token 消失の pane。
+			PaneID:      "w9:p2",
+			WorkspaceID: injWS,
+			AgentStatus: "working",
+			// Tokens 無し（付与前 or 再起動で消失）。token 判定だけならここで漏れる。
+		},
+	}
+	ss := BuildSessions(panes, nil, injWsIDs)
+	if len(ss) != 1 {
+		t.Fatalf("注入 pane（token 付き＋token 無し両方）を除いて 1 session のはず（cross-PC 増殖防止）: %v", ss)
+	}
+	if ss[0]["key"] != "w1:p1" {
+		t.Fatalf("残るのは自 PC の本物 pane のみ: %v", ss[0])
+	}
+	for _, s := range ss {
+		if k := s["key"]; k == "w9:p1" || k == "w9:p2" {
+			t.Fatalf("注入 pane が push 対象に混入した＝cross-PC 無限増殖の穴: %v", s)
+		}
 	}
 }
 

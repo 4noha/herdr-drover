@@ -68,6 +68,31 @@ type PaneInfo struct {
 	Revision      int               `json:"revision"`
 }
 
+// InjTokenPC / InjTokenSID は「リモート pane 注入（cmd の reconcile）が作った注入
+// pane」を識別する pane.report_metadata token キー。**producer はこれを持つ pane を
+// 自 PC のセッションとして Firestore へ push してはならない**（peer PC が再注入して
+// cross-PC で無限増殖する＝DESIGN「派生 sid は sessions コレクションに出さない」の
+// 不変条件）。reconcile の cur 認識にも使う（両パッケージ共有のため herdrapi に置く）。
+const (
+	InjTokenPC  = "drover_inj_pc"
+	InjTokenSID = "drover_inj_sid"
+)
+
+// InjWorkspaceLabel は注入 pane を集める専用 workspace の label。**この
+// workspace への所属こそが「注入 pane である」ことの権威**（producer/reconcile
+// 共有）。理由（敵対的レビューで実 herdr 0.7.4 検証済み）:
+//   - report_metadata token（InjTokenPC/SID）は (a) create と別 call ＝間に race 窓が
+//     あり、(b) herdr サーバ再起動で **消える**（pane 自体は同 pane_id で復元されるのに
+//     token は落ちることを実測）。token だけを注入判定に使うと、①token 付与前に
+//     producer が scan して push→peer が再注入する cross-PC 増殖の窓、②再起動で
+//     token を失った pane を producer が恒久 push する穴、が開く。
+//   - workspace 所属は layout.apply の **生成時に原子的**に決まり、session.json で
+//     **再起動を跨いで保持**される＝両方の穴を塞ぐ。token は (pc,sid) の詳細としてのみ使う。
+//
+// ⚠この workspace は注入専用の予約領域＝ユーザーが実作業 pane を置かないこと
+// （置くと producer が同期対象から外す＝仕様）。
+const InjWorkspaceLabel = "↗remote"
+
 // AgentSession は herdr が検出したエージェントのセッション識別子。claude では
 // `{source:"herdr:claude", agent:"claude", kind:"id", value:<会話 uuid>}` で、
 // value が `claude --resume <uuid>` の uuid と一致する（実測・resume backstop の権威）。

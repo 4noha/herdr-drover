@@ -26,10 +26,10 @@ import (
 )
 
 const (
-	injSource    = "drover-inj"    // pane.report_metadata の source
-	injTokPC     = "drover_inj_pc" // identity token キー（exact-match・非ヒューリスティック）
-	injTokSID    = "drover_inj_sid"
-	injWorkspace = "↗remote" // 注入 pane を集める workspace（実作業 ws を汚さない）
+	injSource    = "drover-inj"                  // pane.report_metadata の source
+	injTokPC     = herdrapi.InjTokenPC           // identity token キー（producer と共有＝herdrapi）
+	injTokSID    = herdrapi.InjTokenSID          // exact-match・非ヒューリスティック
+	injWorkspace = herdrapi.InjWorkspaceLabel    // 注入 pane を集める専用 workspace（＝注入判定の権威）
 )
 
 // injMarkerKey は (pc,sid) の一意結合キー（cur/desired 突合せ用）。
@@ -62,7 +62,9 @@ type injMeta struct{ pc, sid, dir string }
 // データ（他 PC のセッション行）を fake で注入するために interface 化する
 // （herdr の pane 生成/list/close/dedup/cap＝リスクの本体は実 herdr で担保）。
 type remoteSource interface {
-	ListPCs(ctx context.Context) ([]string, error)
+	// DroverPCs は agent_kind==herdr-drover の PC のみ（#inj に応答できる drover
+	// agent）。cm agent の pc は含めない＝blank pane・自己注入を構造的に防ぐ。
+	DroverPCs(ctx context.Context) ([]string, error)
 	ListSessions(ctx context.Context, pc string) ([]map[string]any, error)
 }
 
@@ -99,20 +101,34 @@ func reconcileRemote(ctx context.Context, api *herdrapi.Client, st remoteSource,
 		lg.Printf("[reconcile] ABORT: pane.list 失敗（作成/削除しない）: %v", err)
 		return
 	}
+	// 注入 workspace の id を先に解決（無ければ "" ＝まだ作られていない）。cap は
+	// この workspace の**全 pane 数**で判定する（token 無し orphan も数える＝
+	// token 付与失敗で cur に映らない pane が cap を擦り抜けて無限増殖するのを防ぐ）。
+	// workspace.list の失敗は abort（"" 退行で cap/orphan 掃除が無効化されるため）。
+	injWsID, werr := findWorkspaceID(api, injWorkspace)
+	if werr != nil {
+		lg.Printf("[reconcile] ABORT: workspace.list 失敗（cap/掃除の基準が立たない）: %v", werr)
+		return
+	}
 	cur := map[string]injMeta{} // pane_id -> (pc,sid)
+	injWsPanes := 0
 	for i := range panes {
 		p := &panes[i]
 		pc, sid := p.Tokens[injTokPC], p.Tokens[injTokSID]
 		if pc != "" && sid != "" {
 			cur[p.PaneID] = injMeta{pc: pc, sid: sid}
 		}
+		if injWsID != "" && p.WorkspaceID == injWsID {
+			injWsPanes++ // cap 用（token 無しの構造 root pane も含む＝安全側の上限）
+		}
 	}
 
-	// desired: 他 PC の session。ListPCs/ListSessions 失敗は abort（desired を
-	// 空とみなすと全 kill＝破壊的）。
-	pcs, perr := st.ListPCs(ctx)
+	// desired: **drover PC のみ**の session（cm agent の pc は #inj に応答できず
+	// 永久 blank になるため除外・同居 cm agent の自己注入も防ぐ）。DroverPCs/
+	// ListSessions 失敗は abort（desired を空とみなすと全 kill＝破壊的）。
+	pcs, perr := st.DroverPCs(ctx)
 	if perr != nil {
-		lg.Printf("[reconcile] ABORT: ListPCs 失敗: %v", perr)
+		lg.Printf("[reconcile] ABORT: DroverPCs 失敗: %v", perr)
 		return
 	}
 	desired := map[string]injMeta{} // markerKey -> (pc,sid,dir)
@@ -137,13 +153,20 @@ func reconcileRemote(ctx context.Context, api *herdrapi.Client, st remoteSource,
 	lg.Printf("[reconcile] desired=%d cur(injected)=%d", len(desired), len(cur))
 
 	// 暴走上限ガード（検出が部分的に壊れても pane が無限増殖しない最後の砦）。
+	// **cur ではなく注入 workspace の全 pane 数**で判定＝token 無し orphan も
+	// カウントに含める（token 付与失敗の pane は cur に映らないため cur 基準だと
+	// cap を擦り抜ける。敵対的レビューで確認）。
+	guard := len(cur)
+	if injWsPanes > guard {
+		guard = injWsPanes
+	}
 	maxPanes := len(desired)*3 + 8
-	noCreate := len(cur) > maxPanes
+	noCreate := guard > maxPanes
 	if noCreate {
-		lg.Printf("[reconcile] CAP: cur=%d > %d → 作成停止し整理のみ", len(cur), maxPanes)
+		lg.Printf("[reconcile] CAP: 注入 pane=%d > %d → 作成停止し整理のみ", guard, maxPanes)
 	}
 
-	wsID := "" // 注入 workspace（作成が要るときだけ遅延解決＝空 workspace を作らない）
+	wsID := injWsID // 既存の注入 workspace（無ければ作成時に遅延解決）
 	for mk, d := range desired {
 		var ids []string
 		for pid, m := range cur {
@@ -173,8 +196,14 @@ func reconcileRemote(ctx context.Context, api *herdrapi.Client, st remoteSource,
 			if merr := api.PaneReportMetadata(pid, injSource, herdrapi.ReportMetadata{
 				Tokens: map[string]string{injTokPC: d.pc, injTokSID: d.sid},
 			}); merr != nil {
-				// token 未付与でも launch argv があり、次周の dup 整理で自己修復。
-				lg.Printf("[reconcile] metadata 付与失敗 %s（次周整理で収束）: %v", pid, merr)
+				// ⚠ identity は layout.apply では原子設定できない（token 非対応）。
+				// token 付与に失敗した pane は cur に映らず reconcile が二度と認識
+				// できない orphan になり、毎周再作成されて無限増殖する（敵対的
+				// レビューで確認）。token を付けられないなら pane を即 close して
+				// orphan を残さない（次周に新規作成でやり直す）。
+				lg.Printf("[reconcile] metadata 付与失敗 %s → 即 close（orphan 回避）: %v", pid, merr)
+				_ = api.PaneClose(pid)
+				continue
 			}
 			lg.Printf("[reconcile] CREATE %s/%s -> %s", d.pc, d.sid, pid)
 		} else {
@@ -188,6 +217,12 @@ func reconcileRemote(ctx context.Context, api *herdrapi.Client, st remoteSource,
 		_ = api.PaneClose(pid)
 		lg.Printf("[reconcile] CLOSE %s（リモート消滅）", pid)
 	}
+	// ⚠ token 無し pane の一括掃除はしない: 注入 workspace には WorkspaceCreate 由来の
+	// **構造 root pane（token 無し）**が常駐する（実 herdr 0.7.4 で実測）ため、「token 無し
+	// ＝孤児」で掃除すると root pane を毎周 kill してしまう。代わりに再起動で token を失った
+	// 復元 pane は attach プロセスが起動時に自分の HERDR_PANE_ID へ token を **再表明**して
+	// 自己治癒し（attach.go）、万一 reconcile が重複を作っても上の dedup（ids[1:] close）が
+	// 回収する。producer は注入 workspace 所属で push を止めるので cross-PC 増殖は起きない。
 }
 
 // runRemoteInject は他 PC のセッションをローカル herdr へ注入し続ける（push 駆動:
@@ -241,6 +276,26 @@ func runRemoteInject(ctx context.Context, api *herdrapi.Client, st *state.Client
 			reconcileRemote(ctx, api, st, cl, selfExe, lg)
 		}
 	}
+}
+
+// findWorkspaceID は label の workspace id を返す（無ければ ""・error は伝播）。cap の
+// 「注入 workspace の全 pane 数」カウント／orphan 掃除の基準に使う。重複 label は number
+// 最小を採る（wsmap.ResolveWorkspaceID の作成選択と一致＝数える ws と作る ws が同一に
+// なる）。**error を握り潰さない**: workspace.list が落ちた周に "" を返すと injWsPanes=0 に
+// 退行して cap が cur-only へ弱まり orphan 掃除も無効化される＝他の scan（PaneList/
+// DroverPCs/ListSessions）と同じ abort 規律に揃える（呼び手が abort する）。
+func findWorkspaceID(api *herdrapi.Client, label string) (string, error) {
+	wss, err := orgListWorkspaces(api)
+	if err != nil {
+		return "", err
+	}
+	best, bestNum := "", 0
+	for _, w := range wss {
+		if w.Label == label && (best == "" || w.Number < bestNum) {
+			best, bestNum = w.WorkspaceID, w.Number
+		}
+	}
+	return best, nil
 }
 
 // applyInjectPane は layout.apply で「wsID に新 tab＋argv 直接実行 pane 1 枚」を
