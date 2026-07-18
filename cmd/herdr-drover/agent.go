@@ -20,10 +20,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/4noha/herdr-drover/internal/cloud/state"
+	"github.com/4noha/drover-cloud/selfupdate"
+	"github.com/4noha/drover-cloud/state"
 	"github.com/4noha/herdr-drover/internal/commands"
 	"github.com/4noha/herdr-drover/internal/herdrapi"
-	"github.com/4noha/herdr-drover/internal/selfupdate"
 	"github.com/4noha/herdr-drover/internal/session"
 )
 

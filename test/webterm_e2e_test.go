@@ -43,7 +43,7 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/4noha/herdr-drover/internal/cloud/state"
+	"github.com/4noha/drover-cloud/state"
 )
 
 // webtermPCID は本ゲート専用の PC id（TestE2EAgentLifecycle の e2e-herdr と

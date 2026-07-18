@@ -33,7 +33,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/4noha/herdr-drover/internal/cloud/state"
+	"github.com/4noha/drover-cloud/state"
 )
 
 // errUsage は使い方エラー（exit 2）を実行時エラー（exit 1）と区別する

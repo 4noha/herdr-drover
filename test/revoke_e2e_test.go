@@ -20,7 +20,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/4noha/herdr-drover/internal/cloud/state"
+	"github.com/4noha/drover-cloud/state"
 )
 
 // rvkPCID は本テスト専用の PC id（TestE2EAgentLifecycle の pcID と分離し、

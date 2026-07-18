@@ -9,7 +9,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/4noha/herdr-drover/internal/selfupdate"
+	"github.com/4noha/drover-cloud/selfupdate"
 )
 
 // テスト seam（internal/commands の DoUpdate seam と同じ流儀）。

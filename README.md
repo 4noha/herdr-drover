@@ -25,6 +25,13 @@
 - herdr 本体のコード・設定は無改変。AGPL 衛生: herdr とはプロセス境界の
   データ交換のみ（ソース断片の vendor 禁止）
 
+- クラウド層（relay/Web/Firestore サーバ ＋ `state`/`relayclient`/`selfupdate`
+  の共有 Go ライブラリ）は独立リポジトリ **[drover-cloud](../drover-cloud)** に
+  切り出してある。herdr-drover はその共有ライブラリを import し、クラウドは
+  drover-cloud を Cloud Run に 1 回デプロイしたものを全 PC で共有する
+
+**構築手順は [SETUP.md](SETUP.md)**（PC 側の導入＋クラウド参加）。クラウドを
+一から立てる手順は [drover-cloud/SETUP.md](../drover-cloud/SETUP.md)。
 設計詳細は [DESIGN.md](DESIGN.md)。
 
 ## 使い方

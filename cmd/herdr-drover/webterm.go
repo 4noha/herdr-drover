@@ -28,9 +28,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/4noha/drover-cloud/relayclient"
+	"github.com/4noha/drover-cloud/state"
 	"github.com/4noha/herdr-drover/internal/bridge"
-	"github.com/4noha/herdr-drover/internal/cloud/relayclient"
-	"github.com/4noha/herdr-drover/internal/cloud/state"
 	"github.com/4noha/herdr-drover/internal/herdrapi"
 )
 

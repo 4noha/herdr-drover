@@ -29,7 +29,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/4noha/herdr-drover/internal/cloud/state"
+	"github.com/4noha/drover-cloud/state"
 	"github.com/4noha/herdr-drover/internal/herdrapi"
 )
 

@@ -27,7 +27,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/4noha/herdr-drover/internal/cloud/state"
+	"github.com/4noha/drover-cloud/state"
 )
 
 // cmdPCID は本ゲート専用の PC id（他 e2e と分離＝wake/doc/commands が
