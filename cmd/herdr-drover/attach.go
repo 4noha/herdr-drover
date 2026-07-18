@@ -190,7 +190,10 @@ func attachOnce(ctx context.Context, st *state.Client, relayURL, injSid, remoteP
 
 	dctx, dcancel := context.WithCancel(ctx)
 	defer dcancel()
-	conn, err := relayclient.Dial(dctx, relayURL, injSid, "viewer")
+	// source PC を spc で渡す＝relay の KeyFor が slave source PC の時だけ
+	// slaveSessionKey(spc,injSid) で viewer を Accept し、slave の #inj source と
+	// ペアする（master source PC では spc 無視＝従来と同一 wire）。
+	conn, err := relayclient.DialViewerFrom(dctx, relayURL, injSid, remotePC)
 	if err != nil {
 		fmt.Fprintf(out, "\x1b[2J\x1b[H↗ %s / %s: relay 接続失敗（再試行）: %v\r\n", remotePC, injSid, err)
 		return
