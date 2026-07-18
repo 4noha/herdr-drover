@@ -33,26 +33,60 @@ import (
 	"github.com/4noha/herdr-drover/internal/herdrapi"
 )
 
-// cmdMvTab は対話 or フラグ指定の 2 モード。
+// cmdMvTab は対話 or フラグ指定の 2 モード＋補助フラグ（--self / --dst-ws-label）。
+// 補助フラグは Claude 等の agent が「このセッションを <label> に」と自然言語 1 発で
+// 指示するための exact-match ショートカット（skill から `--self --dst-ws-label X` の
+// 1 行呼び出しを可能にする）。ヒューリスティック分類はしない（鉄則③）:
+//   - --self は pane.current の返却 tab_id を使う（herdr が確定する自 pane・実測 API）
+//   - --dst-ws-label は workspace.list の label exact 一致で解決。複数一致は明示エラー
+//     （herdr の label は重複可＝CLAUDE.md「workspace label は重複可＝識別子にしない」）
 func cmdMvTab(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("mv-tab", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	var srcTab, dstWS string
+	var srcTab, dstWS, dstWSLabel string
+	var self bool
 	fs.StringVar(&srcTab, "src-tab", "", "移動元 tab_id（非対話。省略時は対話ピッカ）")
 	fs.StringVar(&dstWS, "dst-ws", "", "移動先 workspace_id（非対話。省略時は対話ピッカ）")
+	fs.StringVar(&dstWSLabel, "dst-ws-label", "", "移動先 workspace label（label 重複時はエラー＝--dst-ws を使う）")
+	fs.BoolVar(&self, "self", false, "起動プロセスが走る pane の Tab を src にする（pane.current で exact 特定）")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 {
-		return fmt.Errorf("使い方: herdr-drover mv-tab [--src-tab <id> --dst-ws <id>]")
+		return fmt.Errorf("使い方: herdr-drover mv-tab [--self|--src-tab <id>] [--dst-ws <id>|--dst-ws-label <label>]")
 	}
-	interactive := srcTab == "" || dstWS == ""
+	if self && srcTab != "" {
+		return fmt.Errorf("--self と --src-tab は同時指定不可（どちらか一方）")
+	}
+	if dstWS != "" && dstWSLabel != "" {
+		return fmt.Errorf("--dst-ws と --dst-ws-label は同時指定不可（どちらか一方）")
+	}
 
 	api := herdrapi.New("")
 
+	// --self: pane.current で自 pane を exact 特定→tab_id を取り出す（実測 API）。
+	if self {
+		cur, err := paneCurrent(api)
+		if err != nil {
+			return fmt.Errorf("--self 解決失敗（pane.current）: %w", err)
+		}
+		srcTab = cur.TabID
+		fmt.Fprintf(stdout, "mv-tab: --self → tab=%s pane=%s ws=%s\n", cur.TabID, cur.PaneID, cur.WorkspaceID)
+	}
+	// --dst-ws-label: workspace.list の label exact 一致で解決。
+	if dstWSLabel != "" {
+		var err error
+		dstWS, err = resolveWSByLabel(api, dstWSLabel)
+		if err != nil {
+			return err
+		}
+	}
+
+	interactive := srcTab == "" || dstWS == ""
+
 	if interactive {
 		if !stdinIsTTY() {
-			return fmt.Errorf("対話ピッカは TTY が必要です。plugin action `mv-tab` 経由（launcher pane 内）または通常のシェル pane から起動してください。非対話モードは --src-tab <id> --dst-ws <id> を指定してください")
+			return fmt.Errorf("対話ピッカは TTY が必要です。plugin action mv-tab 経由（launcher pane 内）または通常のシェル pane から起動してください。非対話モードは --src-tab <id> --dst-ws <id>（または --self / --dst-ws-label）を指定してください")
 		}
 		var err error
 		if srcTab == "" {
@@ -62,7 +96,6 @@ func cmdMvTab(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 			}
 		}
 		if dstWS == "" {
-			// src Tab の workspace_id を除外して選ばせる（同 WS 移動は無意味）。
 			curWS, err := workspaceOfTab(api, srcTab)
 			if err != nil {
 				return err
@@ -75,6 +108,56 @@ func cmdMvTab(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	}
 
 	return runMvTabMove(api, srcTab, dstWS, stdout)
+}
+
+// paneCurrentInfo は pane.current 応答の最小 decode（外部 API 追加を避け組込み）。
+type paneCurrentInfo struct {
+	PaneID      string `json:"pane_id"`
+	TabID       string `json:"tab_id"`
+	WorkspaceID string `json:"workspace_id"`
+}
+
+// paneCurrent は起動プロセスが走る pane を herdr に問い合わせる（実測 API・
+// `herdr pane current` の背後）。ヒューリスティック（cwd 一致等）は使わない
+// ＝同一 cwd の claude が複数居ても exact に自 pane を特定できる（鉄則③）。
+func paneCurrent(api *herdrapi.Client) (*paneCurrentInfo, error) {
+	raw, err := api.Call("pane.current", struct{}{})
+	if err != nil {
+		return nil, err
+	}
+	var out struct {
+		Pane paneCurrentInfo `json:"pane"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("pane_current decode: %w", err)
+	}
+	if out.Pane.TabID == "" {
+		return nil, fmt.Errorf("pane.current 応答に tab_id が無い（wire 変化?）")
+	}
+	return &out.Pane, nil
+}
+
+// resolveWSByLabel は label exact 一致で workspace_id を返す。0 件は不在エラー、
+// 複数件は「label は重複可＝識別子にしない」の CLAUDE.md 実測事実に従い明示エラー
+// （呼び出し側に --dst-ws <id> を指示。silent に先頭を選ばない）。
+func resolveWSByLabel(api *herdrapi.Client, label string) (string, error) {
+	wss, err := orgListWorkspaces(api)
+	if err != nil {
+		return "", err
+	}
+	var hits []string
+	for _, w := range wss {
+		if w.Label == label {
+			hits = append(hits, w.WorkspaceID)
+		}
+	}
+	if len(hits) == 0 {
+		return "", fmt.Errorf("workspace label %q が見つからない（既存 label は workspace.list を参照）", label)
+	}
+	if len(hits) > 1 {
+		return "", fmt.Errorf("workspace label %q が %d 件一致（%v）＝曖昧。--dst-ws <workspace_id> で指定してください", label, len(hits), hits)
+	}
+	return hits[0], nil
 }
 
 // runMvTabMove は src Tab を dst WS へ丸ごと引っ越し、成功後に自動フォーカスする。

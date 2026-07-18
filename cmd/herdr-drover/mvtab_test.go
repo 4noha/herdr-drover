@@ -90,6 +90,30 @@ func TestCmdMvTabParseErrors(t *testing.T) {
 	}
 }
 
+func TestCmdMvTabConflictingFlags(t *testing.T) {
+	// --self と --src-tab の排他、--dst-ws と --dst-ws-label の排他。
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"self+src-tab", []string{"--self", "--src-tab", "w1:t1"}, "同時指定不可"},
+		{"dst-ws+dst-ws-label", []string{"--dst-ws", "w2", "--dst-ws-label", "slave"}, "同時指定不可"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			err := cmdMvTab(c.args, strings.NewReader(""), &stdout, &stderr)
+			if err == nil {
+				t.Fatal("排他違反はエラーを返すべき")
+			}
+			if !strings.Contains(err.Error(), c.want) {
+				t.Errorf("エラー不一致: got=%v want含む=%q", err, c.want)
+			}
+		})
+	}
+}
+
 func TestCmdMvTabLaunchNeedsHerdrOrEnv(t *testing.T) {
 	// HERDR_WORKSPACE_ID を明示 unset・env なしでも api dial 失敗まで進む
 	// （launcher 自体のロジックのフェイルセーフ確認）。

@@ -142,6 +142,41 @@ herdr-drover organize --capture    # 現配置を exact ルールとして保存
   ルール書込・skip は必ず 1 行ログに残る。
   次に同じ場所で claude を開くと **Tab ごと**学習先 Workspace に生まれる
 
+### mv-tab（Tab を別 Workspace へ丸ごと引っ越し）
+
+herdr 0.7.4 の `tab.move` は同一 workspace 内 reorder 専用で、**別 workspace への
+Tab 移動 API は無い**。`pane.move` を唯一のプリミティブとして丸ごと引っ越す
+（単独 pane Tab は `pane.move new_tab` 一発／複数 pane Tab は `pane.layout` を採取して
+`pane.move new_tab` → `pane.move tab` で残り pane を再構築＝連鎖近似）。terminal_id
+はプラットフォーム API 経由で維持されるため走行中プロセスは無停止。
+
+```sh
+# CLI（対話ピッカ・TTY 必須）
+herdr-drover mv-tab
+
+# CLI（非対話）
+herdr-drover mv-tab --src-tab w1:tD --dst-ws w3
+herdr-drover mv-tab --self --dst-ws-label slave   # 起動プロセスの Tab を label 一致 WS へ
+
+# plugin action（drawer から起動）
+#   → launcher が新 Tab を layout.apply で開き、そこの TTY 内で対話ピッカを走らせる
+```
+
+- `--self` は herdr の `pane.current` API で自 pane を **exact 特定**（推測なし）。
+  agent（Claude 等）が「このセッションを X に」と自然言語 1 発で指示するための口。
+- `--dst-ws-label` は `workspace.list` の label exact 一致で解決。**label は重複可**
+  （実測仕様）なので複数一致は明示エラー＝ `--dst-ws <workspace_id>` で再指定。
+- 成功後は `workspace.focus` + `tab.focus` で受入先 WS/新 Tab へ自動フォーカス。
+
+**Claude Code から使う場合の Skill**: リポ同梱の `skills/mv-tab/SKILL.md` を
+Claude Code の skills ディレクトリに配置すると、「このセッションを slave に移動して」
+のような自然言語で `--self --dst-ws-label` を自動起動できる:
+
+```sh
+mkdir -p ~/.claude/skills
+ln -s "$PWD/skills/mv-tab" ~/.claude/skills/mv-tab
+```
+
 ### 複数クラウド（端末ごとにマルチ Google アカウント）
 
 1 台の PC が **複数の独立したクラウド**（別 Google アカウント＝別 GCP
