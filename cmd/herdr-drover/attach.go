@@ -103,6 +103,16 @@ func cmdAttach(args []string, stdout, stderr io.Writer) error {
 	// reader が os.Stdin.Read でブロックしたまま残り、複数 reader がキーストローク
 	// を奪い合って取りこぼす＝敵対的レビューで確認）。現接続へ転送し、未接続中の
 	// 入力は破棄する。プロセス終了（pane close で herdr が kill）で goroutine も消える。
+	// pane PTY を raw モードにする。canonical（行バッファ）のままだと owner が
+	// ↗窓 で打鍵しても Enter まで os.Stdin.Read が返らず、リモートへ入力が届か
+	// ない（Web は xterm.js が raw 相当なので効く＝↗窓 だけ owner→remote 入力が
+	// 効かなかった実バグ・master/slave 問わず）。出力（frames→out）は raw 不要
+	// なので表示は動いていた。cfmakeraw で OPOST も落ち frame の生 ANSI 透過も
+	// 正しくなる（localview と同一 helper・同パッケージ）。TTY でなければ skip。
+	inFD := int(os.Stdin.Fd())
+	if old, rerr := enterRaw(inFD); rerr == nil {
+		defer restoreRaw(inFD, old)
+	}
 	holder := &connHolder{}
 	go func() {
 		buf := make([]byte, 4096)
