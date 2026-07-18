@@ -329,6 +329,29 @@ func (c *Client) ReportAgentSession(paneID, source, agent, sessionID string) err
 	}{paneID, source, agent, sessionID}, nil)
 }
 
+// PaneLayout は pane が属する tab のトポロジ（panes[]＋splits[]・rect 幾何）を返す。
+// result: {"type":"pane_layout","layout":{...}}。Tab 丸ごと引っ越しの再構築元。
+func (c *Client) PaneLayout(paneID string) (*PaneLayoutSnapshot, error) {
+	var out struct {
+		Layout PaneLayoutSnapshot `json:"layout"`
+	}
+	if err := c.call("pane.layout", struct {
+		PaneID string `json:"pane_id"`
+	}{paneID}, &out); err != nil {
+		return nil, err
+	}
+	return &out.Layout, nil
+}
+
+// PaneSplit は target pane を direction（"right"|"down"）に分割し新 pane を作る
+// （既定シェル）。テストで複数 pane の tab を組むのに使う（シム本体は使わない）。
+func (c *Client) PaneSplit(paneID, direction string) error {
+	return c.call("pane.split", struct {
+		TargetPaneID string `json:"target_pane_id"`
+		Direction    string `json:"direction"`
+	}{paneID, direction}, nil)
+}
+
 // WorkspaceCreate は新 workspace（root pane 付き）を作る。params は空で
 // よい（実測）。テスト・reconcile の pane 生成起点。
 func (c *Client) WorkspaceCreate() (*WorkspaceCreated, error) {

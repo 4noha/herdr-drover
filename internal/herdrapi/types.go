@@ -78,6 +78,39 @@ type AgentSession struct {
 	Value  string `json:"value"`
 }
 
+// PaneLayoutRect は pane/split の矩形（セル単位・pane.layout の幾何）。
+type PaneLayoutRect struct {
+	X      int `json:"x"`
+	Y      int `json:"y"`
+	Width  int `json:"width"`
+	Height int `json:"height"`
+}
+
+// PaneLayoutPane は pane.layout の 1 pane（rect 付き）。
+type PaneLayoutPane struct {
+	PaneID  string         `json:"pane_id"`
+	Focused bool           `json:"focused"`
+	Rect    PaneLayoutRect `json:"rect"`
+}
+
+// PaneLayoutSplit は pane.layout の 1 分割線（direction=right|down・ratio）。
+type PaneLayoutSplit struct {
+	ID        string         `json:"id"`
+	Direction string         `json:"direction"`
+	Ratio     float64        `json:"ratio"`
+	Rect      PaneLayoutRect `json:"rect"`
+}
+
+// PaneLayoutSnapshot は pane.layout 応答の tab トポロジ（flat: panes[]＋splits[]・
+// 木ではなく rect ベースの幾何表現。first/second pane の明示参照は無い＝実測）。
+type PaneLayoutSnapshot struct {
+	WorkspaceID   string            `json:"workspace_id"`
+	TabID         string            `json:"tab_id"`
+	FocusedPaneID string            `json:"focused_pane_id"`
+	Panes         []PaneLayoutPane  `json:"panes"`
+	Splits        []PaneLayoutSplit `json:"splits"`
+}
+
 // AgentInfo は agent.list / agent.start に現れる agent 情報。
 // 実採取（agent.start 応答の agent）:
 //

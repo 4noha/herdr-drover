@@ -11,13 +11,13 @@ package e2e
 //	  ルール書込 → シム新規が**新 Tab**で指定 workspace に着地（既存 tab の
 //	  pane 数不変を機械確認）→ 手動 Tab 移動の模擬 → organize --capture で
 //	  ルール化 → 同 cwd の新規 2 本目が学習先 workspace に新 Tab で着地 →
-//	  organize --dry-run が「移動不要」（全 KEEP 配置済・MOVE/CARVE ゼロ）
+//	  organize --dry-run が「移動不要」（全 KEEP 配置済・MOVE/MOVE_TAB ゼロ）
 //
-//	TestE2EWsRulesDirectStartAndCarveNormalize:
+//	TestE2EWsRulesDirectStartAndTabNormalize:
 //	  【herdr 直接起動ケース】agent name 無しの claude（stub）を herdr の
 //	  プロセス名検出（agent:"claude"）で同定し organize/capture が対象にする
 //	  ＋ 旧シム型の「間借り pane」（agent.start が既存 Tab を split）を
-//	  organize が新 Tab 切り出し（CARVE）で正規化する
+//	  organize が Tab 丸ごと引っ越し（MOVE_TAB）で正規化する
 //
 //	TestE2ELearnMovesDaemonRealBinary:
 //	  learn_moves=true の opt-in で **実バイナリ daemon** 稼働中に手動 Tab
@@ -391,9 +391,9 @@ func TestE2EWsRulesLoopRoundTrip(t *testing.T) {
 	wsrAssertTabsUnchanged(t, "シム新規 2 本目", base2, cur2)
 	wsrWaitDetected(t, api, work)
 
-	// --- ⑥ organize --dry-run → 「移動不要」（全 KEEP 配置済・MOVE/CARVE ゼロ） ---
+	// --- ⑥ organize --dry-run → 「移動不要」（全 KEEP 配置済・MOVE/MOVE_TAB ゼロ） ---
 	out = wsrRunBin(t, bin, srv.env, "organize", "--dry-run")
-	if strings.Contains(out, "MOVE ") || strings.Contains(out, "CARVE") {
+	if strings.Contains(out, "MOVE ") || strings.Contains(out, "MOVE_TAB") {
 		t.Fatalf("往復完了後に移動が計画された（移動不要のはず）:\n%s", out)
 	}
 	if !strings.Contains(out, "配置済") {
@@ -406,7 +406,7 @@ func TestE2EWsRulesLoopRoundTrip(t *testing.T) {
 
 // ============ 2. herdr 直接起動（name 無し検出）＋間借り pane の正規化 ============
 
-func TestE2EWsRulesDirectStartAndCarveNormalize(t *testing.T) {
+func TestE2EWsRulesDirectStartAndTabNormalize(t *testing.T) {
 	home := t.TempDir()
 	srv, api := startHerdr(t, "HOME="+home, "XDG_STATE_HOME="+t.TempDir())
 	bin := buildBinary(t)
@@ -437,22 +437,22 @@ func TestE2EWsRulesDirectStartAndCarveNormalize(t *testing.T) {
 
 	wsrWriteRules(t, home, fmt.Sprintf(`{"exact":{%q:"projD",%q:"projM"}}`, dirD, dirM))
 
-	// --- dry-run: name 無し検出 pane が MOVE・間借りが CARVE として計画される ---
+	// --- dry-run: name 無し検出 pane が MOVE・間借り同居 Tab が MOVE_TAB として計画される ---
 	out := wsrRunBin(t, bin, srv.env, "organize", "--dry-run")
-	var haveMoveD, haveCarveM bool
+	var haveMoveD, haveMoveTabM bool
 	for _, line := range strings.Split(out, "\n") {
-		if strings.HasPrefix(line, "MOVE") && strings.Contains(line, "cwd="+dirD+" ") {
+		if strings.HasPrefix(line, "MOVE ") && strings.Contains(line, "cwd="+dirD+" ") {
 			haveMoveD = true
 		}
-		if strings.HasPrefix(line, "CARVE") && strings.Contains(line, "cwd="+dirM+" ") {
-			haveCarveM = true
+		if strings.HasPrefix(line, "MOVE_TAB") && strings.Contains(line, "cwd="+dirM+" ") {
+			haveMoveTabM = true
 		}
 	}
 	if !haveMoveD {
 		t.Fatalf("name 無し検出 pane (cwd=%s) が MOVE 計画に無い:\n%s", dirD, out)
 	}
-	if !haveCarveM {
-		t.Fatalf("間借り pane (cwd=%s) が CARVE 計画に無い:\n%s", dirM, out)
+	if !haveMoveTabM {
+		t.Fatalf("間借り pane (cwd=%s) が MOVE_TAB 計画に無い:\n%s", dirM, out)
 	}
 	// dry-run 無変更（pane は動いていない）
 	for _, p := range wsrPanes(t, api) {
@@ -461,7 +461,7 @@ func TestE2EWsRulesDirectStartAndCarveNormalize(t *testing.T) {
 		}
 	}
 
-	// --- 実行: MOVE（Tab ごと）＋CARVE（新 Tab へ切り出し・同居温存） ---
+	// --- 実行: MOVE（単独 Tab ごと）＋MOVE_TAB（間借り Tab を丸ごと引っ越し） ---
 	out = wsrRunBin(t, bin, srv.env, "organize")
 	if !strings.Contains(out, "移動完了") {
 		t.Fatalf("実行結果の報告行が無い:\n%s", out)
@@ -488,13 +488,15 @@ func TestE2EWsRulesDirectStartAndCarveNormalize(t *testing.T) {
 		t.Fatalf("MOVE のソース Tab %s が閉じていない（空 Tab の自動 close が働くはず）", tabD)
 	}
 	if pM2 == nil || labels[pM2.WorkspaceID] != "projM" {
-		t.Fatalf("間借り claude が projM へ切り出されていない: %+v", pM2)
+		t.Fatalf("間借り claude が projM へ引っ越していない: %+v", pM2)
 	}
-	if counts[pM2.TabID] != 1 {
-		t.Fatalf("CARVE 後の新 Tab が claude 単独でない: pane_count=%d", counts[pM2.TabID])
+	// MOVE_TAB: Tab 丸ごと＝新 Tab は同居 shell も含む 2 pane、間借り元 Tab は
+	// 空になり自動 close（shell を置き去りにせず一緒に引っ越す＝丸ごと引っ越しの核心）。
+	if counts[pM2.TabID] != 2 {
+		t.Fatalf("MOVE_TAB 後の新 Tab が 2 pane（同居 shell 同伴）でない: pane_count=%d", counts[pM2.TabID])
 	}
-	if got := counts[agM.TabID]; got != 1 {
-		t.Fatalf("間借り元 Tab の同居 pane（shell）が温存されていない: pane_count=%d（want 1）", got)
+	if got, still := counts[agM.TabID]; still {
+		t.Fatalf("間借り元 Tab %s が空 close されず残っている: pane_count=%d", agM.TabID, got)
 	}
 	_ = paneD // 移動で pane_id が変わるため以後は cwd exact-match で追跡（alias 実測に依存しない）
 

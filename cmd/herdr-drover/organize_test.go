@@ -124,8 +124,8 @@ func TestComputeOrganizePlanTable(t *testing.T) {
 	if it := byPane["w1:p1"]; it.Action != "MOVE" || it.ToWSID != "w2" || it.CarryLabel != "" {
 		t.Errorf("w1:p1: %+v", it)
 	}
-	// 同居 → CARVE
-	if it := byPane["w1:p2"]; it.Action != "CARVE" || it.ToWSID != "w2" {
+	// 同居 → MOVE_TAB（Tab 丸ごと引っ越し）
+	if it := byPane["w1:p2"]; it.Action != "MOVE_TAB" || it.ToWSID != "w2" {
 		t.Errorf("w1:p2: %+v", it)
 	}
 	// claude 複数 Tab → SKIP（tab 単位）
@@ -477,9 +477,9 @@ func (s *orgSyncBuf) String() string {
 	return s.b.String()
 }
 
-// ============ 実 herdr: organize（MOVE/CARVE/KEEP・dry-run 無変更） ============
+// ============ 実 herdr: organize（MOVE/MOVE_TAB/KEEP・dry-run 無変更） ============
 
-func TestOrganizeRealHerdrMoveCarveKeepDryRun(t *testing.T) {
+func TestOrganizeRealHerdrMoveTabKeepDryRun(t *testing.T) {
 	sock := startHerdrForTest(t)
 	t.Setenv("HERDR_SOCKET_PATH", sock)
 	home := t.TempDir()
@@ -509,7 +509,7 @@ func TestOrganizeRealHerdrMoveCarveKeepDryRun(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("dry-run exit=%d\n%s%s", code, out, errb)
 	}
-	for _, want := range []string{"MOVE ", "CARVE", "KEEP ", "(新規作成: dst2)", "dry-run"} {
+	for _, want := range []string{"MOVE ", "MOVE_TAB", "KEEP ", "(新規作成: dst2)", "dry-run"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("dry-run 出力に %q が無い:\n%s", want, out)
 		}
@@ -526,7 +526,7 @@ func TestOrganizeRealHerdrMoveCarveKeepDryRun(t *testing.T) {
 		t.Fatalf("dry-run で workspace dst2 が作られた")
 	}
 
-	// --- 実行: MOVE（Tab ごと・label 引継ぎ・自動作成）＋CARVE（同居温存） ---
+	// --- 実行: MOVE（単独 Tab ごと）＋MOVE_TAB（同居 Tab 丸ごと引っ越し） ---
 	code, out, errb = runCapture(t, "organize")
 	if code != 0 {
 		t.Fatalf("organize exit=%d\n%s%s", code, out, errb)
@@ -562,30 +562,42 @@ func TestOrganizeRealHerdrMoveCarveKeepDryRun(t *testing.T) {
 	if labelOf[pA.TabID] != "work" {
 		t.Fatalf("単独 Tab の label が引き継がれていない: tab=%s label=%q", pA.TabID, labelOf[pA.TabID])
 	}
-	// CARVE: claude は dst へ・同居 sleep は元 Tab "mixed" に残る
-	var pB *orgPane
+	// MOVE_TAB: mixed Tab を丸ごと dst へ（claude も同居 sleep も dst・元 Tab は自動 close）
+	var pB, pSleep *orgPane
 	for i := range panes {
 		if panes[i].Cwd == dirB && panes[i].Agent == "claude" {
 			pB = &panes[i]
 		}
+		if panes[i].Cwd == dirB && panes[i].Agent != "claude" {
+			pSleep = &panes[i]
+		}
 	}
 	if pB == nil || pB.WorkspaceID != dst {
-		t.Fatalf("同居 claude が dst へ切り出されていない: %+v", pB)
+		t.Fatalf("同居 claude が dst へ引っ越していない: %+v", pB)
 	}
-	if pcOf[mixedTab] != 1 || labelOf[mixedTab] != "mixed" {
-		t.Fatalf("同居 Tab が温存されていない: pane_count=%d label=%q", pcOf[mixedTab], labelOf[mixedTab])
+	if pSleep == nil || pSleep.WorkspaceID != dst {
+		t.Fatalf("同居 sleep が Tab ごと dst へ引っ越していない（丸ごと引っ越しの核心）: %+v", pSleep)
+	}
+	if pB.TabID != pSleep.TabID {
+		t.Fatalf("claude と sleep が別 Tab に分かれた（丸ごと引っ越しでない）: claude tab=%s sleep tab=%s", pB.TabID, pSleep.TabID)
+	}
+	if labelOf[pB.TabID] != "mixed" {
+		t.Fatalf("引っ越し先 Tab に label \"mixed\" が引き継がれていない: %q", labelOf[pB.TabID])
+	}
+	if _, stillOpen := pcOf[mixedTab]; stillOpen {
+		t.Fatalf("元 mixed Tab %s が空 close されず残っている（pane_count=%d）", mixedTab, pcOf[mixedTab])
 	}
 	// KEEP: ルールなしは現状維持
 	if p := orgFindPaneByCwd(panes, dirC); p == nil || p.WorkspaceID != w1 {
 		t.Fatalf("ルールなし pane が動いた: %+v", p)
 	}
 
-	// --- 再実行: 全て KEEP（冪等）＝MOVE/CARVE ゼロ ---
+	// --- 再実行: 全て KEEP（冪等）＝MOVE/MOVE_TAB ゼロ ---
 	code, out, errb = runCapture(t, "organize")
 	if code != 0 {
 		t.Fatalf("再実行 exit=%d\n%s%s", code, out, errb)
 	}
-	if strings.Contains(out, "MOVE ") || strings.Contains(out, "CARVE") {
+	if strings.Contains(out, "MOVE ") || strings.Contains(out, "MOVE_TAB") {
 		t.Fatalf("再実行で移動が計画された（冪等でない）:\n%s", out)
 	}
 	if !strings.Contains(out, "配置済") {

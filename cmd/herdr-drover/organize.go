@@ -15,8 +15,11 @@ package main
 //     単独 Tab なら pane.move {destination:{type:"new_tab", workspace_id,
 //     label}} が実質 Tab 移動（ソース Tab は空になると自動 close・pane の
 //     terminal_id/agent name/label は維持を実測）。
-//   - 非 claude pane と同居する Tab は同じ pane.move new_tab で claude だけを
-//     **切り出す**（同居 pane は元 Tab に残る＝巻き込まない。実測で確認）。
+//   - 非 claude pane と同居する Tab は **Tab を丸ごと引っ越す**（pane.layout で
+//     現トポロジを採取→pane.move で新 Tab へ全 pane を再構築＝連鎖近似・元 Tab は
+//     空で自動 close。pane.move は単一 pane しか分割できないため単軸/右偏り連鎖は
+//     厳密・複雑な入れ子は連鎖近似。moveWholeTab）。曖昧（1 Tab に別 cwd の claude
+//     複数）は skip＋報告。
 //   - claude pane の同定は 2 系統 OR・どちらも exact-match（鉄則③）:
 //     (a) シム命名: agent 名が claude / claude-N（claudeshim の encode と
 //     厳密往復する isClaudeAgentName） (b) herdr 直接起動: pane.list の
@@ -149,6 +152,112 @@ func paneMoveNewTab(api *herdrapi.Client, paneID, workspaceID, label string) (*p
 	return &out.MoveResult, nil
 }
 
+// paneMoveIntoTab は pane.move {destination:{type:"tab"}} を発行し、targetPaneID
+// を split（"right"|"down"）方向・ratio で分割してその隣へ pane を移す。
+func paneMoveIntoTab(api *herdrapi.Client, paneID, tabID, targetPaneID, split string, ratio float64) (*paneMoveResult, error) {
+	dest := struct {
+		Type         string   `json:"type"`
+		TabID        string   `json:"tab_id"`
+		TargetPaneID string   `json:"target_pane_id,omitempty"`
+		Split        string   `json:"split"`
+		Ratio        *float64 `json:"ratio,omitempty"`
+	}{"tab", tabID, targetPaneID, split, &ratio}
+	raw, err := api.Call("pane.move", struct {
+		PaneID      string `json:"pane_id"`
+		Destination any    `json:"destination"`
+		Focus       bool   `json:"focus"`
+	}{paneID, dest, false})
+	if err != nil {
+		return nil, err
+	}
+	var out struct {
+		MoveResult paneMoveResult `json:"move_result"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("pane_move decode: %w", err)
+	}
+	return &out.MoveResult, nil
+}
+
+// chainSplitFrom は読み順で隣り合う 2 pane の rect から、前 pane を分割して後
+// pane を付ける向き（right|down）と ratio（前 pane の取り分・clamp）を求める。
+// 単軸/右偏り連鎖は厳密・複雑な入れ子は連鎖近似（herdr の pane.move が単一 pane
+// しか分割できない構造上、任意の入れ子木は pane.move だけでは厳密再現不能）。
+func chainSplitFrom(prev, cur herdrapi.PaneLayoutRect) (string, float64) {
+	// 読み順（y,x）ソート済＝cur は prev の右か下。y が重なるなら同行＝right。
+	sameRow := cur.Y < prev.Y+prev.Height && cur.Y+cur.Height > prev.Y
+	if sameRow && cur.X >= prev.X {
+		return "right", clampRatio(float64(prev.Width) / float64(prev.Width+cur.Width))
+	}
+	return "down", clampRatio(float64(prev.Height) / float64(prev.Height+cur.Height))
+}
+
+func clampRatio(r float64) float64 {
+	if r < 0.1 {
+		return 0.1
+	}
+	if r > 0.9 {
+		return 0.9
+	}
+	return r
+}
+
+// moveWholeTab は claudePaneID が属する Tab の全 pane を wsid の新 Tab へ丸ごと
+// 引っ越す（連鎖近似でトポロジ保存）。手順: pane.layout で現トポロジを採取→読み
+// 順先頭を new_tab へ→残りを前 pane から split して再構築→元 Tab は空になり自動
+// close。**非トランザクション**: 途中失敗は半端状態を残すため loud に報告して即停止。
+func moveWholeTab(api *herdrapi.Client, claudePaneID, wsid, carryLabel string, stdout io.Writer) error {
+	lay, err := api.PaneLayout(claudePaneID)
+	if err != nil {
+		return fmt.Errorf("pane.layout: %w", err)
+	}
+	ps := append([]herdrapi.PaneLayoutPane(nil), lay.Panes...)
+	if len(ps) == 0 {
+		return fmt.Errorf("pane.layout に pane が無い（tab=%s）", lay.TabID)
+	}
+	// 読み順（上→下、同行は左→右）に並べる＝再構築の決定的順序。
+	sort.SliceStable(ps, func(i, j int) bool {
+		if ps[i].Rect.Y != ps[j].Rect.Y {
+			return ps[i].Rect.Y < ps[j].Rect.Y
+		}
+		return ps[i].Rect.X < ps[j].Rect.X
+	})
+
+	// 先頭 pane を新 Tab へ（label 引継ぎ）。
+	res, err := paneMoveNewTab(api, ps[0].PaneID, wsid, carryLabel)
+	if err != nil {
+		return fmt.Errorf("先頭 pane %s の new_tab 移動失敗: %w", ps[0].PaneID, err)
+	}
+	newTab := ""
+	if res.CreatedTab != nil {
+		newTab = res.CreatedTab.TabID
+	}
+	if newTab == "" {
+		return fmt.Errorf("new_tab 応答に created_tab が無い（pane=%s）", ps[0].PaneID)
+	}
+	newID := map[string]string{ps[0].PaneID: res.Pane.PaneID} // 旧→新 pane_id（move で変わる）
+	fmt.Fprintf(stdout, "  → 丸ごと引っ越し開始: 先頭 pane %s→%s 新 Tab %s ws=%s\n",
+		ps[0].PaneID, res.Pane.PaneID, newTab, wsid)
+
+	prevOld := ps[0].PaneID
+	for i := 1; i < len(ps); i++ {
+		p := ps[i]
+		dir, ratio := chainSplitFrom(ps[i-1].Rect, p.Rect)
+		r2, err := paneMoveIntoTab(api, p.PaneID, newTab, newID[prevOld], dir, ratio)
+		if err != nil {
+			// 半端状態（一部だけ新 Tab へ移動済）を隠さず停止（TODO 3.5 の規律）。
+			return fmt.Errorf("pane %s の再構築失敗（半端状態・停止／既に %d/%d 移動済）: %w",
+				p.PaneID, i, len(ps), err)
+		}
+		newID[p.PaneID] = r2.Pane.PaneID
+		fmt.Fprintf(stdout, "  → pane %s→%s を %s 分割(ratio=%.2f)で付加\n",
+			p.PaneID, r2.Pane.PaneID, dir, ratio)
+		prevOld = p.PaneID
+	}
+	fmt.Fprintf(stdout, "  → 完了: %d pane を新 Tab %s へ引っ越し（元 Tab は空で自動 close）\n", len(ps), newTab)
+	return nil
+}
+
 // ============ claude pane の同定（organize/capture/learn 共通） ============
 
 // claudeNamesByPane は agent.list から pane_id → agent 名の索引を作る
@@ -179,11 +288,11 @@ func classifyClaudePane(p orgPane, names map[string]string) (isClaude bool, conf
 // ============ organize 計画（純関数＝テーブルテスト対象） ============
 
 type orgPlanItem struct {
-	Action     string // "MOVE"（単独 Tab＝Tab ごと）/"CARVE"（同居から切り出し）/"KEEP"/"SKIP"
+	Action     string // "MOVE"（単独 Tab＝Tab ごと）/"MOVE_TAB"（同居 Tab を丸ごと引っ越し）/"KEEP"/"SKIP"
 	PaneID     string
 	TabID      string
 	Cwd        string
-	ToLabel    string // 解決先 workspace label（MOVE/CARVE/KEEP 配置済）
+	ToLabel    string // 解決先 workspace label（MOVE/MOVE_TAB/KEEP 配置済）
 	ToWSID     string // 解決先 workspace_id（""=未存在＝実行時に自動作成）
 	CarryLabel string // MOVE で引き継ぐ Tab label（""=引き継がない）
 	Reason     string // KEEP/SKIP の理由（報告必須＝silent 禁止）
@@ -294,11 +403,12 @@ func computeOrganizePlan(panes []orgPane, tabs []herdrapi.TabInfo, wss []herdrap
 			continue
 		}
 		item := orgPlanItem{PaneID: p.PaneID, TabID: t.TabID, Cwd: p.Cwd, ToLabel: label, ToWSID: wsid}
+		item.CarryLabel = carryTabLabel(t, tabs)
 		if len(panesByTab[t.TabID]) == 1 {
 			item.Action = "MOVE" // claude 単独 Tab ＝ Tab ごと移動（label 引継ぎ）
-			item.CarryLabel = carryTabLabel(t, tabs)
 		} else {
-			item.Action = "CARVE" // 同居 Tab ＝ claude pane のみ新 Tab へ切り出し
+			// 同居 Tab ＝ Tab を丸ごと引っ越す（連鎖近似でトポロジ保存・元 Tab 自動 close）。
+			item.Action = "MOVE_TAB"
 		}
 		plan = append(plan, item)
 	}
@@ -375,8 +485,8 @@ func runOrganize(api *herdrapi.Client, m *wsmap.Map, panes []orgPane, agents []h
 				carry = fmt.Sprintf("・label %q 引継ぎ", it.CarryLabel)
 			}
 			fmt.Fprintf(stdout, "MOVE  pane=%s tab=%s cwd=%s → ws=%s（単独 Tab＝Tab ごと移動%s）\n", it.PaneID, it.TabID, it.Cwd, wsDesc(it), carry)
-		case "CARVE":
-			fmt.Fprintf(stdout, "CARVE pane=%s tab=%s cwd=%s → ws=%s（同居 Tab から新 Tab へ切り出し）\n", it.PaneID, it.TabID, it.Cwd, wsDesc(it))
+		case "MOVE_TAB":
+			fmt.Fprintf(stdout, "MOVE_TAB pane=%s tab=%s cwd=%s → ws=%s（同居 Tab を丸ごと引っ越し・連鎖近似）\n", it.PaneID, it.TabID, it.Cwd, wsDesc(it))
 		case "KEEP":
 			fmt.Fprintf(stdout, "KEEP  pane=%s cwd=%s: %s\n", it.PaneID, it.Cwd, it.Reason)
 		case "SKIP":
@@ -395,7 +505,7 @@ func runOrganize(api *herdrapi.Client, m *wsmap.Map, panes []orgPane, agents []h
 	failures := 0
 	created := map[string]string{} // 実行中に作成/解決した label→wsid（同 label 二重作成防止）
 	for _, it := range plan {
-		if it.Action != "MOVE" && it.Action != "CARVE" {
+		if it.Action != "MOVE" && it.Action != "MOVE_TAB" {
 			continue
 		}
 		wsid := it.ToWSID
@@ -412,6 +522,14 @@ func runOrganize(api *herdrapi.Client, m *wsmap.Map, panes []orgPane, agents []h
 				created[it.ToLabel] = id
 				wsid = id
 			}
+		}
+		if it.Action == "MOVE_TAB" {
+			// 同居 Tab は丸ごと引っ越し（moveWholeTab が per-pane で報告）。
+			if err := moveWholeTab(api, it.PaneID, wsid, it.CarryLabel, stdout); err != nil {
+				failures++
+				fmt.Fprintf(stdout, "  → エラー: tab=%s の丸ごと引っ越し失敗: %v\n", it.TabID, err)
+			}
+			continue
 		}
 		res, err := paneMoveNewTab(api, it.PaneID, wsid, it.CarryLabel)
 		if err != nil {
