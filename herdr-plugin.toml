@@ -37,6 +37,17 @@ id = "nudge"
 title = "Nudge drover daemon (immediate re-scan)"
 command = ["bin/herdr-drover", "nudge"]
 
+# Tab を別 Workspace へ丸ごと引っ越し（TODO.md 3.5）。plugin action は非 TTY spawn
+# （実測済・stdin/stdout/stderr すべて非 TTY）＝action 内で対話ピッカ不可のため、
+# launcher が新 Tab を layout.apply で開き（focus:true）その TTY 内で `herdr-drover
+# mv-tab` を対話モードで走らせる。合成手順は pane.layout→pane.move new_tab→
+# pane.move tab で残り pane 再構築、空 Tab は herdr が自動 close（実測）。
+# 成功後は workspace.focus + tab.focus で新 Tab へ自動フォーカス。
+[[actions]]
+id = "mv-tab"
+title = "Move Tab to another Workspace..."
+command = ["bin/herdr-drover", "mv-tab-launch"]
+
 # events は常駐不可のため nudge（SIGUSR1 → daemon 即時 re-scan）専用。
 # 発火は合図でしかなく差分の権威ではない（周期 poll backstop が daemon 側に常設）。
 # 網羅の根拠（herdr 0.7.4 実測）:

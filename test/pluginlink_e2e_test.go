@@ -237,8 +237,8 @@ func TestE2EPluginLinkGate(t *testing.T) {
 	}
 	sort.Strings(acts)
 	sort.Strings(evs)
-	// actions 3 種（manifest と exact 一致）
-	if want := []string{"install", "nudge", "status"}; !equalStrings(acts, want) {
+	// actions 4 種（manifest と exact 一致・mv-tab は launcher で新 Tab を開き対話ピッカを走らせる）
+	if want := []string{"install", "mv-tab", "nudge", "status"}; !equalStrings(acts, want) {
 		t.Fatalf("actions が manifest と不一致: got=%v want=%v", acts, want)
 	}
 	// events 6 種（pane.closed が workspace close で発火しない実測穴を

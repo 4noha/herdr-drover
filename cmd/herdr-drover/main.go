@@ -117,6 +117,25 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		return 0
+	case "mv-tab":
+		// mv-tab は対話ピッカ（引数なし＝TTY 必須）or --src-tab/--dst-ws フラグ非対話。
+		if err := cmdMvTab(rest, os.Stdin, stdout, stderr); err != nil {
+			fmt.Fprintf(stderr, "herdr-drover mv-tab: %v\n", err)
+			return 1
+		}
+		return 0
+	case "mv-tab-launch":
+		// plugin action `mv-tab` の実体。drawer から非 TTY spawn で呼ばれ、layout.apply で
+		// 新 Tab を作り、その中で `herdr-drover mv-tab` を対話モードで走らせる（TTY 内へ迂回）。
+		if len(rest) != 0 {
+			fmt.Fprintf(stderr, "herdr-drover mv-tab-launch: 余分な引数 %v（引数は取らない）\n", rest)
+			return 2
+		}
+		if err := cmdMvTabLaunch(stdout, stderr); err != nil {
+			fmt.Fprintf(stderr, "herdr-drover mv-tab-launch: %v\n", err)
+			return 1
+		}
+		return 0
 	default:
 		fmt.Fprintf(stderr, "herdr-drover: 未知のサブコマンド %q\n\n", cmd)
 		usage(stderr)
@@ -152,6 +171,11 @@ func usage(w io.Writer) {
                           現配置（claude cwd → Workspace label）を exact
                           ルールとして wsmap へ保存（書込前に差分表示。
                           複数 workspace に散る cwd は曖昧＝skip＋報告）
+  herdr-drover mv-tab [--src-tab <id> --dst-ws <id>]
+                          Tab を別 Workspace へ丸ごと引っ越し。引数なしなら対話
+                          ピッカ（TTY 必須）／フラグ両指定なら非対話。plugin action
+                          mv-tab は drawer から新 Tab を開いて対話モードを走らせる。
+                          成功後は自動的に受入先 WS/新 Tab にフォーカス移動
   herdr-drover update     selfupdate（GitHub Releases・sha256 検証・原子置換）
   herdr-drover version    バージョン表示
   herdr-drover help       このヘルプ
