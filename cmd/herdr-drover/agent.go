@@ -174,13 +174,30 @@ func runOneCloud(ctx context.Context, cfg Config, cl Cloud, primary bool, hcli *
 	// process global で 1 つ＝複数クラウド併存には option.WithCredentialsFile
 	// が必須＝これが fan-out の肝）。エミュレータ時は資格情報を渡さない
 	// （不要かつ client 生成オプションの非互換を踏まないため。e2e はこの経路）。
-	creds := cl.SAKeyPath
-	if os.Getenv("FIRESTORE_EMULATOR_HOST") != "" {
-		creds = ""
-	}
-	st, err := state.NewWithCredentials(ctx, cl.Project, cl.PCName, creds)
-	if err != nil {
-		return fmt.Errorf("Firestore 接続失敗（project=%s）: %w", cl.Project, err)
+	// 状態クライアント: master=具象 *state.Client（Firestore 直結・SA 鍵・
+	// byte 同一）／slave=relay 経由 *relayState（SA レス・durable refresh secret
+	// で bearer を取り /slave/* HTTP へ委譲）。両者とも agentState を満たす。
+	// scConcrete はリモート pane 注入（reconcile.go runRemoteInject）が具象
+	// *state.Client を要求するため master でのみ非 nil で保持し、slave では
+	// nil（注入 goroutine 自体を起こさない＝他 PC セッション漏れの根を断つ）。
+	var scConcrete *state.Client
+	var st agentState
+	if cfg.Role == "slave" {
+		rs, e := newRelayState(cl.RelayURL, cl.PCName, cfg, lg)
+		if e != nil {
+			return fmt.Errorf("slave 初期化失敗: %w", e)
+		}
+		st = rs
+	} else {
+		creds := cl.SAKeyPath
+		if os.Getenv("FIRESTORE_EMULATOR_HOST") != "" {
+			creds = ""
+		}
+		sc, e := state.NewWithCredentials(ctx, cl.Project, cl.PCName, creds)
+		if e != nil {
+			return fmt.Errorf("Firestore 接続失敗（project=%s）: %w", cl.Project, e)
+		}
+		scConcrete, st = sc, sc
 	}
 	defer st.Close()
 
@@ -200,6 +217,12 @@ func runOneCloud(ctx context.Context, cfg Config, cl Cloud, primary bool, hcli *
 	var wt *webTerm
 	if cl.RelayURL != "" {
 		wt = newWebTerm(cl.RelayURL, cfg.Idle, st, hcli, lg)
+		// slave は /session dial に bearer が要る（relay の SlaveGate が
+		// source⇄own-sid を認可）。master は seam nil＝header-less
+		// relayclient.Dial のまま＝byte 同一。
+		if rs, ok := st.(*relayState); ok {
+			wt.dialSource = rs.DialSource
+		}
 		wt.start(ctx)
 		lg.Printf("%swebterm: WatchWake 起動（relay=%s）", tag, cl.RelayURL)
 	}
@@ -208,8 +231,11 @@ func runOneCloud(ctx context.Context, cfg Config, cl Cloud, primary bool, hcli *
 	// 他 PC のセッションをローカル herdr へ注入 pane として同期する（複数クラウドが
 	// 同一 herdr へ同 pane を注入する二重窓・競合を構造的に防ぐ）。relay 必須
 	// （注入 pane 内の attach viewer がリモート relay へ繋ぐ）。
-	if primary && cl.RelayURL != "" {
-		go runRemoteInject(ctx, hcli, st, cl, lg)
+	// slave は他 PC のセッションを注入しない（オーナーの私物セッションが共用 PC
+	// へ漏れる直接原因＝この goroutine を起こさないことで構造的に断つ）。master
+	// は従来どおり primary クラウドのみ注入（scConcrete は master で非 nil）。
+	if cfg.Role != "slave" && primary && cl.RelayURL != "" {
+		go runRemoteInject(ctx, hcli, scConcrete, cl, lg)
 		lg.Printf("%sリモート pane 注入 起動（他 PC のセッションを↗注入・primary）", tag)
 	}
 

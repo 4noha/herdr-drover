@@ -28,6 +28,7 @@ type Config struct {
 	SocketPath  string        // HERDR_SOCKET_PATH（解決は herdrapi.ResolveSocketPath と同一規則）
 	Tick        time.Duration // DROVER_TICK（既定 5s）
 	Idle        time.Duration // DROVER_IDLE（Web ターミナル quiescence 自切断。0=bridge 既定 30s）
+	Role        string        // HERDR_ROLE（"slave"=共用 PC・SA レス relay 経由。既定 ""=master）
 }
 
 // resolveConfig は Config を解決する。優先順位はキー単位で
@@ -46,6 +47,7 @@ func resolveConfig() (Config, error) {
 		PCID:        os.Getenv("PC_ID"),
 		SocketPath:  herdrapi.ResolveSocketPath(""),
 		Tick:        defaultTick,
+		Role:        os.Getenv("HERDR_ROLE"),
 	}
 	// 設定ファイル: env に無いキーだけ補完（env > file）。壊れたファイルは
 	// エラーとして返すが解決は続行する（沈黙で無視すると enroll 済のはずが
@@ -67,6 +69,9 @@ func resolveConfig() (Config, error) {
 		}
 		if cfg.PCID == "" {
 			cfg.PCID = fc.PCID
+		}
+		if cfg.Role == "" {
+			cfg.Role = fc.Role
 		}
 	}
 	if cfg.PCID == "" {
@@ -120,6 +125,7 @@ type fileConfig struct {
 	CloudRelayURL                string `json:"cloud_relay_url,omitempty"`
 	GoogleApplicationCredentials string `json:"google_application_credentials,omitempty"`
 	PCID                         string `json:"pc_id,omitempty"`
+	Role                         string `json:"role,omitempty"` // "slave"=共用 PC モード（enroll --slave が書く）
 }
 
 // readFileConfig は設定ファイルを読む。不在はゼロ値＋nil（enroll 前の

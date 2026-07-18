@@ -98,7 +98,7 @@ func clearDroverEnv(t *testing.T) {
 	for _, k := range []string{
 		"GCP_PROJECT", "CLOUD_RELAY_URL", "GOOGLE_APPLICATION_CREDENTIALS",
 		"PC_ID", "HERDR_SOCKET_PATH", "DROVER_TICK", "DROVER_IDLE",
-		"FIRESTORE_EMULATOR_HOST",
+		"FIRESTORE_EMULATOR_HOST", "HERDR_ROLE",
 	} {
 		t.Setenv(k, "")
 	}

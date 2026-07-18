@@ -26,8 +26,19 @@ import (
 	"github.com/4noha/drover-cloud/state"
 )
 
+// StateClient は CommandRunner が使うクラウド状態の契約。master の
+// *state.Client も slave の relay 経由クライアント（cmd/herdr-drover の
+// *relayState）も満たす（agentState のサブセット＝メソッド 3 本のみ）。
+// commands は internal パッケージで cmd/herdr-drover（package main）を import
+// できないため、必要メソッドだけをここに宣言してインターフェース越しに受ける。
+type StateClient interface {
+	WatchCommands(ctx context.Context, fn func(state.Command)) error
+	AckCommand(ctx context.Context, id, status, detail string) error
+	IsSelfRevoked(ctx context.Context) bool
+}
+
 type CommandRunner struct {
-	St      *state.Client
+	St      StateClient
 	Revoked func(context.Context) bool // 既定 St.IsSelfRevoked（多層防御の再検査）
 	// DoRestart は launchd 配下の自分を kickstart -k（自己 kill を含むため
 	// 戻らないことがある＝Ack 先行が前提）。

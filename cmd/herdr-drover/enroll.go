@@ -42,6 +42,7 @@ var errUsage = errors.New("usage")
 
 func cmdEnroll(args []string, stdout io.Writer) error {
 	var code, relay string
+	var slave bool
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--relay":
@@ -49,6 +50,8 @@ func cmdEnroll(args []string, stdout io.Writer) error {
 				relay = args[i+1]
 				i++
 			}
+		case "--slave":
+			slave = true
 		default:
 			if code == "" {
 				code = args[i]
@@ -56,7 +59,7 @@ func cmdEnroll(args []string, stdout io.Writer) error {
 		}
 	}
 	if code == "" || relay == "" {
-		return fmt.Errorf("%w: herdr-drover enroll <code> --relay wss://<host>（code は Web「＋ 端末を追加」で発行。表示コマンドは claude-master 用なので読み替える）", errUsage)
+		return fmt.Errorf("%w: herdr-drover enroll <code> --relay wss://<host> [--slave]（code は Web「＋ 端末を追加」で発行。表示コマンドは claude-master 用なので読み替える。--slave は共用 PC＝SA レス）", errUsage)
 	}
 
 	// wss→https / ws→http（cm と同じ各 1 回置換）。
@@ -65,7 +68,17 @@ func cmdEnroll(args []string, stdout io.Writer) error {
 	// DefaultClient は Timeout ゼロ＝relay がブラックホール（SYN drop 等）だと
 	// 無期限ハングする（レビュー指摘）。selfupdate と同流儀で明示 Timeout。
 	hc := &http.Client{Timeout: 30 * time.Second}
-	resp, err := hc.PostForm(httpBase+"/enroll", url.Values{"code": {code}})
+	// master POST は `code=<code>` のみ＝byte 同一。slave のみ pc/role を足す
+	// （relay が slaves/{pc} を bind するのに pc 名が要る）。slave の pc 名は
+	// resolveConfig 解決値（env PC_ID > file > <host>-herdr）。
+	form := url.Values{"code": {code}}
+	var slaveCfg Config
+	if slave {
+		slaveCfg, _ = resolveConfig()
+		form.Set("pc", slaveCfg.PCID)
+		form.Set("role", "slave")
+	}
+	resp, err := hc.PostForm(httpBase+"/enroll", form)
 	if err != nil {
 		return fmt.Errorf("enroll 接続失敗: %w", err)
 	}
@@ -82,9 +95,10 @@ func cmdEnroll(args []string, stdout io.Writer) error {
 			resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	var b struct {
-		GCPProject string `json:"gcp_project"`
-		RelayURL   string `json:"relay_url"`
-		SAJSON     string `json:"sa_json"`
+		GCPProject  string `json:"gcp_project"`
+		RelayURL    string `json:"relay_url"`
+		SAJSON      string `json:"sa_json"`
+		SlaveSecret string `json:"slave_secret"` // slave enroll のみ（master 応答には無い＝空）
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&b); err != nil {
 		return fmt.Errorf("enroll 応答解析失敗: %w", err)
@@ -105,6 +119,14 @@ func cmdEnroll(args []string, stdout io.Writer) error {
 	if relayURL == "" {
 		relayURL = relay // 応答に無ければ --relay 引数へ fallback（cm 同順）
 	}
+
+	// slave（共用 PC）は SA レス経路へ分岐する。ここまでの decode/home 解決は
+	// master と共通で、以降の master 用 additional/config 書込ブロックには
+	// 一切触れない（byte 同一のため verbatim 保持）。
+	if slave {
+		return cmdEnrollSlave(b.GCPProject, relayURL, b.SlaveSecret, dir, slaveCfg, stdout)
+	}
+
 	// クラウド追加判定（端末ごとマルチ Google アカウント fan-out）: clouds.json
 	// が既にある(複数クラウド運用)か、既存の単一クラウドと**別プロジェクト**を
 	// enroll する場合は clouds.json へ追記する。それ以外(初回 or 同一クラウド
@@ -203,5 +225,91 @@ func cmdEnroll(args []string, stdout io.Writer) error {
 	// （旧: install が KEY=VALUE の config しか読まず案内どおりに進むと
 	// GCP_PROJECT 未解決で必ず失敗した実バグの再発防止）。
 	fmt.Fprintln(stdout, "次: `herdr-drover install` で launchd 常駐を登録（label "+launchdLabel+"・設定は config.json から自動解決）。手動起動は `herdr-drover agent`。herdr のセッションが Web 端末一覧に出ます。")
+	return nil
+}
+
+// cmdEnrollSlave は共用 PC（slave）の enroll 後処理: SA レスの config.json＋
+// durable refresh secret（slave.json）を配置する（DESIGN_SLAVE_SPEC §5.1）。
+// master の additional/clouds.json 経路は一切通らない（単一クラウド固定）。
+//
+//   - config.json: 同名キーのみ置換で未知キー（learn_moves 等）を保持しつつ
+//     gcp_project / cloud_relay_url を設定・role="slave" を注入・
+//     google_application_credentials を削除（＝SA レス）。sa_json は完全無視
+//     （relay が誤って返しても書かない防御）。
+//   - slave.json（0600・原子）: relay 発行の refresh secret を保存。1h bearer
+//     を /slave/token でこの secret から取得する（SA 鍵は一切持たない）。
+//   - 残骸掃除: master→slave 再 enroll で古い sa.json / clouds.json が
+//     defaultSAKeyPath に拾われる事故を防ぐため best-effort で削除する。
+//   - ClearRevoked（失効解除）は行わない（SA 鍵が無く Firestore 直結不能。
+//     失効解除は relay 側で owner が行う設計＝§3.4）。
+func cmdEnrollSlave(gcpProject, relayURL, slaveSecret, dir string, cfg Config, stdout io.Writer) error {
+	if slaveSecret == "" {
+		return fmt.Errorf("enroll(slave) 応答に slave_secret が無い（relay が --slave 非対応か role 未指定の疑い）")
+	}
+	cfgPath, err := configFilePath()
+	if err != nil {
+		return err
+	}
+	// config.json は生 JSON map で読み書き（fileConfig へ decode すると未知キーが
+	// silent drop される＝enroll.go master 側と同じ規律）。
+	raw, ferr := readRawFileConfig(cfgPath)
+	if ferr != nil {
+		fmt.Fprintf(stdout, "⚠ 既存の設定ファイルが壊れているため作り直します: %v\n", ferr)
+		raw = map[string]json.RawMessage{}
+	}
+	setStr := func(k, v string) error {
+		if v == "" {
+			delete(raw, k)
+			return nil
+		}
+		j, merr := json.Marshal(v)
+		if merr != nil {
+			return fmt.Errorf("設定 encode 失敗: %w", merr)
+		}
+		raw[k] = j
+		return nil
+	}
+	if err := setStr("gcp_project", gcpProject); err != nil {
+		return err
+	}
+	if err := setStr("cloud_relay_url", relayURL); err != nil {
+		return err
+	}
+	if err := setStr("role", "slave"); err != nil {
+		return err
+	}
+	delete(raw, "google_application_credentials") // SA レス（空値=削除規則と同義）
+	if err := writeRawFileConfig(cfgPath, raw); err != nil {
+		return fmt.Errorf("設定書込失敗: %w", err)
+	}
+
+	// slave.json（0600・原子書込）: durable refresh secret。
+	sf := slaveFile{
+		PC:            cfg.PCID,
+		RefreshSecret: slaveSecret,
+		RelayURL:      relayURL,
+		GCPProject:    gcpProject,
+	}
+	sb, err := json.MarshalIndent(sf, "", "  ")
+	if err != nil {
+		return fmt.Errorf("slave.json encode 失敗: %w", err)
+	}
+	slavePath := filepath.Join(dir, "slave.json")
+	if err := writeFileAtomic(slavePath, sb, 0o600); err != nil {
+		return fmt.Errorf("slave.json 書込失敗: %w", err)
+	}
+
+	// 真に SA レスにする（残骸掃除・best-effort）。
+	_ = os.Remove(filepath.Join(dir, "sa.json"))
+	_ = os.Remove(filepath.Join(dir, "clouds.json"))
+
+	fmt.Fprintln(stdout, "共用 PC（slave）として登録しました。SA 鍵は配布されません。")
+	fmt.Fprintf(stdout, "  gcp_project     = %s\n  cloud_relay_url = %s\n", gcpProject, relayURL)
+	fmt.Fprintln(stdout, "  role            = slave")
+	fmt.Fprintf(stdout, "  設定ファイル    = %s（env が常に優先）\n", cfgPath)
+	fmt.Fprintf(stdout, "  slave 認証情報  = %s（refresh secret・0600）\n", slavePath)
+	fmt.Fprintf(stdout, "  pc id           = %s\n", cfg.PCID)
+	fmt.Fprintln(stdout, "  注意: この共用 PC はオーナーの他 PC のセッションを見られません（自分の herdr セッションだけを共有＝私物漏れ防止）。")
+	fmt.Fprintln(stdout, "次: `herdr-drover install` で launchd 常駐を登録（label "+launchdLabel+"）。手動起動は `herdr-drover agent`。")
 	return nil
 }

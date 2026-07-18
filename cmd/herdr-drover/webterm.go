@@ -24,12 +24,12 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/4noha/drover-cloud/relayclient"
-	"github.com/4noha/drover-cloud/state"
 	"github.com/4noha/herdr-drover/internal/bridge"
 	"github.com/4noha/herdr-drover/internal/herdrapi"
 )
@@ -56,9 +56,13 @@ type bridgeRun struct {
 type webTerm struct {
 	relayURL string
 	idle     time.Duration // quiescence 自切断（0=bridge 既定 30s。DROVER_IDLE 由来）
-	st       *state.Client
+	st       agentState    // master=*state.Client（byte 同一）／slave=*relayState
 	hcli     *herdrapi.Client
 	lg       *log.Logger
+
+	// dialSource は relay へ source 役で dial する seam。nil=master（header-less
+	// relayclient.Dial＝byte 同一）／slave は bearer 付き dialer を注入する。
+	dialSource func(ctx context.Context, sid string) (net.Conn, error)
 
 	mu     sync.Mutex
 	ctx    context.Context       // start() の親 ctx（respawn の再 spawn 用）
@@ -66,7 +70,7 @@ type webTerm struct {
 	wg     sync.WaitGroup        // WatchWake＋全 bridge の停止待ち（drain 用）
 }
 
-func newWebTerm(relayURL string, idle time.Duration, st *state.Client, hcli *herdrapi.Client, lg *log.Logger) *webTerm {
+func newWebTerm(relayURL string, idle time.Duration, st agentState, hcli *herdrapi.Client, lg *log.Logger) *webTerm {
 	return &webTerm{
 		relayURL: relayURL,
 		idle:     idle,
@@ -147,11 +151,17 @@ func (w *webTerm) handleWake(ctx context.Context, sid string) {
 	_ = w.st.PutRelayGrant(bctx, sid, "source", sourceGrantTTL)
 
 	// ④データ線: relay へ source として WSS dial → bridge へ渡す。
-	// dial 契約は cm relay.Dial の byte 同一コピー（relayclient.go）:
-	// URL = baseURL + "/session?sid=" + sid + "&role=source"（sid は
-	// エスケープしない・DialOptions{} 既定）→ NetConn(MessageBinary)。
+	// master は cm relay.Dial の byte 同一コピー（relayclient.Dial・header-less）。
+	// slave は dialSource seam に bearer 付き dialer が注入されており、URL/
+	// NetConn 契約は同一で Authorization: Bearer だけが加わる。
 	// conn の寿命は ctx に束縛（cancel＝SIGTERM で read/write が死ぬ）。
-	conn, err := relayclient.Dial(bctx, w.relayURL, sid, "source")
+	dial := w.dialSource
+	if dial == nil {
+		dial = func(c context.Context, s string) (net.Conn, error) {
+			return relayclient.Dial(c, w.relayURL, s, "source")
+		}
+	}
+	conn, err := dial(bctx, sid)
 	if err != nil {
 		w.lg.Printf("webterm: relay dial 失敗 sid=%q: %v", sid, err)
 		return
