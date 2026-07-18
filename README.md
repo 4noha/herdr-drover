@@ -26,12 +26,12 @@
   データ交換のみ（ソース断片の vendor 禁止）
 
 - クラウド層（relay/Web/Firestore サーバ ＋ `state`/`relayclient`/`selfupdate`
-  の共有 Go ライブラリ）は独立リポジトリ **[drover-cloud](../drover-cloud)** に
+  の共有 Go ライブラリ）は独立リポジトリ **[drover-cloud](https://github.com/4noha/drover-cloud)** に
   切り出してある。herdr-drover はその共有ライブラリを import し、クラウドは
   drover-cloud を Cloud Run に 1 回デプロイしたものを全 PC で共有する
 
 **構築手順は [SETUP.md](SETUP.md)**（PC 側の導入＋クラウド参加）。クラウドを
-一から立てる手順は [drover-cloud/SETUP.md](../drover-cloud/SETUP.md)。
+一から立てる手順は [drover-cloud/SETUP.md](https://github.com/4noha/drover-cloud/blob/main/SETUP.md)。
 設計詳細は [DESIGN.md](DESIGN.md)。
 
 ## 使い方
@@ -177,5 +177,8 @@ gate（`test/`）で検証している。実 launchd へのロード（カット
 ## Requirements
 
 - macOS / Linux, herdr >= 0.7.4, Go 1.25+（ソースビルド時）
-- GCP プロジェクト（Cloud Run relay + Firestore）— claude-master-go と同一の
-  クラウド構成を共有可能
+- クラウド同期を使う場合: GCP プロジェクト（Cloud Run relay + Firestore）。
+  クラウドサーバは独立リポジトリ **[drover-cloud](https://github.com/4noha/drover-cloud)**
+  を 1 回デプロイして全 PC で共有する（一から立てる手順は
+  [drover-cloud/SETUP.md](https://github.com/4noha/drover-cloud/blob/main/SETUP.md)）。
+  既存クラウドに参加するだけなら GCP 操作は不要（Web「＋ 端末を追加」→ enroll）

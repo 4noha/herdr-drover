@@ -2,7 +2,7 @@
 
 このリポジトリの内容だけで、herdr の claude シム＋クラウド同期（Web/スマホ
 閲覧・near-$0）を構築できる。クラウドサーバ自体を一から立てる手順は
-共有リポジトリ [drover-cloud/SETUP.md](../drover-cloud/SETUP.md) にある
+共有リポジトリ [drover-cloud/SETUP.md](https://github.com/4noha/drover-cloud/blob/main/SETUP.md) にある
 （クラウドは 1 つを全 PC で共有＝2 台目以降はサーバ操作不要）。
 
 ## 前提
@@ -82,7 +82,7 @@ herdr plugin link      # herdr の pane イベントで agent を nudge（周期
 
 ### クラウドをまだ持っていない場合
 
-先に [drover-cloud/SETUP.md](../drover-cloud/SETUP.md) で GCP に relay/Firestore/
+先に [drover-cloud/SETUP.md](https://github.com/4noha/drover-cloud/blob/main/SETUP.md) で GCP に relay/Firestore/
 Web を立て、その `wss://…` URL とオーナーの Google ログインを用意してから、
 上の enroll に進む。
 
