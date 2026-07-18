@@ -147,6 +147,23 @@ func cmdAgent(stdout, stderr io.Writer) error {
 		lg.Printf("webterm: WatchWake 起動（relay=%s）", cfg.RelayURL)
 	}
 
+	// live 学習（opt-in・既定 false＝挙動完全不変）: config.json の
+	// learn_moves=true のときだけ pane.moved を購読し、ユーザーの手動 Tab
+	// 移動（cross-workspace の claude pane 移動）を wsmap の exact ルールへ
+	// 自動反映する（organize.go runLearnLoop）。鉄則④「設定変更が silent に
+	// 起きる魔法禁止」に従い opt-in トグル＋ルール書込は 1 行ログ必須。
+	// バックログ再送（herdr の実測仕様）の誤学習はライブ状態照合で dedup。
+	if learnOn, lerr := readLearnMoves(); lerr != nil {
+		lg.Printf("learn: 設定読取エラー（live 学習は無効で継続）: %v", lerr)
+	} else if learnOn {
+		lg.Printf("learn: live 学習有効（learn_moves=true・pane.moved 購読）")
+		go func() {
+			if err := runLearnLoop(ctx, hcli, lg); err != nil && ctx.Err() == nil {
+				lg.Printf("learn: loop 終了: %v", err)
+			}
+		}()
+	}
+
 	// 遠隔命令制御線（cm runOneCloud と同型の常時・無料 listener。owner
 	// 限定は web 側・多層防御の revocation 再検査は CommandRunner 内）。
 	// 写像（DESIGN「遠隔命令」）:

@@ -6,7 +6,13 @@ package main
 //   - herdr server が居なければ detached 自動起動（ping まで最大 10s 待ち）
 //   - 引数なし: cwd 完全一致の既存 claude セッションへ attach（exact-match のみ
 //     ＝ヒューリスティック分類禁止の鉄則）。複数は picker、無ければ新規
-//   - 引数あり（TTY）: 常に新規 pane（cm 規律「user 明示指定は尊重」）
+//   - 新規は**常に新しい Tab（claude pane 1 枚）**として生まれる（ルールの
+//     有無に関わらず既存 Tab を split しない。旧 agent.start は必ず既存 tab の
+//     focused pane を split する実測＝「既存 Tab の表示を邪魔する」ユーザー
+//     実観測の根治）。着地先 workspace は ~/.herdr-drover/workspaces.json の
+//     ルール（internal/wsmap: exact > 最長 prefix > default）で解決し、
+//     ルール無しは現（focused）workspace
+//   - 引数あり（TTY）: 常に新規 Tab（cm 規律「user 明示指定は尊重」）
 //   - 引数あり（非 TTY）: herdr を経由せず素の claude へプロセス置換
 //     ＝`echo prompt | claude -p …` の pipe stdin/stdout 契約を透過する
 //     （pane を作り捨てて pane_id だけ返すと自動化が silent に壊れる）
@@ -21,6 +27,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -34,6 +41,7 @@ import (
 	"unsafe"
 
 	"github.com/4noha/herdr-drover/internal/herdrapi"
+	"github.com/4noha/herdr-drover/internal/wsmap"
 )
 
 // serverStartTimeout は自動起動した herdr server の ping 応答待ち上限。
@@ -157,30 +165,157 @@ func cmdClaude(args []string, stdout, stderr io.Writer) error {
 // 実用上限。超えたら明示エラー＝黙って失敗しない）。
 const maxClaudeAgents = 64
 
-// startClaudeAgent は agent 名の一意制約に対応した agent.start。
-// 実測（herdr 0.7.4）: 同名 agent が居ると agent.start は
-// {"code":"agent_name_taken"} で拒否される（CLI help も「unique agent
-// names」と明記）＝固定名 "claude" では 2 本目が起動できない。
-// 対応は cm M8f marker と同じ「encode/decode の構造往復」: encode は
-// claude → claude-2 → claude-3 … を順に試し、decode（isClaudeAgentName）が
-// その形だけを exact に受ける。ヒューリスティック分類ではない。
+// startClaudeAgent は新規 claude を**新しい Tab（claude pane 1 枚）**として
+// 起動する。確定 UX 仕様: claude 起動で既存 Tab を split すると表示を邪魔する
+// （実観測）＝ルールの有無に関わらず split しない。
+//
+// 経路は Probe で確定した唯一の「指定 workspace に新 tab＋argv 直接実行 pane
+// 1 枚」正規 API layout.apply（agent.start は常に既存 tab の focused pane を
+// split し新 tab を作る経路が存在しない・tab.create は shell pane が余る＝
+// どちらも実測で棄却）。手順:
+//  1. 着地ルール（~/.herdr-drover/workspaces.json）を読む。壊れていたら
+//     **tab を作る前に** loud に停止（silent fallback 禁止）
+//  2. workspace 解決: ルール一致 → label から wsmap.ResolveWorkspaceID
+//     （不在 label は focus 非奪取で自動作成）／ルール無し → 現 workspace
+//  3. layout.apply で新 Tab 生成（tab label は cwd 末尾・focus 非奪取）
+//  4. agent.rename で agent 名を付与（実測: layout.apply pane への後付け命名
+//     可・応答 agent_info に terminal_id 込みの AgentInfo が返る）
+//
+// agent 名の一意制約（実測 agent_name_taken）への対応は従来と同じ
+// 「encode/decode の構造往復」: encode は claude → claude-2 → … を順に試し、
+// decode（isClaudeAgentName）がその形だけを exact に受ける。
+// ⚠旧 agent.start は名前予約が pane 生成と原子的だったが、本経路は pane 生成
+// →命名の 2 段になる。同時 2 シムは双方 Tab を作り得るが、これは従来から
+// 許容している可視の race（picker が扱う正規状態）と同型＝silent 破壊はない。
 func startClaudeAgent(api *herdrapi.Client, argv []string, cwd string) (*herdrapi.AgentInfo, error) {
+	rules, err := wsmap.Load()
+	if err != nil {
+		return nil, err
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		// wsmap.Load が home を解決できた直後なので実質起こらないが、~ ルール
+		// を silent に不一致へ落とさないため loud に返す。
+		return nil, fmt.Errorf("home 解決: %w", err)
+	}
+
+	var wsID string
+	if label := rules.Resolve(cwd, home); label != "" {
+		wsID, err = wsmap.ResolveWorkspaceID(api, label)
+	} else {
+		wsID, err = currentWorkspaceID(api)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	paneID, err := applyClaudeTab(api, wsID, filepath.Base(cwd), argv, cwd)
+	if err != nil {
+		return nil, err
+	}
+	return nameClaudePane(api, paneID)
+}
+
+// currentWorkspaceID は「現 workspace」を決定的に選ぶ:
+// focused（実測では常にちょうど 1 つ）→ 万一 focused が無ければ number 最小
+// → workspace ゼロ（fresh server）は workspace.create で 1 つ作る（実測:
+// 最初の workspace は必然 focused になり、label は herdr が cwd から導出）。
+func currentWorkspaceID(api *herdrapi.Client) (string, error) {
+	raw, err := api.Call("workspace.list", nil)
+	if err != nil {
+		return "", fmt.Errorf("workspace.list: %w", err)
+	}
+	var list struct {
+		Workspaces []herdrapi.WorkspaceInfo `json:"workspaces"`
+	}
+	if err := json.Unmarshal(raw, &list); err != nil {
+		return "", fmt.Errorf("workspace_list decode: %w", err)
+	}
+	var best *herdrapi.WorkspaceInfo
+	for i := range list.Workspaces {
+		ws := &list.Workspaces[i]
+		if best == nil ||
+			(ws.Focused && !best.Focused) ||
+			(ws.Focused == best.Focused && ws.Number < best.Number) {
+			best = ws
+		}
+	}
+	if best != nil {
+		return best.WorkspaceID, nil
+	}
+	created, err := api.WorkspaceCreate()
+	if err != nil {
+		return "", fmt.Errorf("workspace.create: %w", err)
+	}
+	return created.Workspace.WorkspaceID, nil
+}
+
+// applyClaudeTab は layout.apply で「wsID に新 tab＋argv 直接実行 pane 1 枚」
+// を生成し root pane_id を返す。focus:false＝既存 Tab の表示を邪魔しない
+// （Probe 実測: workspace focus も tab focus も奪わない）。
+// 実採取応答: {"type":"layout_apply","layout":{"workspace_id","tab_id",
+// "zoomed","focused_pane_id","root":{"type","pane_id","cwd","command"}}}
+func applyClaudeTab(api *herdrapi.Client, wsID, tabLabel string, argv []string, cwd string) (string, error) {
+	type layoutPane struct {
+		Type    string   `json:"type"`
+		Cwd     string   `json:"cwd"`
+		Command []string `json:"command"`
+	}
+	raw, err := api.Call("layout.apply", struct {
+		WorkspaceID string     `json:"workspace_id"`
+		TabLabel    string     `json:"tab_label"`
+		Focus       bool       `json:"focus"`
+		Root        layoutPane `json:"root"`
+	}{wsID, tabLabel, false, layoutPane{Type: "pane", Cwd: cwd, Command: argv}})
+	if err != nil {
+		return "", fmt.Errorf("layout.apply: %w", err)
+	}
+	var out struct {
+		Layout struct {
+			Root struct {
+				PaneID string `json:"pane_id"`
+			} `json:"root"`
+		} `json:"layout"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return "", fmt.Errorf("layout_apply decode: %w", err)
+	}
+	if out.Layout.Root.PaneID == "" {
+		return "", fmt.Errorf("layout.apply 応答に root pane_id が無い（wire 変化?）")
+	}
+	return out.Layout.Root.PaneID, nil
+}
+
+// nameClaudePane は生成済み pane へ agent 名を付与する（agent.rename の
+// target は pane_id 可＝実測）。応答 {"type":"agent_info","agent":{...}} は
+// terminal_id 込みの AgentInfo＝attach にそのまま使える。
+func nameClaudePane(api *herdrapi.Client, paneID string) (*herdrapi.AgentInfo, error) {
 	for i := 1; i <= maxClaudeAgents; i++ {
 		name := "claude"
 		if i > 1 {
 			name = fmt.Sprintf("claude-%d", i)
 		}
-		ag, err := api.AgentStart(name, argv, &herdrapi.AgentStartOptions{Cwd: cwd})
+		raw, err := api.Call("agent.rename", struct {
+			Target string `json:"target"`
+			Name   string `json:"name"`
+		}{paneID, name})
 		if err == nil {
-			return ag, nil
+			var out struct {
+				Agent herdrapi.AgentInfo `json:"agent"`
+			}
+			if err := json.Unmarshal(raw, &out); err != nil {
+				return nil, fmt.Errorf("agent_info decode: %w", err)
+			}
+			return &out.Agent, nil
 		}
 		var apiErr *herdrapi.APIError
 		if errors.As(err, &apiErr) && apiErr.Code == "agent_name_taken" {
 			continue // 実測コードの exact-match でのみ次の採番へ
 		}
-		return nil, err
+		// Tab は生成済みなので pane_id を残す（黙って孤児にしない）。
+		return nil, fmt.Errorf("agent.rename %s: %w", paneID, err)
 	}
-	return nil, fmt.Errorf("claude agent 名が %d 個まで全て使用中（herdr の agent 名は一意制約）", maxClaudeAgents)
+	return nil, fmt.Errorf("claude agent 名が %d 個まで全て使用中（herdr の agent 名は一意制約。pane %s は作成済み）", maxClaudeAgents, paneID)
 }
 
 // isClaudeAgentName は decode 側: encode（startClaudeAgent）が実際に生成する

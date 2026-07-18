@@ -139,16 +139,39 @@ func readFileConfig(path string) (fileConfig, error) {
 	return fc, nil
 }
 
-// writeFileConfig は設定ファイルを tmp→rename で原子的に書く（cm
-// WriteStatus 教訓: truncate 直書きは 0B の瞬間が実観測される）。0600＝
-// SA 鍵パス等を含むため所有者のみ。
-func writeFileConfig(path string, fc fileConfig) error {
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+// readRawFileConfig は設定ファイルを「キー→生 JSON 値」で読む（enroll の
+// 「同名キーのみ置換」用。fileConfig と違い未知キー〔learn_moves 等の別経路
+// トグル〕を落とさない）。不在は空 map＋nil。壊れた JSON はエラー。
+func readRawFileConfig(path string) (map[string]json.RawMessage, error) {
+	b, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return map[string]json.RawMessage{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	raw := map[string]json.RawMessage{}
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return nil, fmt.Errorf("設定ファイル %s が壊れている（JSON 解析失敗）: %w", path, err)
+	}
+	return raw, nil
+}
+
+// writeRawFileConfig は raw map（キー辞書順で整形）を原子的に書く。
+func writeRawFileConfig(path string, raw map[string]json.RawMessage) error {
+	b, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
 		return err
 	}
-	b, err := json.MarshalIndent(fc, "", "  ")
-	if err != nil {
+	return writeConfigBytesAtomic(path, b)
+}
+
+// writeConfigBytesAtomic は設定ファイルを tmp→rename で原子的に書く（cm
+// WriteStatus 教訓: truncate 直書きは 0B の瞬間が実観測される）。0600＝
+// SA 鍵パス等を含むため所有者のみ（CreateTemp の既定 perm）。
+func writeConfigBytesAtomic(path string, b []byte) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
 	f, err := os.CreateTemp(dir, filepath.Base(path)+".*.tmp") // 0600 で作られる

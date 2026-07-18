@@ -98,6 +98,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		return 0
+	case "organize":
+		// organize はフラグ（--capture/--dry-run）を取るので rest を渡す
+		//（organize.go が flag.FlagSet で解析）。
+		if err := cmdOrganize(rest, stdout, stderr); err != nil {
+			fmt.Fprintf(stderr, "herdr-drover organize: %v\n", err)
+			return 1
+		}
+		return 0
 	case "attach":
 		// DESIGN.md のリポジトリ構成に載る後続フェーズのコマンド。存在は
 		// 予約しつつ、未実装は明示エラーで返す（黙って no-op にしない）。
@@ -128,6 +136,16 @@ func usage(w io.Writer) {
                           picker（Enter=先頭・n/0=新規・数字=指定）／無し or
                           引数あり(TTY)は新規 pane／引数あり×非 TTY は素の
                           claude へ透過（alias claude='herdr-drover claude'）
+  herdr-drover organize [--dry-run]
+                          claude セッションを含む Tab を wsmap ルール
+                          （exact-cwd > 最長 prefix > default）解決先の
+                          Workspace へ整理（単独 Tab は Tab ごと・同居 Tab は
+                          claude pane を新 Tab へ切り出し。曖昧は skip＋報告。
+                          --dry-run は計画表示のみ）
+  herdr-drover organize --capture [--dry-run]
+                          現配置（claude cwd → Workspace label）を exact
+                          ルールとして wsmap へ保存（書込前に差分表示。
+                          複数 workspace に散る cwd は曖昧＝skip＋報告）
   herdr-drover update     selfupdate（GitHub Releases・sha256 検証・原子置換）
   herdr-drover version    バージョン表示
   herdr-drover help       このヘルプ

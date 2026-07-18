@@ -100,6 +100,7 @@ func waitClaudeAgents(t *testing.T, api *herdrapi.Client, cwd string, n int) []h
 func TestClaudeShimRealHerdrLifecycle(t *testing.T) {
 	sock := startHerdrForTest(t)
 	t.Setenv("HERDR_SOCKET_PATH", sock)
+	t.Setenv("HOME", t.TempDir()) // 着地ルール（~/.herdr-drover/workspaces.json）隔離
 	installStubClaude(t)
 	work := chdirPhysical(t)
 	swapSeams(t, false, nil) // 非 TTY（CI/pipe 経路）
@@ -263,6 +264,7 @@ func TestClaudeShimAutoStartsServer(t *testing.T) {
 	sock := filepath.Join(dir, "h.sock")
 	t.Setenv("HERDR_SOCKET_PATH", sock)
 	t.Setenv("XDG_CONFIG_HOME", xdg)
+	t.Setenv("HOME", t.TempDir()) // 着地ルール（~/.herdr-drover/workspaces.json）隔離
 	installStubClaude(t)
 	swapSeams(t, false, nil)
 	chdirPhysical(t)
@@ -392,6 +394,7 @@ func TestStdinIsTTYRealDevices(t *testing.T) {
 func TestClaudeShimSymlinkCwdNoDup(t *testing.T) {
 	sock := startHerdrForTest(t)
 	t.Setenv("HERDR_SOCKET_PATH", sock)
+	t.Setenv("HOME", t.TempDir()) // 着地ルール（~/.herdr-drover/workspaces.json）隔離
 	installStubClaude(t)
 	swapSeams(t, false, nil)
 

@@ -116,22 +116,38 @@ func cmdEnroll(args []string, stdout io.Writer) error {
 		}
 	}
 
-	// 設定ファイル: 既存の他キー（pc_id 等の手動設定）は保持して 3 キーを
-	// 更新する（cm writeTomlKeys の「同名キーのみ置換」と同じ規律）。
+	// 設定ファイル: 既存の他キー（pc_id 等の手動設定、learn_moves 等の
+	// fileConfig 4 キー外の別経路トグルも含む）は保持して 3 キーのみ置換する
+	// （cm writeTomlKeys の「同名キーのみ置換」と同じ規律）。生 JSON map で
+	// 読み書きする理由: fileConfig へ decode→全置換すると未知キーが silent に
+	// drop され、再 enroll のたび learn_moves が無警告で消える実バグだった
+	// （レビュー指摘＝readLearnMoves の「silent に無効化しない」規律の裏口破り）。
 	cfgPath, err := configFilePath()
 	if err != nil {
 		return err
 	}
-	fc, ferr := readFileConfig(cfgPath)
+	raw, ferr := readRawFileConfig(cfgPath)
 	if ferr != nil {
 		// 壊れた既存ファイルは enroll で作り直す（黙って上書きせずログに残す）。
 		fmt.Fprintf(stdout, "⚠ 既存の設定ファイルが壊れているため作り直します: %v\n", ferr)
-		fc = fileConfig{}
+		raw = map[string]json.RawMessage{}
 	}
-	fc.GCPProject = b.GCPProject
-	fc.CloudRelayURL = relayURL
-	fc.GoogleApplicationCredentials = saPath
-	if err := writeFileConfig(cfgPath, fc); err != nil {
+	for k, v := range map[string]string{
+		"gcp_project":                    b.GCPProject,
+		"cloud_relay_url":                relayURL,
+		"google_application_credentials": saPath,
+	} {
+		if v == "" {
+			delete(raw, k) // 空値はキー削除（fileConfig omitempty と同じ見た目）
+			continue
+		}
+		j, merr := json.Marshal(v)
+		if merr != nil {
+			return fmt.Errorf("設定 encode 失敗: %w", merr)
+		}
+		raw[k] = j
+	}
+	if err := writeRawFileConfig(cfgPath, raw); err != nil {
 		return fmt.Errorf("設定書込失敗: %w", err)
 	}
 

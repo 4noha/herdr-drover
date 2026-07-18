@@ -170,6 +170,45 @@ func TestEnrollPreservesOtherFileKeys(t *testing.T) {
 	}
 }
 
+// 再 enroll が fileConfig の 4 キー以外（learn_moves 等の別経路トグル）を
+// 落とさないこと（レビュー指摘: 旧コードは fileConfig への decode→全置換で
+// 未知キーが silent に drop＝端末再登録のたび live 学習が無警告で無効化
+// される。readLearnMoves の「silent に無効化しない」規律の裏口破り。
+// 旧コードで readLearnMoves()==false になる FAIL を確認済み）。
+func TestEnrollPreservesLearnMovesKey(t *testing.T) {
+	clearDroverEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".herdr-drover")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "config.json"),
+		[]byte(`{"pc_id":"custom-herdr","learn_moves":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	wsURL := fakeEnrollServer(t, "LM111111", "lm-proj", "wss://r.example", "")
+	if code, out, errb := runCapture(t, "enroll", "LM111111", "--relay", wsURL); code != 0 {
+		t.Fatalf("enroll exit=%d\nstdout:%s\nstderr:%s", code, out, errb)
+	}
+	on, err := readLearnMoves()
+	if err != nil {
+		t.Fatalf("readLearnMoves: %v", err)
+	}
+	if !on {
+		b, _ := os.ReadFile(filepath.Join(dir, "config.json"))
+		t.Fatalf("enroll で learn_moves が消えた（silent 変更違反）: config.json=%s", b)
+	}
+	// 既存の 3 キー更新・pc_id 保持は従来どおり成立していること。
+	fc, err := readFileConfig(filepath.Join(dir, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fc.PCID != "custom-herdr" || fc.GCPProject != "lm-proj" {
+		t.Fatalf("pc_id 保持/gcp_project 更新が想定外: %+v", fc)
+	}
+}
+
 func TestEnrollUsageErrors(t *testing.T) {
 	clearDroverEnv(t)
 	// code 無し / --relay 無しは exit 2（usage）。ネットへ出ない。
