@@ -142,6 +142,28 @@ herdr-drover organize --capture    # 現配置を exact ルールとして保存
   ルール書込・skip は必ず 1 行ログに残る。
   次に同じ場所で claude を開くと **Tab ごと**学習先 Workspace に生まれる
 
+### 複数クラウド（端末ごとにマルチ Google アカウント）
+
+1 台の PC が **複数の独立したクラウド**（別 Google アカウント＝別 GCP
+プロジェクト/別 relay/別 SA 鍵）へ**同時接続**し、同じ herdr セッションを各
+クラウドへ push・各々の relay でトンネル/コマンドを受けられる。クラウド側は
+一切改変不要（PC 側 agent のみの機能）。
+
+- **設定**: `~/.herdr-drover/clouds.json`（`[{project, relay_url, sa_key_path,
+  pc_name?}]`）。**無ければ従来どおり env/config.json の単一クラウド**＝既存
+  構成は挙動完全不変（後方互換）。
+- **追加は enroll**: 2 つ目以降の Google アカウントを Web「＋ 端末を追加」→
+  `herdr-drover enroll <code> --relay wss://…` すると、SA を `sa-<project>.json`
+  （既存 sa.json を上書きしない）に置き、`clouds.json` へ追記する（既存クラウドは
+  seed で保持・同 project は更新）。初回/同一クラウド再 enroll は従来どおり
+  `sa.json`＋`config.json`＝byte 同一の後方互換。
+- **認証の肝**: `GOOGLE_APPLICATION_CREDENTIALS` はプロセス global で 1 つしか
+  持てないため、共有 lib の `state.NewWithCredentials`（`option.WithCredentialsFile`）で
+  **クラウドごとに SA 鍵を個別注入**＝1 プロセスで複数 GCP プロジェクトへ同時接続。
+- **fan-out**: agent がクラウドごとに goroutine（RegisterPC＋producer push＋
+  遠隔命令＋Web ターミナル制御線）を回す。セッション源は共有＝同一セッションを
+  全クラウドへ。次回 agent 再起動（`herdr-drover install` / kickstart）で反映。
+
 ## Status
 
 Phase 1（一覧同期）・Phase 2（Web ターミナル）・Phase 4（プラグイン化・

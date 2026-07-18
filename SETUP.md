@@ -75,6 +75,11 @@ herdr plugin link      # herdr の pane イベントで agent を nudge（周期
 
 これで herdr のセッションが Web 端末一覧に出る。以後 `claude` を使うだけで同期される。
 
+> **2 つ目以降の Google アカウント（マルチクラウド）**: 別アカウントのクラウドを
+> 同じ手順で `enroll` すると、SA を `sa-<project>.json` に置き `~/.herdr-drover/
+> clouds.json` へ追記する（既存クラウドは保持）。agent は次回起動で全クラウドへ
+> 同時 fan-out する（[README](README.md) の「複数クラウド」節）。
+
 ### クラウドをまだ持っていない場合
 
 先に [drover-cloud/SETUP.md](../drover-cloud/SETUP.md) で GCP に relay/Firestore/

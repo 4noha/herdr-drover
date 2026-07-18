@@ -69,7 +69,7 @@ func TestE2ERestartProxyRespawnsBridge(t *testing.T) {
 	}
 	requireBridge(t)
 	srv, hc := startHerdr(t)
-	relayURL := startLocalRelay(t, cmRepoRoot(t))
+	relayURL := startLocalRelay(t, droverCloudRoot(t))
 	bin := buildBinary(t)
 
 	// wake/命令/監査 read-back 用の in-process クライアント（owner 側の役）。

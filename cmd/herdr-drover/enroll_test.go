@@ -144,7 +144,9 @@ func TestEnrollFallbacksWithoutSAJSON(t *testing.T) {
 }
 
 // 既存 config.json の他キー（pc_id 等）は enroll が保持する（cm
-// writeTomlKeys の「同名キーのみ置換」規律）。
+// writeTomlKeys の「同名キーのみ置換」規律）。既存クラウド無し（primary 経路）
+// ＝config.json に gcp_project を書き pc_id は保持する（additional 判定は
+// 既存クラウドが無いので false＝clouds.json へは行かない）。
 func TestEnrollPreservesOtherFileKeys(t *testing.T) {
 	clearDroverEnv(t)
 	home := t.TempDir()
@@ -153,8 +155,9 @@ func TestEnrollPreservesOtherFileKeys(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	// gcp_project は書かない＝既存クラウド無し＝primary 経路（config.json 更新）。
 	if err := os.WriteFile(filepath.Join(dir, "config.json"),
-		[]byte(`{"pc_id":"custom-herdr","gcp_project":"old-proj"}`), 0o600); err != nil {
+		[]byte(`{"pc_id":"custom-herdr"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	wsURL := fakeEnrollServer(t, "KEEP1111", "new-proj", "wss://r.example", "")
@@ -167,6 +170,53 @@ func TestEnrollPreservesOtherFileKeys(t *testing.T) {
 	}
 	if fc.PCID != "custom-herdr" || fc.GCPProject != "new-proj" {
 		t.Fatalf("pc_id 保持/gcp_project 更新が想定外: %+v", fc)
+	}
+}
+
+// 端末ごとマルチ Google アカウント: 既存の単一クラウド（config.json の
+// primary）とは**別プロジェクト**を enroll すると、config.json は不変のまま
+// clouds.json へ追記され、SA 鍵は sa.json を上書きしない per-project 鍵
+// （sa-<project>.json）に置かれる（cm append 経路の drover 移植）。
+func TestEnrollAppendsSecondCloud(t *testing.T) {
+	clearDroverEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".herdr-drover")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// 既存 primary クラウド proj-a（sa.json も既存）。
+	if err := os.WriteFile(filepath.Join(dir, "config.json"),
+		[]byte(`{"pc_id":"custom-herdr","gcp_project":"proj-a","cloud_relay_url":"wss://a","google_application_credentials":"`+filepath.Join(dir, "sa.json")+`"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "sa.json"), []byte(`{"type":"service_account"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// 別プロジェクト proj-b を enroll（SA 付き）。
+	wsURL := fakeEnrollServer(t, "ADD22222", "proj-b", "wss://b", `{"type":"service_account","project_id":"proj-b"}`)
+	if code, out, errb := runCapture(t, "enroll", "ADD22222", "--relay", wsURL); code != 0 {
+		t.Fatalf("enroll exit=%d\nstdout:%s\nstderr:%s", code, out, errb)
+	}
+
+	// config.json は primary（proj-a）のまま不変。
+	fc, err := readFileConfig(filepath.Join(dir, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fc.GCPProject != "proj-a" {
+		t.Fatalf("primary config.json が別 project 追記で上書きされた: %+v", fc)
+	}
+	// SA は per-project 鍵（sa.json は不変）。
+	if _, err := os.Stat(filepath.Join(dir, "sa-proj-b.json")); err != nil {
+		t.Fatalf("per-project SA 鍵 sa-proj-b.json が無い: %v", err)
+	}
+	// clouds.json に proj-a（seed）＋proj-b が入る。
+	cfg := Config{Project: "proj-a", RelayURL: "wss://a", PCID: "custom-herdr"}
+	cs := cfg.LoadClouds()
+	if len(cs) != 2 || !cloudsHaveProject(cs, "proj-a") || !cloudsHaveProject(cs, "proj-b") {
+		t.Fatalf("clouds.json に primary seed＋新クラウドが揃わない: %+v", cs)
 	}
 }
 

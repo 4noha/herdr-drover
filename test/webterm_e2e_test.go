@@ -2,7 +2,7 @@
 
 // webterm_e2e_test — Phase 2「Web ターミナル」の e2e 基盤（常設・実環境）:
 //
-//	ローカル実 relay（cm リポジトリの relay 実行体を無改変で go build 起動）
+//	ローカル実 relay（drover-cloud の relay 実行体を無改変で go build 起動）
 //	＋ 実 herdr 隔離サーバ ＋ 実 Firestore エミュレータ ＋ 実 drover agent
 //	（go build した herdr-drover を `agent` サブコマンドで spawn）＋ 機械
 //	viewer（cm ワイヤ契約抽出の viewer dial 仕様で WSS 接続）で
@@ -14,8 +14,8 @@
 //	  → 多重 wake は既存 bridge 生存中なら無視（bridge 開始ログ 1 回）
 //	  → SIGTERM で全 bridge 停止＝agent graceful 終了・viewer 切断
 //
-// を検証する。鉄則どおり合成 relay での代替はしない（cm リポジトリ不在＝
-// relay 実行体を用意できない環境は理由を明示して Skip。cm リポジトリは
+// を検証する。鉄則どおり合成 relay での代替はしない（drover-cloud リポジトリ不在＝
+// relay 実行体を用意できない環境は理由を明示して Skip。drover-cloud リポジトリは
 // 読み取り＋外部 dir への go build のみ＝一切変更しない）。
 //
 // 依存パッケージの都合（本テスト自体は internal/bridge を import しない＝
@@ -73,28 +73,28 @@ func requireBridge(t *testing.T) {
 	t.Skip("SKIP: internal/bridge 未着地（並行実装中）。着地後に統合フェーズが本テストを実行する")
 }
 
-// cmRepoRoot は cm（claude-master-go）リポジトリの場所を解決する。
-// CM_REPO 環境変数 > 既定 ~/works/tools/claude-master-go。
-// 不在なら Skip（＝ローカル実 relay を起動できない。合成 relay で代替は
-// しない＝鉄則。理由はメッセージで正直に返す）。
-func cmRepoRoot(t *testing.T) string {
+// droverCloudRoot は drover-cloud リポジトリ（切り出したクラウド層＝canonical
+// relay。cm と byte 等価）の場所を解決する。DROVER_CLOUD_REPO 環境変数 > 既定
+// ~/works/tools/drover-cloud。不在なら Skip（合成 relay で代替しない＝鉄則。
+// 理由はメッセージで正直に返す）。cm 依存を切り離し drover 単独で e2e 可能に。
+func droverCloudRoot(t *testing.T) string {
 	t.Helper()
-	repo := os.Getenv("CM_REPO")
+	repo := os.Getenv("DROVER_CLOUD_REPO")
 	if repo == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
-			t.Skipf("SKIP: HOME 不明で cm リポジトリを解決できない（実 relay 起動不可・合成では代替しない）: %v", err)
+			t.Skipf("SKIP: HOME 不明で drover-cloud リポジトリを解決できない（実 relay 起動不可・合成では代替しない）: %v", err)
 		}
-		repo = filepath.Join(home, "works", "tools", "claude-master-go")
+		repo = filepath.Join(home, "works", "tools", "drover-cloud")
 	}
-	if fi, err := os.Stat(filepath.Join(repo, "cloud", "relay", "main.go")); err != nil || fi.IsDir() {
-		t.Skipf("SKIP: cm リポジトリ不在（%s）＝ローカル実 relay を起動できない。合成 relay では代替しない（CM_REPO で場所を指定可）", repo)
+	if fi, err := os.Stat(filepath.Join(repo, "cmd", "relay", "main.go")); err != nil || fi.IsDir() {
+		t.Skipf("SKIP: drover-cloud リポジトリ不在（%s）＝ローカル実 relay を起動できない。合成 relay では代替しない（DROVER_CLOUD_REPO で場所を指定可）", repo)
 	}
 	return repo
 }
 
-// startLocalRelay は cm の relay 実行体（cloud/relay）を **無改変**で
-// go build（出力は本テストの TempDir＝cm リポジトリへ一切書かない）し、
+// startLocalRelay は drover-cloud の relay 実行体（cmd/relay・cm と byte 等価）を
+// **無改変**で go build（出力は本テストの TempDir＝リポジトリへ一切書かない）し、
 // ローカルで起動する。戻り値は ws://127.0.0.1:<port>（relay ベース URL）。
 //
 // 環境は意図的に最小（PORT のみ・GCP_PROJECT/WEB_SIGNING_KEY 等を渡さない）
@@ -103,15 +103,15 @@ func cmRepoRoot(t *testing.T) string {
 // 済みの構成。ペアリング/再接続/2 分待ち等の semantics は本番と同一コード）。
 // grant 強制（CheckRelayGrant）の検証は cm 側の実 GCP e2e が担う。agent は
 // 本番同順で PutRelayGrant を書く（エミュレータへ・無害）。
-func startLocalRelay(t *testing.T, cmRepo string) string {
+func startLocalRelay(t *testing.T, repoRoot string) string {
 	t.Helper()
 	bin := filepath.Join(t.TempDir(), "cloud-relay")
-	build := exec.Command("go", "build", "-o", bin, "./cloud/relay")
-	build.Dir = cmRepo
+	build := exec.Command("go", "build", "-o", bin, "./cmd/relay")
+	build.Dir = repoRoot
 	if out, err := build.CombinedOutput(); err != nil {
 		// リポジトリはあるのに build できないのは実障害＝Skip でなく FAIL
 		// （理由を正直に返す）。
-		t.Fatalf("ローカル実 relay を起動できない（cm cloud/relay の go build 失敗）: %v\n%s", err, out)
+		t.Fatalf("ローカル実 relay を起動できない（drover-cloud cmd/relay の go build 失敗）: %v\n%s", err, out)
 	}
 
 	port := freePort()
@@ -276,7 +276,7 @@ func TestE2EWebTerminal(t *testing.T) {
 	}
 	requireBridge(t)
 	srv, hc := startHerdr(t)
-	relayURL := startLocalRelay(t, cmRepoRoot(t))
+	relayURL := startLocalRelay(t, droverCloudRoot(t))
 	bin := buildBinary(t)
 
 	// wake/読み取り用の in-process クライアント（機械 viewer の GCP 側半分。
@@ -511,7 +511,7 @@ func TestE2EWebTerminalQuiescence(t *testing.T) {
 	}
 	requireBridge(t)
 	srv, hc := startHerdr(t)
-	relayURL := startLocalRelay(t, cmRepoRoot(t))
+	relayURL := startLocalRelay(t, droverCloudRoot(t))
 	bin := buildBinary(t)
 
 	const qPCID = "e2e-webterm-q-herdr" // 他 e2e と分離（wake/doc 干渉防止）

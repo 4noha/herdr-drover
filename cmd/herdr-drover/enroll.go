@@ -105,57 +105,79 @@ func cmdEnroll(args []string, stdout io.Writer) error {
 	if relayURL == "" {
 		relayURL = relay // 応答に無ければ --relay 引数へ fallback（cm 同順）
 	}
+	// クラウド追加判定（端末ごとマルチ Google アカウント fan-out）: clouds.json
+	// が既にある(複数クラウド運用)か、既存の単一クラウドと**別プロジェクト**を
+	// enroll する場合は clouds.json へ追記する。それ以外(初回 or 同一クラウド
+	// 再 enroll)は従来どおり sa.json+config.json＝既存単一クラウド構成は挙動
+	// 完全不変（後方互換）。pc id は resolveConfig 解決値（env PC_ID > file >
+	// <host>-herdr）。
+	rcfg, _ := resolveConfig()
+	existing := rcfg.LoadClouds()
+	additional := fileExists(cloudsFilePath()) ||
+		(len(existing) > 0 && !cloudsHaveProject(existing, b.GCPProject))
+
 	saPath := ""
 	if b.SAJSON != "" {
-		saPath = filepath.Join(dir, "sa.json")
-		// os.WriteFile は truncate 直書き（0B の瞬間）＋既存ファイルの緩い
-		// 権限（0644 等）が残る実測バグ（レビュー指摘）。writeFileAtomic は
-		// CreateTemp(0600)→chmod→rename＝内容も権限も原子的に置換する。
+		if additional {
+			// 既存 sa.json を上書きしない per-project 鍵（GCP project ID は
+			// 小文字/数字/ハイフンのみ＝ファイル名安全）。
+			saPath = filepath.Join(dir, "sa-"+b.GCPProject+".json")
+		} else {
+			saPath = filepath.Join(dir, "sa.json")
+		}
+		// writeFileAtomic は CreateTemp(0600)→chmod→rename＝内容も権限も原子的
+		//（os.WriteFile の truncate 直書き 0B 窓＋緩い権限残存バグの回避）。
 		if err := writeFileAtomic(saPath, []byte(b.SAJSON), 0o600); err != nil {
 			return fmt.Errorf("SA 鍵書込失敗: %w", err)
 		}
 	}
 
-	// 設定ファイル: 既存の他キー（pc_id 等の手動設定、learn_moves 等の
-	// fileConfig 4 キー外の別経路トグルも含む）は保持して 3 キーのみ置換する
-	// （cm writeTomlKeys の「同名キーのみ置換」と同じ規律）。生 JSON map で
-	// 読み書きする理由: fileConfig へ decode→全置換すると未知キーが silent に
-	// drop され、再 enroll のたび learn_moves が無警告で消える実バグだった
-	// （レビュー指摘＝readLearnMoves の「silent に無効化しない」規律の裏口破り）。
 	cfgPath, err := configFilePath()
 	if err != nil {
 		return err
 	}
-	raw, ferr := readRawFileConfig(cfgPath)
-	if ferr != nil {
-		// 壊れた既存ファイルは enroll で作り直す（黙って上書きせずログに残す）。
-		fmt.Fprintf(stdout, "⚠ 既存の設定ファイルが壊れているため作り直します: %v\n", ferr)
-		raw = map[string]json.RawMessage{}
-	}
-	for k, v := range map[string]string{
-		"gcp_project":                    b.GCPProject,
-		"cloud_relay_url":                relayURL,
-		"google_application_credentials": saPath,
-	} {
-		if v == "" {
-			delete(raw, k) // 空値はキー削除（fileConfig omitempty と同じ見た目）
-			continue
+	if additional {
+		// 2 つ目以降: clouds.json へ追記（既存クラウドは seed で保持・同 project
+		// は更新）。config.json（primary）は不変＝agent は次回起動で全クラウドへ
+		// fan-out する（state.NewWithCredentials で SA を個別注入）。
+		nc := Cloud{Project: b.GCPProject, RelayURL: relayURL, SAKeyPath: saPath, PCName: rcfg.PCID}
+		if err := rcfg.AppendCloud(nc, existing); err != nil {
+			return fmt.Errorf("clouds.json 書込失敗: %w", err)
 		}
-		j, merr := json.Marshal(v)
-		if merr != nil {
-			return fmt.Errorf("設定 encode 失敗: %w", merr)
+	} else {
+		// 初回(単一クラウド): config.json の 3 キーのみ置換し他キー（pc_id 等の
+		// 手動設定・learn_moves 等の別経路トグル）は保持する（生 JSON map で
+		// 読み書き＝fileConfig へ decode→全置換すると未知キーが silent drop され、
+		// 再 enroll のたび learn_moves が無警告で消える実バグの回避）。
+		raw, ferr := readRawFileConfig(cfgPath)
+		if ferr != nil {
+			// 壊れた既存ファイルは enroll で作り直す（黙って上書きせずログに残す）。
+			fmt.Fprintf(stdout, "⚠ 既存の設定ファイルが壊れているため作り直します: %v\n", ferr)
+			raw = map[string]json.RawMessage{}
 		}
-		raw[k] = j
-	}
-	if err := writeRawFileConfig(cfgPath, raw); err != nil {
-		return fmt.Errorf("設定書込失敗: %w", err)
+		for k, v := range map[string]string{
+			"gcp_project":                    b.GCPProject,
+			"cloud_relay_url":                relayURL,
+			"google_application_credentials": saPath,
+		} {
+			if v == "" {
+				delete(raw, k) // 空値はキー削除（fileConfig omitempty と同じ見た目）
+				continue
+			}
+			j, merr := json.Marshal(v)
+			if merr != nil {
+				return fmt.Errorf("設定 encode 失敗: %w", merr)
+			}
+			raw[k] = j
+		}
+		if err := writeRawFileConfig(cfgPath, raw); err != nil {
+			return fmt.Errorf("設定書込失敗: %w", err)
+		}
 	}
 
 	// owner 発行コードでの正規 enroll＝再認可。過去の強制失効（Web「端末
 	// ペアリング解除」）を best-effort で解除する（cm 同順・10s timeout。
-	// 信頼の起点は owner 発行の一回限りコード）。pc id は resolveConfig の
-	// 解決値＝env PC_ID > file > <host>-herdr（DESIGN: -herdr 固定）。
-	rcfg, _ := resolveConfig()
+	// 信頼の起点は owner 発行の一回限りコード）。rcfg は上で解決済。
 	if saPath != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		if est, e := state.NewWithCredentials(ctx, b.GCPProject, rcfg.PCID, saPath); e == nil {
@@ -170,7 +192,11 @@ func cmdEnroll(args []string, stdout io.Writer) error {
 	if saPath != "" {
 		fmt.Fprintf(stdout, "  認証鍵          = %s\n", saPath)
 	}
-	fmt.Fprintf(stdout, "  設定ファイル    = %s（env が常に優先）\n", cfgPath)
+	if additional {
+		fmt.Fprintf(stdout, "  接続先追加      = %s（端末ごとマルチ Google アカウント fan-out）\n", cloudsFilePath())
+	} else {
+		fmt.Fprintf(stdout, "  設定ファイル    = %s（env が常に優先）\n", cfgPath)
+	}
 	fmt.Fprintf(stdout, "  pc id           = %s\n", rcfg.PCID)
 	// 案内は install（launchd 常駐の正規手順）へ向ける。install は
 	// config.json も解決するので、この enroll 直後に env なしで成立する
