@@ -35,9 +35,9 @@ import (
 )
 
 const (
-	injSource = "drover-inj"          // pane.report_metadata の source
-	injTokPC  = herdrapi.InjTokenPC   // identity token キー（producer と共有＝herdrapi）
-	injTokSID = herdrapi.InjTokenSID  // exact-match・非ヒューリスティック
+	injSource = "drover-inj"         // pane.report_metadata の source
+	injTokPC  = herdrapi.InjTokenPC  // identity token キー（producer と共有＝herdrapi）
+	injTokSID = herdrapi.InjTokenSID // exact-match・非ヒューリスティック
 	// injWorkspace は「注入 workspace の**新規作成時の初期 label**」。判定には
 	// 一切使わない（v0.5.x で workspace 所属判定は完全廃止・token+index が権威）。
 	// ユーザーは herdr UI で自由に rename 可能（drover は workspace_id を持ち回るので追随不要）。
@@ -67,7 +67,66 @@ func injTabName(dir string) string {
 	return "↗" + dir
 }
 
-type injMeta struct{ pc, sid, dir string }
+type injMeta struct{ pc, sid, dir, status, name string }
+
+// injAPIState は producer が同期したリモートの agent_status（herdr の**表示値**＝
+// done/idle/working/blocked/unknown の 5 値）を、pane.report_agent の --state 語彙
+// （idle/working/blocked/unknown の 4 値・"done" は入力に無い）へ写す exact-match。
+//
+//	working→working, blocked→blocked, idle→idle,
+//	done→idle（herdr 内部で done は AgentState::Idle の「未 seen」表示＝報告は idle。
+//	         転記先で seen 前なら done、seen 後は idle と表示され、状態としては一致）。
+//
+// 第 2 戻り値 false は「リモートに生きた agent 無し」（unknown/空/未知値）＝転記せず
+// release 対象。ヒューリスティック分類はしない（鉄則③・herdr src の pane_agent_status /
+// detect_state_from_api の写像を実コードで確認して決めた）。
+func injAPIState(status string) (string, bool) {
+	switch status {
+	case "working":
+		return "working", true
+	case "blocked":
+		return "blocked", true
+	case "idle", "done":
+		return "idle", true
+	}
+	return "", false
+}
+
+// mirrorInjectedAgent は present な注入 pane paneID に、リモート session の
+// agent_status(status)/window_name(name) を herdr の pane.report_agent で転記し、
+// ↗窓 を herdr に「agent」として検出させる（tab/workspace の agent_status・
+// agent.list・agent wait が効くようになる）。reported は paneID→最後に report した
+// agent label で、リモート agent 終了（status→unknown）時に正しい label で
+// release_agent し stale 表示を消すための最小 state（nil 可＝release 追跡なし）。
+func mirrorInjectedAgent(api *herdrapi.Client, paneID, name, status string, reported map[string]string, lg *log.Logger) {
+	if apiState, ok := injAPIState(status); ok {
+		if name == "" {
+			name = "agent" // report_agent は agent label 必須（空はデフォルト名）
+		}
+		if err := api.ReportAgent(paneID, injSource, name, apiState); err != nil {
+			lg.Printf("[reconcile] report_agent 失敗 %s (%s=%s→%s): %v", paneID, name, status, apiState, err)
+			return
+		}
+		if reported != nil {
+			reported[paneID] = name
+		}
+		return
+	}
+	// unknown/空 → リモートに生きた agent 無し。以前 report していれば同じ label で
+	// release して stale 表示を消す（reported 無し＝追跡なしなら何もしない）。
+	if reported == nil {
+		return
+	}
+	prev, ok := reported[paneID]
+	if !ok {
+		return
+	}
+	if err := api.ReleaseAgent(paneID, injSource, prev); err != nil {
+		lg.Printf("[reconcile] release_agent 失敗 %s (%s): %v", paneID, prev, err)
+		return
+	}
+	delete(reported, paneID)
+}
 
 // remoteSource は reconcile が他 PC のセッションを読むのに必要な最小 API
 // （*state.Client が満たす）。テストは herdr 側を実 herdr で検証しつつ、リモート
@@ -139,10 +198,18 @@ func resolveActiveInjectWSID(api *herdrapi.Client, idx *injectindex.Index, panes
 // cl は primary クラウド（selfPC=cl.PCName で自 PC を除外・pane env に設定を注入）。
 // idx は injectindex（判定の権威・race 窓予約・再起動 token 消失復元）。
 func reconcileRemote(ctx context.Context, api *herdrapi.Client, st remoteSource,
-	cl Cloud, selfExe string, idx *injectindex.Index, lg *log.Logger) {
+	cl Cloud, selfExe string, idx *injectindex.Index, lg *log.Logger, reportedOpt ...map[string]string) {
 
 	selfPC := cl.PCName
 	env := injPaneEnv(cl)
+
+	// reported は paneID→最後に report した agent label（注入 pane の agent 転記の
+	// release 追跡用・runRemoteInject が持ち回る）。可変長で受けるのは既存の全
+	// reconcileRemote 呼び出し（テスト含む）と後方互換にするため（未指定＝追跡なし）。
+	var reported map[string]string
+	if len(reportedOpt) > 0 {
+		reported = reportedOpt[0]
+	}
 
 	// cur: 既存の注入 pane。list 失敗は abort＝「注入 pane ゼロ」誤認 runaway を防ぐ。
 	panes, err := api.PaneList()
@@ -215,7 +282,12 @@ func reconcileRemote(ctx context.Context, api *herdrapi.Client, st remoteSource,
 				continue
 			}
 			dir, _ := s["short_dir"].(string)
-			desired[injMarkerKey(pc, sid)] = injMeta{pc: pc, sid: sid, dir: dir}
+			// agent_status / window_name は producer が既に同期している生値
+			// （producer.go BuildSessions）。注入 pane へ exact-match で転記して
+			// herdr に agent 検出させるのに使う（reconcile 側で分類はしない）。
+			status, _ := s["agent_status"].(string)
+			name, _ := s["window_name"].(string)
+			desired[injMarkerKey(pc, sid)] = injMeta{pc: pc, sid: sid, dir: dir, status: status, name: name}
 		}
 	}
 
@@ -318,6 +390,7 @@ func reconcileRemote(ctx context.Context, api *herdrapi.Client, st remoteSource,
 				}
 			}
 			lg.Printf("[reconcile] CREATE %s/%s -> %s", d.pc, d.sid, pid)
+			mirrorInjectedAgent(api, pid, d.name, d.status, reported, lg)
 		} else {
 			for _, extra := range ids[1:] {
 				_ = api.PaneClose(extra) // 重複（過去 race）を自己修復
@@ -325,6 +398,8 @@ func reconcileRemote(ctx context.Context, api *herdrapi.Client, st remoteSource,
 					_ = idx.Forget(extra)
 				}
 			}
+			// 既存の注入 pane にもリモートの現 agent_status を転記（idle↔working 等の追随）。
+			mirrorInjectedAgent(api, ids[0], d.name, d.status, reported, lg)
 		}
 	}
 	// desired に無い注入 pane = リモートで消えたセッション → close + index Forget。
@@ -333,6 +408,7 @@ func reconcileRemote(ctx context.Context, api *herdrapi.Client, st remoteSource,
 		if idx != nil {
 			_ = idx.Forget(pid)
 		}
+		delete(reported, pid) // agent 転記の release 追跡から除去（pane 消滅で agent も消える。nil map でも安全）
 		lg.Printf("[reconcile] CLOSE %s（リモート消滅）", pid)
 	}
 	// ⚠ token 無し pane の一括掃除はしない: 注入 workspace には WorkspaceCreate 由来の
@@ -379,6 +455,9 @@ func runRemoteInject(ctx context.Context, api *herdrapi.Client, st *state.Client
 		}
 	}()
 
+	// reported は注入 pane の agent 転記（pane.report_agent）の release 追跡用に
+	// reconcile 間で持ち回る（paneID→最後に report した agent label）。
+	reported := map[string]string{}
 	for {
 		select {
 		case <-ctx.Done():
@@ -390,7 +469,7 @@ func runRemoteInject(ctx context.Context, api *herdrapi.Client, st *state.Client
 			case <-ctx.Done():
 				return
 			}
-			reconcileRemote(ctx, api, st, cl, selfExe, idx, lg)
+			reconcileRemote(ctx, api, st, cl, selfExe, idx, lg, reported)
 		}
 	}
 }
@@ -448,9 +527,11 @@ func applyInjectPane(api *herdrapi.Client, wsID, tabLabel string, argv []string,
 }
 
 // selfHealOnStartup は agent 起動時に呼ぶ 3 分岐 self-heal:
-//   (a) pane.list に token あり／index に無し → index に取り込む（AdoptToken）
-//   (b) pane.list に token 無し／index に非 Pending entry あり → pane に token 再表明
-//   (c) index に entry あり／pane.list に無し → index から Forget（stale 掃除）
+//
+//	(a) pane.list に token あり／index に無し → index に取り込む（AdoptToken）
+//	(b) pane.list に token 無し／index に非 Pending entry あり → pane に token 再表明
+//	(c) index に entry あり／pane.list に無し → index から Forget（stale 掃除）
+//
 // Pending entry は「reconcile 中の pending が index 書込後に crash」した名残なので、
 // pane.list に該当 pane_id が居れば (b) と同じ扱い、居なければ (c) と同じ扱い。
 // 戻り値は healed/adopted/dropped の件数（ログ・テスト検証用）。

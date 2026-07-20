@@ -133,6 +133,84 @@ func TestReconcileRemoteInjectAndSelfHeal(t *testing.T) {
 	})
 }
 
+// fakeSessAgent は agent_status / window_name 付きの session 行（producer が同期
+// する生値の部分集合）。agent を持つリモート pane の転記経路を検証するのに使う。
+func fakeSessAgent(sid, dir, name, status string) map[string]any {
+	return map[string]any{
+		"key":          sid,
+		"session_id":   sid,
+		"short_dir":    dir,
+		"window_name":  name,
+		"agent_status": status,
+	}
+}
+
+// injPaneStatus は (pc,sid) の注入 pane の agent_status を実 herdr の pane.list から
+// 読む（report_agent が pane.agent_status に反映されることの検証点）。
+func injPaneStatus(t *testing.T, api *herdrapi.Client, pc, sid string) (string, bool) {
+	t.Helper()
+	panes, err := api.PaneList()
+	if err != nil {
+		t.Fatalf("pane.list: %v", err)
+	}
+	for i := range panes {
+		p := &panes[i]
+		if p.Tokens[injTokPC] == pc && p.Tokens[injTokSID] == sid {
+			return p.AgentStatus, true
+		}
+	}
+	return "", false
+}
+
+// TestReconcileMirrorsRemoteAgentStatus は「リモート session の agent_status を注入
+// pane へ転記して herdr に agent 検出させる」機能の検証（実 herdr）。pane.report_agent
+// が pane.agent_status に効くこと、working↔idle↔blocked の追随、リモート agent 終了
+// （unknown）での release_agent による stale 解消を機械確認する。
+func TestReconcileMirrorsRemoteAgentStatus(t *testing.T) {
+	sock := startHerdrForTest(t)
+	api := herdrapi.New(sock)
+	lg := log.New(io.Discard, "", 0)
+	stub := reconcileStub(t)
+	ctx := context.Background()
+	idx := newTestIndex(t)
+	reported := map[string]string{} // release 追跡（runRemoteInject 相当）
+
+	fr := &fakeRemote{
+		pcs: []string{"self-herdr", "remoteA"},
+		sessions: map[string][]map[string]any{
+			"remoteA": {fakeSessAgent("w9:pA", "projA", "claude", "working")},
+		},
+	}
+	const selfPC = "self-herdr"
+
+	// step はリモート agent_status を status に変えて 1 周 reconcile し、注入 pane の
+	// herdr 表示 agent_status が want になるまで待つ。want が status と違うのは herdr の
+	// seen 意味論による: report_agent の --state は idle/working/blocked/unknown の 4 値で、
+	// 内部 AgentState::Idle は「未 seen」で "done"、"seen" で "idle" と表示される
+	// （pane_agent_status(state, seen)）。本テストは pane を view しない＝seen=false なので
+	// リモートの idle も done も転記先では "done" と出る（状態としては同一の Idle）。
+	step := func(status, want string) {
+		t.Helper()
+		fr.sessions["remoteA"] = []map[string]any{fakeSessAgent("w9:pA", "projA", "claude", status)}
+		reconcileRemote(ctx, api, fr, Cloud{PCName: selfPC}, stub, idx, lg, reported)
+		waitCond(t, 15*time.Second, fmt.Sprintf("report=%q → 注入 pane の agent_status が %q になる", status, want), func() bool {
+			s, ok := injPaneStatus(t, api, "remoteA", "w9:pA")
+			return ok && s == want
+		})
+	}
+
+	// CREATE 周: working が注入 pane に転記される。
+	step("working", "working")
+	// 既存 pane で done → blocked → idle → working と追随（done/idle は未 seen で "done" 表示）。
+	step("done", "done")
+	step("blocked", "blocked")
+	step("idle", "done")
+	step("working", "working")
+	// リモート agent 終了（unknown）→ release_agent で stale が消え unknown に戻る
+	// （session 自体は残すので pane は close されない＝release 経路のみを分離検証）。
+	step("unknown", "unknown")
+}
+
 // TestReconcileDoesNotReapTokenlessInjectWorkspacePanes は「注入 workspace 内の
 // token 無し pane を reconcile が掃除してはならない」不変条件の見張り。注入 workspace
 // には WorkspaceCreate 由来の**構造 root pane（token 無し）**が常駐する（実 herdr 0.7.4

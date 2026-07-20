@@ -343,6 +343,38 @@ func (c *Client) ReportAgentSession(paneID, source, agent, sessionID string) err
 	}{paneID, source, agent, sessionID}, nil)
 }
 
+// ReportAgent は pane に外部 agent の状態を報告する（pane.report_agent）。herdr は
+// これで pane を「agent」として扱い、pane.agent_status を state にする（agent.list
+// にも現れる）。リモート pane 注入（cmd の reconcile）が他 PC の agent_status
+// （idle/working/blocked）を ↗窓 に転記して herdr に検出させる経路で使う。
+// state は herdr 列挙 "idle"|"working"|"blocked"|"unknown"（呼び手が exact-match で
+// 渡す＝ヒューリスティック分類はしない・鉄則③）。
+//
+// seq は**渡さない**: herdr は seq を per-source の単調増加ゲートに使い
+// （metadata_tokens.rs: `seq > last` でなければ無視）、seq 有りだと同一 source の
+// 後続 report が state を更新できない罠がある（実測。herdr 自身の report_agent
+// テストも seq 無し）。reconcile は単一 goroutine＋デバウンスで呼ぶので report 順は
+// 自然に保たれ、seq 無し（＝常に last-write-wins）で正しく追随する。
+func (c *Client) ReportAgent(paneID, source, agent, state string) error {
+	return c.call("pane.report_agent", struct {
+		PaneID string `json:"pane_id"`
+		Source string `json:"source"`
+		Agent  string `json:"agent"`
+		State  string `json:"state"`
+	}{paneID, source, agent, state}, nil)
+}
+
+// ReleaseAgent は pane から (source, agent) の agent 報告を取り下げる
+// （pane.release_agent）。リモートの agent が終了して agent_status が unknown に
+// 戻った注入 pane の stale 表示を消すのに使う。seq は ReportAgent と同理由で渡さない。
+func (c *Client) ReleaseAgent(paneID, source, agent string) error {
+	return c.call("pane.release_agent", struct {
+		PaneID string `json:"pane_id"`
+		Source string `json:"source"`
+		Agent  string `json:"agent"`
+	}{paneID, source, agent}, nil)
+}
+
 // PaneLayout は pane が属する tab のトポロジ（panes[]＋splits[]・rect 幾何）を返す。
 // result: {"type":"pane_layout","layout":{...}}。Tab 丸ごと引っ越しの再構築元。
 func (c *Client) PaneLayout(paneID string) (*PaneLayoutSnapshot, error) {
