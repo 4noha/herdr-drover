@@ -52,16 +52,29 @@ type installPaths struct {
 	plistPath  string // ~/Library/LaunchAgents/com.4noha.herdr-drover.plist
 	logPath    string // ~/.herdr-drover/agent.log
 	configPath string // ~/.herdr-drover/config（KEY=VALUE。env 未設定時の解決元）
+	// cliBinPath は install.sh が置く「ユーザー PATH 上の CLI バイナリ」。
+	// 通常 $HD_BINDIR / $HOME/.local/bin/herdr-drover。既定は $HOME/.local/bin。
+	// 「エディタで alias claude が使うのはこれ・selfupdate は binDst しか触らず
+	// stale になる」実バグ（v0.5.5 で実測）の再発防止用。selfupdate 経路が
+	// **binDst と一緒に cliBinPath も同期**するのに使う。
+	cliBinPath string
 }
 
 func resolveInstallPaths(home string) installPaths {
 	base := filepath.Join(home, ".herdr-drover")
+	// CLI パスは HD_BINDIR env で override 可能（install.sh と揃える）。既定は
+	// ~/.local/bin/herdr-drover（install.sh の既定と一致）。
+	cliBinDir := os.Getenv("HD_BINDIR")
+	if cliBinDir == "" {
+		cliBinDir = filepath.Join(home, ".local", "bin")
+	}
 	return installPaths{
 		baseDir:    base,
 		binDst:     filepath.Join(base, "bin", "herdr-drover"),
 		plistPath:  filepath.Join(home, "Library", "LaunchAgents", launchdLabel+".plist"),
 		logPath:    filepath.Join(base, "agent.log"),
 		configPath: filepath.Join(base, "config"),
+		cliBinPath: filepath.Join(cliBinDir, "herdr-drover"),
 	}
 }
 
