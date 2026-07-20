@@ -19,8 +19,21 @@ import (
 	"time"
 
 	"github.com/4noha/herdr-drover/internal/herdrapi"
+	"github.com/4noha/herdr-drover/internal/injectindex"
 	"github.com/4noha/herdr-drover/internal/wsmap"
 )
+
+// newTestIndex はテスト用の一時 injectindex（TempDir 上・test 終了で消える）。
+// reconcile_test の全ケースが独立した index を持つ（テスト間の状態漏れ回避）。
+func newTestIndex(t *testing.T) *injectindex.Index {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "inject-index.json")
+	idx, err := injectindex.Open(path)
+	if err != nil {
+		t.Fatalf("injectindex.Open: %v", err)
+	}
+	return idx
+}
 
 type fakeRemote struct {
 	pcs      []string
@@ -90,7 +103,7 @@ func TestReconcileRemoteInjectAndSelfHeal(t *testing.T) {
 	const selfPC = "self-herdr"
 
 	// 1 周目: 他 PC(remoteA) の 2 セッションが注入 pane として出現（自 PC は除外）。
-	reconcileRemote(ctx, api, fr, Cloud{PCName: selfPC}, stub, lg)
+	reconcileRemote(ctx, api, fr, Cloud{PCName: selfPC}, stub, newTestIndex(t), lg)
 	waitCond(t, 15*time.Second, "他 PC の 2 セッションが注入 pane として出現", func() bool {
 		inj := injectedPanes(t, api)
 		return len(inj) == 2 && hasInj(inj, "remoteA", "w9:pA") && hasInj(inj, "remoteA", "w9:pB")
@@ -98,7 +111,7 @@ func TestReconcileRemoteInjectAndSelfHeal(t *testing.T) {
 
 	// 2 周目: 同一 state → 冪等（定常 CREATE=0＝pane 数不変・M8f2 教訓の機械確認）。
 	before := len(injectedPanes(t, api))
-	reconcileRemote(ctx, api, fr, Cloud{PCName: selfPC}, stub, lg)
+	reconcileRemote(ctx, api, fr, Cloud{PCName: selfPC}, stub, newTestIndex(t), lg)
 	time.Sleep(700 * time.Millisecond)
 	if got := len(injectedPanes(t, api)); got != before {
 		t.Fatalf("冪等でない（2 周目で注入 pane 数が %d→%d）", before, got)
@@ -106,7 +119,7 @@ func TestReconcileRemoteInjectAndSelfHeal(t *testing.T) {
 
 	// remoteA の 1 本消滅 → その注入 pane だけ close（もう 1 本は維持）。
 	fr.sessions["remoteA"] = []map[string]any{fakeSess("w9:pA", "projA")}
-	reconcileRemote(ctx, api, fr, Cloud{PCName: selfPC}, stub, lg)
+	reconcileRemote(ctx, api, fr, Cloud{PCName: selfPC}, stub, newTestIndex(t), lg)
 	waitCond(t, 15*time.Second, "消滅セッションの注入 pane が close・残りは維持", func() bool {
 		inj := injectedPanes(t, api)
 		return len(inj) == 1 && hasInj(inj, "remoteA", "w9:pA") && !hasInj(inj, "remoteA", "w9:pB")
@@ -114,7 +127,7 @@ func TestReconcileRemoteInjectAndSelfHeal(t *testing.T) {
 
 	// 全消滅 → 注入 pane ゼロ。
 	fr.sessions["remoteA"] = nil
-	reconcileRemote(ctx, api, fr, Cloud{PCName: selfPC}, stub, lg)
+	reconcileRemote(ctx, api, fr, Cloud{PCName: selfPC}, stub, newTestIndex(t), lg)
 	waitCond(t, 15*time.Second, "全リモートセッション消滅で注入 pane ゼロ", func() bool {
 		return len(injectedPanes(t, api)) == 0
 	})
@@ -146,7 +159,7 @@ func TestReconcileDoesNotReapTokenlessInjectWorkspacePanes(t *testing.T) {
 
 	// desired 空で reconcile → token 無し pane は kill してはならない。
 	fr := &fakeRemote{pcs: []string{"remoteA"}, sessions: map[string][]map[string]any{}}
-	reconcileRemote(ctx, api, fr, Cloud{PCName: "self"}, stub, lg)
+	reconcileRemote(ctx, api, fr, Cloud{PCName: "self"}, stub, newTestIndex(t), lg)
 	time.Sleep(700 * time.Millisecond)
 
 	panes, err := api.PaneList()
@@ -174,13 +187,241 @@ func TestReconcileRemoteAbortKeepsPanesOnError(t *testing.T) {
 		pcs:      []string{"remoteA"},
 		sessions: map[string][]map[string]any{"remoteA": {fakeSess("w9:pA", "projA")}},
 	}
-	reconcileRemote(ctx, api, fr, Cloud{PCName: "self"}, stub, lg)
+	reconcileRemote(ctx, api, fr, Cloud{PCName: "self"}, stub, newTestIndex(t), lg)
 	waitCond(t, 15*time.Second, "注入 pane 出現", func() bool { return len(injectedPanes(t, api)) == 1 })
 
 	fr.pcsErr = fmt.Errorf("firestore down")
-	reconcileRemote(ctx, api, fr, Cloud{PCName: "self"}, stub, lg)
+	reconcileRemote(ctx, api, fr, Cloud{PCName: "self"}, stub, newTestIndex(t), lg)
 	time.Sleep(700 * time.Millisecond)
 	if n := len(injectedPanes(t, api)); n != 1 {
 		t.Fatalf("ListPCs エラー周に注入 pane が %d になった（fail-safe 違反＝kill してはならない）", n)
+	}
+}
+
+// TestReconcileMoveTabToOtherWorkspace は「注入 pane を別 workspace へ mv-tab で
+// 動かしても reconcile が冪等」の見張り。判定の権威が workspace label / workspace_id
+// から token+injectindex に移った不変条件を機械確認する。
+// 旧コード（label 権威）は「動かされた pane を cur で認識できず二重作成」で FAIL する。
+func TestReconcileMoveTabToOtherWorkspace(t *testing.T) {
+	sock := startHerdrForTest(t)
+	api := herdrapi.New(sock)
+	lg := log.New(io.Discard, "", 0)
+	stub := reconcileStub(t)
+	ctx := context.Background()
+	idx := newTestIndex(t)
+
+	fr := &fakeRemote{
+		pcs:      []string{"remoteA"},
+		sessions: map[string][]map[string]any{"remoteA": {fakeSess("w9:pM", "projMove")}},
+	}
+	// 1 周目: 注入 pane 出現
+	reconcileRemote(ctx, api, fr, Cloud{PCName: "self"}, stub, idx, lg)
+	waitCond(t, 15*time.Second, "注入 pane 出現", func() bool { return len(injectedPanes(t, api)) == 1 })
+
+	// 注入 pane を別 workspace（label 自由）へ pane.move で動かす。判定が label 依存
+	// なら以降 reconcile は cur で認識できず二重作成に走る（旧コードの実バグ）。
+	inj := injectedPanes(t, api)
+	var movedPane string
+	for pid := range inj {
+		movedPane = pid
+		break
+	}
+	if movedPane == "" {
+		t.Fatal("注入 pane が見つからない")
+	}
+	// 別 workspace を新規作成し（label は任意・↗ prefix 無し）、pane.move new_workspace で移動。
+	created, err := api.WorkspaceCreate()
+	if err != nil {
+		t.Fatalf("workspace.create: %v", err)
+	}
+	res, err := paneMoveNewTab(api, movedPane, created.Workspace.WorkspaceID, "moved")
+	if err != nil {
+		t.Fatalf("pane.move new_tab: %v", err)
+	}
+	// pane.move で pane_id が変わる（実 herdr 挙動）→ index も追随できないと cur から漏れる。
+	// ただし本 reconcile は「pane.list に token あり」なので新 pane_id でも cur に載る。
+	// AdoptToken で index が新 pane_id を取り込む挙動を保証する。
+	newPane := res.Pane.PaneID
+	if newPane == "" {
+		t.Fatal("pane.move 応答に新 pane_id が無い")
+	}
+
+	// 2 周目: 動かされた注入 pane を cur で認識できるか。冪等 = 二重作成しない。
+	reconcileRemote(ctx, api, fr, Cloud{PCName: "self"}, stub, idx, lg)
+	time.Sleep(700 * time.Millisecond)
+	inj2 := injectedPanes(t, api)
+	if len(inj2) != 1 {
+		t.Fatalf("mv-tab 後に注入 pane が %d 個（冪等違反＝二重作成）: %v", len(inj2), inj2)
+	}
+	if !hasInj(inj2, "remoteA", "w9:pM") {
+		t.Fatalf("mv-tab 後に元の (pc,sid) が cur から漏れた: %v", inj2)
+	}
+	// index にも新 pane_id が反映されている（AdoptToken 経路）。
+	if e, ok := idx.Get(newPane); !ok || e.PC != "remoteA" || e.SID != "w9:pM" {
+		t.Fatalf("index に新 pane_id %s が取り込まれていない: entry=%+v ok=%v", newPane, e, ok)
+	}
+}
+
+// TestReconcileTokenAuthorityAcrossRename は workspace を rename しても
+// reconcile が冪等（label 依存が抜けている）ことの機械確認。ユーザーが herdr UI で
+// ↗remote を mac-studio などに rename した場合の rename 耐性。
+func TestReconcileTokenAuthorityAcrossRename(t *testing.T) {
+	sock := startHerdrForTest(t)
+	api := herdrapi.New(sock)
+	lg := log.New(io.Discard, "", 0)
+	stub := reconcileStub(t)
+	ctx := context.Background()
+	idx := newTestIndex(t)
+
+	fr := &fakeRemote{
+		pcs:      []string{"remoteA"},
+		sessions: map[string][]map[string]any{"remoteA": {fakeSess("w9:pR", "projR")}},
+	}
+	reconcileRemote(ctx, api, fr, Cloud{PCName: "self"}, stub, idx, lg)
+	waitCond(t, 15*time.Second, "注入 pane 出現", func() bool { return len(injectedPanes(t, api)) == 1 })
+
+	// 注入 workspace の workspace_id を特定 → rename する。
+	inj := injectedPanes(t, api)
+	var injPaneID string
+	for pid := range inj {
+		injPaneID = pid
+		break
+	}
+	pInfo, err := api.PaneGet(injPaneID)
+	if err != nil {
+		t.Fatalf("pane.get: %v", err)
+	}
+	injWSID := pInfo.WorkspaceID
+	// 別 label へ rename（"mac-studio" などユーザー任意）。
+	if _, err := api.Call("workspace.rename", struct {
+		WorkspaceID string `json:"workspace_id"`
+		Label       string `json:"label"`
+	}{injWSID, "mac-studio"}); err != nil {
+		t.Fatalf("workspace.rename: %v", err)
+	}
+
+	// 2 周目: rename 後も cur に載って冪等（旧 label 依存なら cur=0 で二重作成に走る）。
+	reconcileRemote(ctx, api, fr, Cloud{PCName: "self"}, stub, idx, lg)
+	time.Sleep(700 * time.Millisecond)
+	inj2 := injectedPanes(t, api)
+	if len(inj2) != 1 || !hasInj(inj2, "remoteA", "w9:pR") {
+		t.Fatalf("rename 後に冪等違反（label 依存が残っている）: %v", inj2)
+	}
+}
+
+// TestSelfHealAdoptsTokenPane は起動時 (a) 分岐: pane.list に token 付き pane が
+// 居るが index に無い → AdoptToken で index に取り込む挙動の見張り。
+// attach プロセスの自己再表明で先に token が付いた状態（drover 単独再起動）を再現。
+func TestSelfHealAdoptsTokenPane(t *testing.T) {
+	sock := startHerdrForTest(t)
+	api := herdrapi.New(sock)
+	lg := log.New(io.Discard, "", 0)
+	stub := reconcileStub(t)
+	idx := newTestIndex(t)
+
+	// 注入 pane を「index に載せずに」作る（attach 自己再表明が先に走った状態を模す）。
+	wsID, err := wsmap.ResolveWorkspaceID(api, injWorkspace)
+	if err != nil {
+		t.Fatalf("resolve inject ws: %v", err)
+	}
+	pid, err := applyInjectPane(api, wsID, injTabName("adopted"), []string{stub}, nil)
+	if err != nil {
+		t.Fatalf("applyInjectPane: %v", err)
+	}
+	if err := api.PaneReportMetadata(pid, injSource, herdrapi.ReportMetadata{
+		Tokens: map[string]string{injTokPC: "remoteA", injTokSID: "w9:pAdopt"},
+	}); err != nil {
+		t.Fatalf("token 付与: %v", err)
+	}
+
+	// self-heal 実行 → index に取り込まれる。
+	panes, err := api.PaneList()
+	if err != nil {
+		t.Fatalf("pane.list: %v", err)
+	}
+	_, adopted, _ := selfHealOnStartup(api, idx, panes, lg)
+	if adopted != 1 {
+		t.Fatalf("adopted=%d want 1", adopted)
+	}
+	e, ok := idx.Get(pid)
+	if !ok || e.PC != "remoteA" || e.SID != "w9:pAdopt" || e.Pending {
+		t.Fatalf("index への Adopt が不完全: entry=%+v ok=%v", e, ok)
+	}
+}
+
+// TestSelfHealRestoresLostTokens は起動時 (b) 分岐: pane.list に token 無し pane が
+// 居るが index には entry あり → token 再表明で復元する挙動の見張り。
+// herdr サーバ単独再起動で token が落ちた pane を drover 単独 self-heal で復元する経路。
+func TestSelfHealRestoresLostTokens(t *testing.T) {
+	sock := startHerdrForTest(t)
+	api := herdrapi.New(sock)
+	lg := log.New(io.Discard, "", 0)
+	stub := reconcileStub(t)
+	idx := newTestIndex(t)
+
+	// 注入 pane を作る（token 無し状態＝herdr 再起動で消失した状態を模す）。
+	wsID, err := wsmap.ResolveWorkspaceID(api, injWorkspace)
+	if err != nil {
+		t.Fatalf("resolve inject ws: %v", err)
+	}
+	pid, err := applyInjectPane(api, wsID, injTabName("lost"), []string{stub}, nil)
+	if err != nil {
+		t.Fatalf("applyInjectPane: %v", err)
+	}
+	// index には Live entry を入れる（reconcile が過去に Commit した状態）。
+	if err := idx.Commit(pid, "remoteA", "w9:pLost"); err != nil {
+		t.Fatalf("idx.Commit: %v", err)
+	}
+	// pane 側は token 無し（実 pane.list で確認）。
+	p, err := api.PaneGet(pid)
+	if err != nil {
+		t.Fatalf("pane.get: %v", err)
+	}
+	if p.Tokens[injTokPC] != "" || p.Tokens[injTokSID] != "" {
+		t.Fatalf("前提: pane に token 無しであるべきだが %v が残っている", p.Tokens)
+	}
+
+	// self-heal 実行 → token が復元される。
+	panes, err := api.PaneList()
+	if err != nil {
+		t.Fatalf("pane.list: %v", err)
+	}
+	healed, _, _ := selfHealOnStartup(api, idx, panes, lg)
+	if healed != 1 {
+		t.Fatalf("healed=%d want 1", healed)
+	}
+	p2, err := api.PaneGet(pid)
+	if err != nil {
+		t.Fatalf("pane.get(after heal): %v", err)
+	}
+	if p2.Tokens[injTokPC] != "remoteA" || p2.Tokens[injTokSID] != "w9:pLost" {
+		t.Fatalf("self-heal で token が復元されていない: %v", p2.Tokens)
+	}
+}
+
+// TestSelfHealDropsStaleIndexEntry は起動時 (c) 分岐: index に entry あるが pane.list
+// に該当 pane_id 無し → Forget（stale 掃除）の見張り。drover 停止中に close された
+// 注入 pane の残骸削除。
+func TestSelfHealDropsStaleIndexEntry(t *testing.T) {
+	sock := startHerdrForTest(t)
+	api := herdrapi.New(sock)
+	lg := log.New(io.Discard, "", 0)
+	idx := newTestIndex(t)
+
+	// index に stale entry を仕込む（実 pane は存在しない）。
+	if err := idx.Commit("w99:pGhost", "ghostPC", "w1:pGhost"); err != nil {
+		t.Fatalf("idx.Commit: %v", err)
+	}
+
+	panes, err := api.PaneList()
+	if err != nil {
+		t.Fatalf("pane.list: %v", err)
+	}
+	_, _, dropped := selfHealOnStartup(api, idx, panes, lg)
+	if dropped != 1 {
+		t.Fatalf("dropped=%d want 1", dropped)
+	}
+	if _, ok := idx.Get("w99:pGhost"); ok {
+		t.Fatalf("stale entry が index に残っている")
 	}
 }

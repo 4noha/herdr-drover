@@ -103,16 +103,28 @@ func cmdAgent(stdout, stderr io.Writer) error {
 		lg.Println(w)
 	}
 
-	// inject-index を Open（Phase 1: 存在するだけで producer/reconcile はまだ
-	// 参照しない＝挙動不変）。壊れは loud エラーで agent 起動失敗＝launchd 再起動
-	// ＋人間目視。ファイル不在は空 Index で正常継続（初回起動 / rm 後の正規経路）。
-	// Phase 2/3 で reconcile CREATE/CLOSE と producer 除外判定の権威になる。
+	// inject-index を Open + 起動時 self-heal。判定の権威は token+index（v0.5.x〜）。
+	// 壊れは loud エラーで agent 起動失敗＝launchd 再起動＋人間目視。ファイル不在は
+	// 空 Index で正常継続（初回起動 / rm 後の正規経路）。
+	//
+	// self-heal 3 分岐（reconcile.go selfHealOnStartup）:
+	//   (a) pane.list に token あり／index に無し → index に取り込む（AdoptToken）
+	//   (b) pane.list に token 無し／index に entry あり → pane に token 再表明
+	//       （herdr 単独再起動で token が落ちた pane を drover 単独で復元）
+	//   (c) index に entry あり／pane.list に無し → index から Forget（stale 掃除）
+	// self-heal は producer/reconcile 起動前に完走させる（起動直後の tick で index が
+	// 未復元のまま cross-PC push する穴を塞ぐ）。pane.list 失敗は self-heal skip し
+	// producer/reconcile へ進む（次周の cur 救済が拾う）。
 	idx, err := openInjectIndex(cfg)
 	if err != nil {
 		return fmt.Errorf("inject-index 読取失敗: %w", err)
 	}
-	_ = idx // Phase 1: 保持のみ・使用は Phase 2/3
 	lg.Printf("inject-index ok: %d entries", len(idx.Snapshot()))
+	if panes, perr := hcli.PaneList(); perr == nil {
+		selfHealOnStartup(hcli, idx, panes, lg)
+	} else {
+		lg.Printf("inject-index self-heal skip（pane.list 失敗・次周の cur 救済に委ねる）: %v", perr)
+	}
 
 	// graceful 終了（SIGTERM/SIGINT）と nudge（SIGUSR1）は別チャネル: 前者は
 	// ctx cancel、後者は producer ループの即時 re-scan トリガ。
@@ -146,7 +158,7 @@ func cmdAgent(stdout, stderr io.Writer) error {
 	// 単一クラウド（env or clouds.json 1 件）: 従来どおり inline＝fail-fast
 	// （初期化エラーを return して露出・launchd が再起動）＝挙動完全不変。
 	if len(clouds) == 1 {
-		return runOneCloud(ctx, cfg, clouds[0], true, hcli, nudge, "", lg)
+		return runOneCloud(ctx, cfg, clouds[0], true, hcli, idx, nudge, "", lg)
 	}
 
 	// 複数クラウド: クラウドごと goroutine。1 クラウドの初期化失敗は log して
@@ -178,7 +190,7 @@ func cmdAgent(stdout, stderr io.Writer) error {
 		tag := fmt.Sprintf("[%s] ", cl.Project)
 		go func(cl Cloud, primary bool, nd <-chan os.Signal, tag string) {
 			defer wg.Done()
-			if err := runOneCloud(ctx, cfg, cl, primary, hcli, nd, tag, lg); err != nil && ctx.Err() == nil {
+			if err := runOneCloud(ctx, cfg, cl, primary, hcli, idx, nd, tag, lg); err != nil && ctx.Err() == nil {
 				lg.Printf("%sクラウド接続終了（他クラウドは継続）: %v", tag, err)
 			}
 		}(cl, i == 0, subNudges[i], tag)
@@ -194,7 +206,7 @@ func cmdAgent(stdout, stderr io.Writer) error {
 // 注入（Phase 3・DESIGN）を primary 限定にするための予約フラグ（現状 push/
 // relay/command は全クラウドで動く＝primary は未使用）。ctx 終了で graceful
 // 戻り。err 返却＝初期化失敗（呼び手が単一なら fail-fast、複数なら log 継続）。
-func runOneCloud(ctx context.Context, cfg Config, cl Cloud, primary bool, hcli *herdrapi.Client, nudge <-chan os.Signal, tag string, lg *log.Logger) error {
+func runOneCloud(ctx context.Context, cfg Config, cl Cloud, primary bool, hcli *herdrapi.Client, idx *injectindex.Index, nudge <-chan os.Signal, tag string, lg *log.Logger) error {
 	// 資格情報はクラウド個別に注入する（GOOGLE_APPLICATION_CREDENTIALS は
 	// process global で 1 つ＝複数クラウド併存には option.WithCredentialsFile
 	// が必須＝これが fan-out の肝）。エミュレータ時は資格情報を渡さない
@@ -260,7 +272,7 @@ func runOneCloud(ctx context.Context, cfg Config, cl Cloud, primary bool, hcli *
 	// へ漏れる直接原因＝この goroutine を起こさないことで構造的に断つ）。master
 	// は従来どおり primary クラウドのみ注入（scConcrete は master で非 nil）。
 	if cfg.Role != "slave" && primary && cl.RelayURL != "" {
-		go runRemoteInject(ctx, hcli, scConcrete, cl, lg)
+		go runRemoteInject(ctx, hcli, scConcrete, cl, idx, lg)
 		lg.Printf("%sリモート pane 注入 起動（他 PC のセッションを↗注入・primary）", tag)
 	}
 
