@@ -565,17 +565,12 @@ func (r *recordingState) OwnSessionKeys(ctx context.Context) ([]string, error) {
 type fakeHerdr struct {
 	panes    []herdrapi.PaneInfo
 	agents   []herdrapi.AgentInfo
-	wss      []herdrapi.WorkspaceInfo
 	paneErr  error
 	agentErr error
-	wsErr    error
 }
 
 func (f *fakeHerdr) PaneList() ([]herdrapi.PaneInfo, error)   { return f.panes, f.paneErr }
 func (f *fakeHerdr) AgentList() ([]herdrapi.AgentInfo, error) { return f.agents, f.agentErr }
-func (f *fakeHerdr) WorkspaceList() ([]herdrapi.WorkspaceInfo, error) {
-	return f.wss, f.wsErr
-}
 
 // TestTickScanErrorMakesNoStateCalls: 存在しない socket への**実 dial 失敗**
 // で、state 側が 1 回も呼ばれないことを呼出記録で確認（seed すら呼ばない
@@ -687,41 +682,69 @@ func TestBuildSessions(t *testing.T) {
 // → PC-B の reconcile が ListSessions で拾い B にも注入 pane を作る
 // → その pane を B の producer が push → A が拾って再注入 … と発散する。
 //
-// ⚠判定の権威は **注入専用 workspace 所属**（生成時原子・再起動保持）。token だけに
-// 頼ると 2 つの穴が開く（再レビューで実 herdr 0.7.4 検証済み）:
-//   - create↔token 付与の race 窓に producer が scan すると token 無しで push
-//   - herdr サーバ再起動で report_metadata token が消え、復元 pane を恒久 push
-// どちらも「token 無しだが注入 ws に居る」pane。BuildSessions は workspace 所属で
-// これらも落とすこと。
+// v0.5.x で判定の権威は **token + injectindex**（workspace 所属は完全に判定パス
+// から外した）。token の 2 穴は index が塞ぐ:
+//   - create↔token 付与の race 窓 → reconcile が pane 生成直後に idx.Reserve で
+//     Pending 予約するので producer は isInjected 経由で除外できる
+//   - herdr 再起動で token 消失 → agent 起動時 self-heal で token 再表明＋
+//     index にも Live entry が残るので isInjected で除外できる
+// どちらの場面でも「token 無しの注入 pane」は index に居るので push されない。
 func TestBuildSessionsExcludesInjectedPanes(t *testing.T) {
-	const injWS = "w9" // 注入専用 workspace の id（呼び手が WorkspaceList から解決する）
-	injWsIDs := map[string]bool{injWS: true}
+	// 注入 pane 判定関数（injectindex.Index.IsInjected の fake）。
+	// pane_id が index に載っていることを模して true を返す。
+	injectedByIndex := map[string]bool{
+		"w9:p2": true, // token 無しだが index に居る＝race 窓 or 再起動後の状態
+	}
+	isInjected := func(pid string) bool { return injectedByIndex[pid] }
+
 	panes := []herdrapi.PaneInfo{
 		{PaneID: "w1:p1", WorkspaceID: "w1", Cwd: "/Users/x/works/real", AgentStatus: "working"}, // 自 PC の本物
-		{ // token 付きの注入 pane（定常状態）
+		{ // token 付きの注入 pane（定常状態）— どの workspace に居ても除外される
 			PaneID:      "w9:p1",
-			WorkspaceID: injWS,
+			WorkspaceID: "mac-studio", // ユーザーが rename した WS でも判定は不変
 			AgentStatus: "working",
 			Tokens:      map[string]string{herdrapi.InjTokenPC: "other-pc", herdrapi.InjTokenSID: "w3:p2"},
 		},
-		{ // ★token 無しだが注入 ws に居る＝race 窓 / 再起動 token 消失の pane。
+		{ // ★token 無しだが index に居る＝race 窓 / 再起動 token 消失の pane。
 			PaneID:      "w9:p2",
-			WorkspaceID: injWS,
+			WorkspaceID: "any-ws", // 判定は workspace 非依存＝任意の label で通る
 			AgentStatus: "working",
-			// Tokens 無し（付与前 or 再起動で消失）。token 判定だけならここで漏れる。
+			// Tokens 無し（reconcile Reserve〜Commit の窓 or herdr 再起動後）。
+		},
+		{ // token 無し／index にも無い pane＝ユーザーの普通の作業 pane。push される。
+			PaneID:      "w1:p3",
+			WorkspaceID: "any-ws",
+			AgentStatus: "idle",
 		},
 	}
-	ss := BuildSessions(panes, nil, injWsIDs)
-	if len(ss) != 1 {
-		t.Fatalf("注入 pane（token 付き＋token 無し両方）を除いて 1 session のはず（cross-PC 増殖防止）: %v", ss)
+	ss := BuildSessions(panes, nil, isInjected)
+	if len(ss) != 2 {
+		t.Fatalf("除外後 2 session のはず（自 PC の本物 2 つ・注入 pane 2 種を除外）: got=%d %v", len(ss), ss)
 	}
-	if ss[0]["key"] != "w1:p1" {
-		t.Fatalf("残るのは自 PC の本物 pane のみ: %v", ss[0])
-	}
+	keys := map[string]bool{}
 	for _, s := range ss {
-		if k := s["key"]; k == "w9:p1" || k == "w9:p2" {
-			t.Fatalf("注入 pane が push 対象に混入した＝cross-PC 無限増殖の穴: %v", s)
-		}
+		keys[s["key"].(string)] = true
+	}
+	if !keys["w1:p1"] || !keys["w1:p3"] {
+		t.Fatalf("自 PC の本物 pane が漏れた: %v", keys)
+	}
+	if keys["w9:p1"] || keys["w9:p2"] {
+		t.Fatalf("注入 pane が push 対象に混入した＝cross-PC 無限増殖の穴: %v", keys)
+	}
+}
+
+// TestBuildSessionsWithoutIsInjectedFalltoTokenOnly は isInjected=nil の
+// フォールバック挙動を確認する。この場合 token 判定のみになり、token 無しの
+// 注入 pane（race 窓 / 再起動直後）は push されうる。過渡期・テスト用途の保険。
+func TestBuildSessionsWithoutIsInjectedFalltoTokenOnly(t *testing.T) {
+	panes := []herdrapi.PaneInfo{
+		{PaneID: "w1:p1", AgentStatus: "working"},
+		{PaneID: "w9:p1", AgentStatus: "working",
+			Tokens: map[string]string{herdrapi.InjTokenPC: "other-pc", herdrapi.InjTokenSID: "w3:p2"}},
+	}
+	ss := BuildSessions(panes, nil, nil) // isInjected=nil
+	if len(ss) != 1 || ss[0]["key"] != "w1:p1" {
+		t.Fatalf("nil isInjected でも token 判定は生きるべき: %v", ss)
 	}
 }
 

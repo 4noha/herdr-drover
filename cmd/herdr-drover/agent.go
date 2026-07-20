@@ -305,7 +305,9 @@ func runOneCloud(ctx context.Context, cfg Config, cl Cloud, primary bool, hcli *
 	// seed）。scan エラー時は Push/Delete せず error を返す＝呼び手（runAgentLoop）
 	// がその tick を skip＝前回状態維持（cm の空 STATUS flap 事故の教訓）。
 	// 各クラウドが自分の producer を持つ＝同じ herdr セッションを各クラウドへ push。
-	prod := session.NewProducer(hcli, st)
+	// 注入 pane 判定は injectindex を権威にする（v0.5.x〜）。idx.IsInjected は
+	// Pending / Live のどちらでも true を返し、token の race 窓と再起動消失を塞ぐ。
+	prod := session.NewProducer(hcli, st).WithIsInjected(idx.IsInjected)
 
 	// tick 冒頭の失効検査（tick 毎 1 read で near-$0 規律内）: 失効中は scan/
 	// push/delete を一切せず doc を再作成しない。owner の ClearRevoked（再

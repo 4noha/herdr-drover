@@ -49,13 +49,11 @@ type StateClient interface {
 }
 
 // HerdrClient は producer が使う herdr 側の契約（*herdrapi.Client が満たす）。
+// v0.5.x で WorkspaceList を削除（判定の権威が workspace label / workspace_id
+// から token + injectindex へ移った＝cmd/herdr-drover/reconcile.go 参照）。
 type HerdrClient interface {
 	PaneList() ([]herdrapi.PaneInfo, error)
 	AgentList() ([]herdrapi.AgentInfo, error)
-	// WorkspaceList は注入専用 workspace（InjWorkspaceLabel）の pane を同期対象
-	// から外すため workspace_id→label を解決するのに使う（token に依らない注入判定
-	// ＝create race・再起動 token 消失に強い）。
-	WorkspaceList() ([]herdrapi.WorkspaceInfo, error)
 }
 
 // Producer は herdr pane/agent → session map → state push/delete の 1 PC
@@ -65,6 +63,13 @@ type HerdrClient interface {
 type Producer struct {
 	Herdr HerdrClient
 	State StateClient
+
+	// isInjected は「注入 pane 判定」の権威関数（v0.5.x〜）。injectindex から
+	// 注入した関数を呼び、pane_id が Pending / Live どちらでも true を返す。
+	// nil の場合は全 pane を非注入扱い（テスト・過渡期のフォールバック）。
+	// producer は token 判定と OR で除外する（token の 2 穴：create race / herdr
+	// 再起動での token 消失、を injectindex が塞ぐ）。
+	isInjected func(paneID string) bool
 
 	// prev は前 tick の生存キー集合。今 tick に居ないキーを
 	// DeleteSession で消す（in-memory 差分＝追加 Firestore 読み無し）。
@@ -78,8 +83,17 @@ type Producer struct {
 // NewProducer は Producer を作る（cmd/herdr-drover/agent.go が期待する
 // 契約名。引数はインターフェースなので *herdrapi.Client / *state.Client を
 // そのまま渡せる＝テストでは fake も注入できる）。
+// 注入 pane 判定は WithIsInjected で後付け注入する（cmd 側で injectindex.Index
+// を持ち回す＝session パッケージから直接依存させないため）。
 func NewProducer(h HerdrClient, st StateClient) *Producer {
 	return &Producer{Herdr: h, State: st}
+}
+
+// WithIsInjected は注入 pane 判定関数を注入する（返り値は self＝method chain 可）。
+// idx.IsInjected をそのまま渡す想定。テストでは任意の func を渡せる。
+func (p *Producer) WithIsInjected(fn func(paneID string) bool) *Producer {
+	p.isInjected = fn
+	return p
 }
 
 // ShortDir は cwd 末尾のディレクトリ名（cm scanner.ShortDir と同一規則）。
@@ -125,9 +139,11 @@ func isActive(agentStatus string) bool {
 // （contentHash はこの 3 キーを除外して計算する＝state.go で確認）なので
 // producer は載せない。pid は herdr pane に存在しないため載せない
 // （偽値の捏造はしない）。
-// injWsIDs は注入専用 workspace の workspace_id 集合（BuildSessions が注入 pane を
-// 同期対象から外すのに使う）。呼び手が WorkspaceList から InjWorkspaceLabel で解決する。
-func BuildSessions(panes []herdrapi.PaneInfo, agents []herdrapi.AgentInfo, injWsIDs map[string]bool) []map[string]any {
+// isInjected は「この pane_id は注入 pane か」を返す関数（injectindex の権威）。
+// nil 可（テスト・過渡期のフォールバック）。producer は token OR isInjected で
+// 除外する（token 権威化の 2 穴 (a) create race / (b) herdr 再起動での token
+// 消失、を index の Pending 予約と起動時 self-heal で塞ぐ）。
+func BuildSessions(panes []herdrapi.PaneInfo, agents []herdrapi.AgentInfo, isInjected func(paneID string) bool) []map[string]any {
 	// pane_id → agent の対応（agent の name/status を優先採用するため）。
 	agentByPane := make(map[string]herdrapi.AgentInfo, len(agents))
 	for _, a := range agents {
@@ -143,9 +159,14 @@ func BuildSessions(panes []herdrapi.PaneInfo, agents []herdrapi.AgentInfo, injWs
 		// viewer であって自 PC のセッションではない。Firestore へ push すると peer PC が
 		// ListSessions で拾って再注入し、その注入 pane を自分の producer がまた push…と
 		// cross-PC で無限増殖する（DESIGN の不変条件・敵対的レビューで確認済みの
-		// critical 経路）。**判定の権威は注入専用 workspace 所属**（生成時原子・再起動
-		// 保持）＝token race や再起動 token 消失に強い。token は belt-and-suspenders で併用。
-		if injWsIDs[p.WorkspaceID] || p.Tokens[herdrapi.InjTokenPC] != "" {
+		// critical 経路）。**判定の権威は token + injectindex**（v0.5.x〜。旧 workspace
+		// 所属判定は完全廃止＝ユーザーの mv-tab / workspace rename に耐性）。
+		// token race 窓は index の Pending 予約が、herdr 再起動での token 消失は起動時
+		// self-heal（reconcile.go selfHealOnStartup）が塞ぐ。
+		if p.Tokens[herdrapi.InjTokenPC] != "" {
+			continue
+		}
+		if isInjected != nil && isInjected(p.PaneID) {
 			continue
 		}
 		status := p.AgentStatus
@@ -202,19 +223,10 @@ func (p *Producer) Tick(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("session: agent.list 失敗（tick skip・前回状態維持）: %w", err)
 	}
-	// 注入専用 workspace の id 集合を解決（注入 pane を push 対象から外す権威）。
-	// これも scan の一部＝失敗は skip（前回状態維持）。resolve を怠って空集合で
-	// 進むと注入 pane を push し得る＝cross-PC 増殖の穴なので、握り潰さず skip する。
-	wss, err := p.Herdr.WorkspaceList()
-	if err != nil {
-		return fmt.Errorf("session: workspace.list 失敗（tick skip・前回状態維持）: %w", err)
-	}
-	injWsIDs := make(map[string]bool)
-	for _, w := range wss {
-		if w.Label == herdrapi.InjWorkspaceLabel {
-			injWsIDs[w.WorkspaceID] = true
-		}
-	}
+	// v0.5.x で workspace.list scan を撤去（判定の権威は token + injectindex に
+	// 移った）。producer は Herdr.WorkspaceList を呼ばない＝1 tick の I/O が 1 本
+	// 減る（実測ベンチには乗らないが、workspace.list 失敗による tick skip も無くなる）。
+	// 注入 pane 判定は p.isInjected + token OR で BuildSessions が行う。
 
 	if !p.seeded {
 		keys, serr := p.State.OwnSessionKeys(ctx)
@@ -228,7 +240,7 @@ func (p *Producer) Tick(ctx context.Context) error {
 		p.seeded = true
 	}
 
-	ss := BuildSessions(panes, agents, injWsIDs)
+	ss := BuildSessions(panes, agents, p.isInjected)
 	cur := make(map[string]bool, len(ss))
 	for _, s := range ss {
 		cur[s["key"].(string)] = true
