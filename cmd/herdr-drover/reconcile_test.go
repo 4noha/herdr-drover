@@ -211,6 +211,37 @@ func TestReconcileMirrorsRemoteAgentStatus(t *testing.T) {
 	step("unknown", "unknown")
 }
 
+// TestReconcileAgentMirrorDisabled は opt-in ゲートの見張り: reported map を渡さない
+// （＝DROVER_MIRROR_AGENTS off・runRemoteInject が map を作らない相当）と、リモートが
+// working を報告していても注入 pane の agent_status は転記されず unknown のまま。
+func TestReconcileAgentMirrorDisabled(t *testing.T) {
+	sock := startHerdrForTest(t)
+	api := herdrapi.New(sock)
+	lg := log.New(io.Discard, "", 0)
+	stub := reconcileStub(t)
+	ctx := context.Background()
+	idx := newTestIndex(t)
+
+	fr := &fakeRemote{
+		pcs: []string{"self-herdr", "remoteA"},
+		sessions: map[string][]map[string]any{
+			"remoteA": {fakeSessAgent("w9:pA", "projA", "claude", "working")},
+		},
+	}
+	// mirror 無効: 可変長引数の reported map を渡さない。
+	reconcileRemote(ctx, api, fr, Cloud{PCName: "self-herdr"}, stub, idx, lg)
+	waitCond(t, 15*time.Second, "注入 pane が出現", func() bool {
+		_, ok := injPaneStatus(t, api, "remoteA", "w9:pA")
+		return ok
+	})
+	// もう 1 周（既存 pane 経路）走らせ、転記が起きる猶予を与えても unknown のまま。
+	reconcileRemote(ctx, api, fr, Cloud{PCName: "self-herdr"}, stub, idx, lg)
+	time.Sleep(800 * time.Millisecond)
+	if s, ok := injPaneStatus(t, api, "remoteA", "w9:pA"); !ok || s != "unknown" {
+		t.Fatalf("mirror 無効なのに agent_status が転記された: %q ok=%v（unknown を期待）", s, ok)
+	}
+}
+
 // TestReconcileDoesNotReapTokenlessInjectWorkspacePanes は「注入 workspace 内の
 // token 無し pane を reconcile が掃除してはならない」不変条件の見張り。注入 workspace
 // には WorkspaceCreate 由来の**構造 root pane（token 無し）**が常駐する（実 herdr 0.7.4

@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -29,6 +30,9 @@ type Config struct {
 	Tick        time.Duration // DROVER_TICK（既定 5s）
 	Idle        time.Duration // DROVER_IDLE（Web ターミナル quiescence 自切断。0=bridge 既定 30s）
 	Role        string        // HERDR_ROLE（"slave"=共用 PC・SA レス relay 経由。既定 ""=master）
+	// MirrorAgents は DROVER_MIRROR_AGENTS（リモート session の agent_status を注入
+	// pane(↗窓) に転記して herdr に agent 検出させるか）。既定 false=opt-in。
+	MirrorAgents bool
 }
 
 // resolveConfig は Config を解決する。優先順位はキー単位で
@@ -53,6 +57,7 @@ func resolveConfig() (Config, error) {
 	// エラーとして返すが解決は続行する（沈黙で無視すると enroll 済のはずが
 	// 未設定で動く事故になる。契約: 判明分は埋めて返す）。
 	var fileErr error
+	var fcMirror *bool // mirror_agents の file 値（env 未設定なら採用）
 	if path, perr := configFilePath(); perr == nil {
 		fc, ferr := readFileConfig(path)
 		if ferr != nil {
@@ -73,6 +78,7 @@ func resolveConfig() (Config, error) {
 		if cfg.Role == "" {
 			cfg.Role = fc.Role
 		}
+		fcMirror = fc.MirrorAgents
 	}
 	if cfg.PCID == "" {
 		host, err := os.Hostname()
@@ -106,6 +112,21 @@ func resolveConfig() (Config, error) {
 		}
 		cfg.Idle = d
 	}
+	// DROVER_MIRROR_AGENTS: リモート session の agent_status/window_name を注入
+	// pane(↗窓) に pane.report_agent で転記し、herdr に agent として検出させるか
+	// （tab/workspace の agent_status・herdr の agent list/wait/focus が ↗窓 に効く）。
+	// 既定 false=opt-in（既存挙動を変えない・他 PC のセッションを herdr の agent 一覧に
+	// 出さない）。優先順位 env > file(mirror_agents) > 既定。
+	if fcMirror != nil {
+		cfg.MirrorAgents = *fcMirror
+	}
+	if v := os.Getenv("DROVER_MIRROR_AGENTS"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return cfg, fmt.Errorf("DROVER_MIRROR_AGENTS が不正（true/false/1/0 等）: %q: %w", v, err)
+		}
+		cfg.MirrorAgents = b
+	}
 	return cfg, fileErr
 }
 
@@ -126,6 +147,8 @@ type fileConfig struct {
 	GoogleApplicationCredentials string `json:"google_application_credentials,omitempty"`
 	PCID                         string `json:"pc_id,omitempty"`
 	Role                         string `json:"role,omitempty"` // "slave"=共用 PC モード（enroll --slave が書く）
+	// MirrorAgents はポインタ（未設定=nil で env>file>既定の合成に乗せる）。
+	MirrorAgents *bool `json:"mirror_agents,omitempty"`
 }
 
 // readFileConfig は設定ファイルを読む。不在はゼロ値＋nil（enroll 前の

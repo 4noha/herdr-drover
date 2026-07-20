@@ -95,10 +95,16 @@ func injAPIState(status string) (string, bool) {
 // mirrorInjectedAgent は present な注入 pane paneID に、リモート session の
 // agent_status(status)/window_name(name) を herdr の pane.report_agent で転記し、
 // ↗窓 を herdr に「agent」として検出させる（tab/workspace の agent_status・
-// agent.list・agent wait が効くようになる）。reported は paneID→最後に report した
-// agent label で、リモート agent 終了（status→unknown）時に正しい label で
-// release_agent し stale 表示を消すための最小 state（nil 可＝release 追跡なし）。
+// agent.list・agent wait が効くようになる）。
+//
+// reported は paneID→最後に report した agent label で、リモート agent 終了
+// （status→unknown）時に正しい label で release_agent し stale 表示を消すための
+// state。**reported == nil は「mirror 無効」を意味し即 return する**
+// （DROVER_MIRROR_AGENTS 未設定＝runRemoteInject が map を渡さない・既存挙動維持）。
 func mirrorInjectedAgent(api *herdrapi.Client, paneID, name, status string, reported map[string]string, lg *log.Logger) {
+	if reported == nil {
+		return // mirror 無効（opt-in・DROVER_MIRROR_AGENTS 未設定）
+	}
 	if apiState, ok := injAPIState(status); ok {
 		if name == "" {
 			name = "agent" // report_agent は agent label 必須（空はデフォルト名）
@@ -107,16 +113,11 @@ func mirrorInjectedAgent(api *herdrapi.Client, paneID, name, status string, repo
 			lg.Printf("[reconcile] report_agent 失敗 %s (%s=%s→%s): %v", paneID, name, status, apiState, err)
 			return
 		}
-		if reported != nil {
-			reported[paneID] = name
-		}
+		reported[paneID] = name
 		return
 	}
 	// unknown/空 → リモートに生きた agent 無し。以前 report していれば同じ label で
-	// release して stale 表示を消す（reported 無し＝追跡なしなら何もしない）。
-	if reported == nil {
-		return
-	}
+	// release して stale 表示を消す。
 	prev, ok := reported[paneID]
 	if !ok {
 		return
@@ -423,7 +424,7 @@ func reconcileRemote(ctx context.Context, api *herdrapi.Client, st remoteSource,
 // 戻る。**primary クラウドのみ**が呼ぶ（複数クラウドが同一 herdr へ同 pane を注入する
 // 二重窓・競合を構造的に防ぐ＝runOneCloud の primary 分岐から起動）。
 func runRemoteInject(ctx context.Context, api *herdrapi.Client, st *state.Client,
-	cl Cloud, idx *injectindex.Index, lg *log.Logger) {
+	cl Cloud, idx *injectindex.Index, lg *log.Logger, mirrorAgents bool) {
 
 	selfExe, err := os.Executable()
 	if err != nil {
@@ -456,8 +457,13 @@ func runRemoteInject(ctx context.Context, api *herdrapi.Client, st *state.Client
 	}()
 
 	// reported は注入 pane の agent 転記（pane.report_agent）の release 追跡用に
-	// reconcile 間で持ち回る（paneID→最後に report した agent label）。
-	reported := map[string]string{}
+	// reconcile 間で持ち回る（paneID→最後に report した agent label）。mirrorAgents が
+	// false（既定・opt-in）なら nil のまま渡す＝reconcile は転記を一切しない。
+	var reported map[string]string
+	if mirrorAgents {
+		reported = map[string]string{}
+		lg.Printf("[reconcile] agent 転記 有効（DROVER_MIRROR_AGENTS=on・↗窓 を herdr に agent 検出させる）")
+	}
 	for {
 		select {
 		case <-ctx.Done():
