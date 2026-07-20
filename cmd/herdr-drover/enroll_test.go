@@ -259,6 +259,56 @@ func TestEnrollPreservesLearnMovesKey(t *testing.T) {
 	}
 }
 
+// 新規 enroll（config.json 不在 or learn_moves キー不在）で learn_moves=true が
+// seed されること。デフォルト live 学習 on を新規セットアップに自動適用する
+// 設計の裏付け（seedLearnMovesDefault の期待挙動）。
+func TestEnrollSeedsLearnMovesDefaultTrue(t *testing.T) {
+	clearDroverEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	// dir 作らず・config.json も置かない＝ enroll が初期作成する状態から始める。
+	wsURL := fakeEnrollServer(t, "SEED0001", "seed-proj", "wss://r.example", "")
+	if code, out, errb := runCapture(t, "enroll", "SEED0001", "--relay", wsURL); code != 0 {
+		t.Fatalf("enroll exit=%d\nstdout:%s\nstderr:%s", code, out, errb)
+	}
+	on, err := readLearnMoves()
+	if err != nil {
+		t.Fatalf("readLearnMoves: %v", err)
+	}
+	if !on {
+		b, _ := os.ReadFile(filepath.Join(home, ".herdr-drover", "config.json"))
+		t.Fatalf("新規 enroll で learn_moves=true が seed されるべき: config.json=%s", b)
+	}
+}
+
+// ユーザーが明示 false にした learn_moves は enroll で上書きされないこと
+// （seedLearnMovesDefault の「既存尊重」規律）。opt-out した意思を保存する。
+func TestEnrollDoesNotOverrideLearnMovesFalse(t *testing.T) {
+	clearDroverEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".herdr-drover")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "config.json"),
+		[]byte(`{"learn_moves":false}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	wsURL := fakeEnrollServer(t, "OPTOUT01", "op-proj", "wss://r.example", "")
+	if code, out, errb := runCapture(t, "enroll", "OPTOUT01", "--relay", wsURL); code != 0 {
+		t.Fatalf("enroll exit=%d\nstdout:%s\nstderr:%s", code, out, errb)
+	}
+	on, err := readLearnMoves()
+	if err != nil {
+		t.Fatalf("readLearnMoves: %v", err)
+	}
+	if on {
+		b, _ := os.ReadFile(filepath.Join(dir, "config.json"))
+		t.Fatalf("明示 false が enroll で上書きされた（seedLearnMovesDefault の既存尊重違反）: config.json=%s", b)
+	}
+}
+
 func TestEnrollUsageErrors(t *testing.T) {
 	clearDroverEnv(t)
 	// code 無し / --relay 無しは exit 2（usage）。ネットへ出ない。

@@ -192,6 +192,10 @@ func cmdEnroll(args []string, stdout io.Writer) error {
 			}
 			raw[k] = j
 		}
+		// learn_moves は初期状態で true をデフォルトに（新規セットアップは即 live 学習）。
+		// 既存キーは尊重＝ユーザーが明示 false にした設定を上書きしない（enroll は 3
+		// キーのみ置換の規律に沿う）。
+		seedLearnMovesDefault(raw)
 		if err := writeRawFileConfig(cfgPath, raw); err != nil {
 			return fmt.Errorf("設定書込失敗: %w", err)
 		}
@@ -279,6 +283,9 @@ func cmdEnrollSlave(gcpProject, relayURL, slaveSecret, dir string, cfg Config, s
 		return err
 	}
 	delete(raw, "google_application_credentials") // SA レス（空値=削除規則と同義）
+	// learn_moves は初期状態で true をデフォルトに（master と同一規律）。既存キーは
+	// 尊重（明示 false を上書きしない）。
+	seedLearnMovesDefault(raw)
 	if err := writeRawFileConfig(cfgPath, raw); err != nil {
 		return fmt.Errorf("設定書込失敗: %w", err)
 	}
@@ -312,4 +319,14 @@ func cmdEnrollSlave(gcpProject, relayURL, slaveSecret, dir string, cfg Config, s
 	fmt.Fprintln(stdout, "  注意: この共用 PC はオーナーの他 PC のセッションを見られません（自分の herdr セッションだけを共有＝私物漏れ防止）。")
 	fmt.Fprintln(stdout, "次: `herdr-drover install` で launchd 常駐を登録（label "+launchdLabel+"）。手動起動は `herdr-drover agent`。")
 	return nil
+}
+
+// seedLearnMovesDefault は config.json の生 JSON map に learn_moves=true を
+// **キーが不在のときのみ** 書き込む（明示的に false を書いたユーザーの意思を
+// 尊重）。新規 enroll の既定を true にしつつ、opt-out した設定は保持する。
+func seedLearnMovesDefault(raw map[string]json.RawMessage) {
+	if _, ok := raw["learn_moves"]; ok {
+		return // 既存尊重（true/false どちらでも触らない）
+	}
+	raw["learn_moves"] = json.RawMessage("true")
 }
