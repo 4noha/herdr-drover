@@ -65,12 +65,13 @@ import (
 // ローカルに持つ（types.go は本タスクの変更範囲外）。フィールド名は実採取
 // JSON と一致（実測: {"pane_id":"w1:p2",...,"agent":"claude",...}）。
 type orgPane struct {
-	PaneID      string `json:"pane_id"`
-	TerminalID  string `json:"terminal_id"`
-	WorkspaceID string `json:"workspace_id"`
-	TabID       string `json:"tab_id"`
-	Cwd         string `json:"cwd"`
-	Agent       string `json:"agent"` // 検出種別（"claude" 等。null は ""）
+	PaneID      string            `json:"pane_id"`
+	TerminalID  string            `json:"terminal_id"`
+	WorkspaceID string            `json:"workspace_id"`
+	TabID       string            `json:"tab_id"`
+	Cwd         string            `json:"cwd"`
+	Agent       string            `json:"agent"`  // 検出種別（"claude" 等。null は ""）
+	Tokens      map[string]string `json:"tokens"` // report_metadata token（inject 判定用・v0.5.5〜）
 }
 
 func listPanesWithAgent(api *herdrapi.Client) ([]orgPane, error) {
@@ -449,12 +450,12 @@ func cmdOrganize(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if *capture {
-		return runCaptureMode(m, panes, agents, wss, *dry, stdout)
-	}
 	tabs, err := listTabs(api)
 	if err != nil {
 		return err
+	}
+	if *capture {
+		return runCaptureMode(m, panes, agents, tabs, wss, *dry, stdout)
 	}
 	return runOrganize(api, m, panes, agents, tabs, wss, *dry, stdout)
 }
@@ -676,7 +677,7 @@ func expandRulePath(p, home string) string {
 	return filepath.Clean(p)
 }
 
-func runCaptureMode(m *wsmap.Map, panes []orgPane, agents []herdrapi.AgentInfo, wss []herdrapi.WorkspaceInfo, dry bool, stdout io.Writer) error {
+func runCaptureMode(m *wsmap.Map, panes []orgPane, agents []herdrapi.AgentInfo, tabs []herdrapi.TabInfo, wss []herdrapi.WorkspaceInfo, dry bool, stdout io.Writer) error {
 	names := claudeNamesByPane(agents)
 	claude := map[string]bool{}
 	for _, p := range panes {
@@ -690,13 +691,18 @@ func runCaptureMode(m *wsmap.Map, panes []orgPane, agents []herdrapi.AgentInfo, 
 		}
 	}
 	items := computeCapture(panes, claude, wss)
-	if len(items) == 0 {
-		fmt.Fprintf(stdout, "claude セッションが見つからない（capture 対象なし）\n")
+	// 注入 pane の (pc, short_dir) → label 配置も同時に capture（v0.5.5〜）。
+	// リモート pane 注入は自 PC の claude ではないので上記 items には含まれない。
+	// Tab label（"↗<short_dir>"）と token（inj_pc）から (pc, short_dir) → label を導き出す。
+	injItems := computeCaptureInject(panes, tabs, wss)
+	if len(items) == 0 && len(injItems) == 0 {
+		fmt.Fprintf(stdout, "capture 対象なし（claude セッションも注入 pane も見つからない）\n")
 		return nil
 	}
 	if dry {
 		// dry-run は先読み済みの m に対する差分表示のみ（無ロック・無変更）。
 		applyCaptureItems(m, items, true, stdout)
+		applyCaptureInjectItems(m, injItems, true, stdout)
 		fmt.Fprintf(stdout, "（dry-run: 差分表示のみ・wsmap 無変更）\n")
 		return nil
 	}
@@ -705,20 +711,152 @@ func runCaptureMode(m *wsmap.Map, panes []orgPane, agents []herdrapi.AgentInfo, 
 	// snapshot 取得を挟む）に learn daemon が書いたルールを stale 全量で
 	// 巻き戻す lost update になる（レビュー指摘・旧コードで実再現済）。
 	// 差分表示も flock 下の fresh に対して行う＝保存内容と表示が常に一致。
-	changes := 0
+	changes, injChanges := 0, 0
 	if err := wsmap.Update(func(fresh *wsmap.Map) (bool, error) {
 		changes = applyCaptureItems(fresh, items, false, stdout)
-		return changes > 0, nil
+		injChanges = applyCaptureInjectItems(fresh, injItems, false, stdout)
+		return changes+injChanges > 0, nil
 	}); err != nil {
 		return fmt.Errorf("wsmap 保存: %w", err)
 	}
-	if changes == 0 {
+	if changes+injChanges == 0 {
 		fmt.Fprintf(stdout, "wsmap 変更なし\n")
 		return nil
 	}
 	path, _ := wsmap.Path()
-	fmt.Fprintf(stdout, "wsmap へ exact %d 件保存（%s）\n", changes, path)
+	if injChanges == 0 {
+		fmt.Fprintf(stdout, "wsmap へ exact %d 件保存（%s）\n", changes, path)
+	} else if changes == 0 {
+		fmt.Fprintf(stdout, "wsmap へ inject_placement %d 件保存（%s）\n", injChanges, path)
+	} else {
+		fmt.Fprintf(stdout, "wsmap へ exact %d 件・inject_placement %d 件保存（%s）\n", changes, injChanges, path)
+	}
 	return nil
+}
+
+// captureInjectItem は注入 pane 1 個の (pc, short_dir) → label 保存候補。
+// Skip 非空はルール化不能の理由（曖昧・label 無し等）。
+type captureInjectItem struct {
+	PC       string
+	ShortDir string
+	Label    string
+	Skip     string
+}
+
+// computeCaptureInject は注入 pane の実配置から (pc, short_dir) → label を導く純関数。
+// リモート pane の short_dir は Tab label（reconcile が "↗<short_dir>" で作る）から
+// 抜き出す。pane.list に token あり／Tab label が "↗" 始まり／workspace に label あり
+// の 3 条件を満たすものだけを候補にする（推測しない＝鉄則③）。
+// 同 (pc, short_dir) が複数 workspace に散っていれば skip（曖昧）。
+func computeCaptureInject(panes []orgPane, tabs []herdrapi.TabInfo, wss []herdrapi.WorkspaceInfo) []captureInjectItem {
+	labelByWS := make(map[string]string, len(wss))
+	for _, w := range wss {
+		labelByWS[w.WorkspaceID] = w.Label
+	}
+	labelByTab := make(map[string]string, len(tabs))
+	for _, t := range tabs {
+		labelByTab[t.TabID] = t.Label
+	}
+	// (pc, short_dir) -> workspace_id set（曖昧検出用）
+	byKey := map[[2]string]map[string]bool{}
+	for _, p := range panes {
+		pc := p.Tokens[injTokPC]
+		if pc == "" {
+			continue // 注入 pane でない
+		}
+		tabLabel := labelByTab[p.TabID]
+		if !strings.HasPrefix(tabLabel, "↗") {
+			continue // 手動リネームされた等・"↗" prefix を持たない Tab は capture 対象外
+		}
+		shortDir := strings.TrimPrefix(tabLabel, "↗")
+		if shortDir == "" {
+			continue
+		}
+		key := [2]string{pc, shortDir}
+		if byKey[key] == nil {
+			byKey[key] = map[string]bool{}
+		}
+		byKey[key][p.WorkspaceID] = true
+	}
+	// 決定的順序（pc → short_dir 昇順）。
+	keys := make([][2]string, 0, len(byKey))
+	for k := range byKey {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i][0] != keys[j][0] {
+			return keys[i][0] < keys[j][0]
+		}
+		return keys[i][1] < keys[j][1]
+	})
+	out := make([]captureInjectItem, 0, len(keys))
+	for _, k := range keys {
+		wsIDs := byKey[k]
+		ids := make([]string, 0, len(wsIDs))
+		for id := range wsIDs {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		if len(ids) > 1 {
+			descs := make([]string, 0, len(ids))
+			for _, id := range ids {
+				descs = append(descs, fmt.Sprintf("%s(%s)", id, labelByWS[id]))
+			}
+			out = append(out, captureInjectItem{PC: k[0], ShortDir: k[1], Skip: fmt.Sprintf("曖昧（複数 workspace に散在: %s）", strings.Join(descs, ", "))})
+			continue
+		}
+		label, skip := captureLabelFor(wss, ids[0])
+		if skip != "" {
+			out = append(out, captureInjectItem{PC: k[0], ShortDir: k[1], Skip: skip})
+			continue
+		}
+		out = append(out, captureInjectItem{PC: k[0], ShortDir: k[1], Label: label})
+	}
+	return out
+}
+
+// applyCaptureInjectItems は inject_placement 差分を必ず表示（+ 新規 / ~ 上書き /
+// = 既存どおり / SKIP）し、dry でなければ m へ適用して変更数を返す。
+// exact / rules / default は不変（本関数は inject_placement のみ触る）。
+func applyCaptureInjectItems(m *wsmap.Map, items []captureInjectItem, dry bool, stdout io.Writer) int {
+	changes := 0
+	for _, it := range items {
+		key := fmt.Sprintf("[inj] %s / %s", it.PC, it.ShortDir)
+		if it.Skip != "" {
+			fmt.Fprintf(stdout, "SKIP %s: %s\n", key, it.Skip)
+			continue
+		}
+		var old string
+		var existed bool
+		if m.InjectPlacement != nil {
+			if byDir, ok := m.InjectPlacement[it.PC]; ok {
+				old, existed = byDir[it.ShortDir]
+			}
+		}
+		switch {
+		case existed && old == it.Label:
+			fmt.Fprintf(stdout, "= %s → %s（既存どおり）\n", key, it.Label)
+		case existed:
+			fmt.Fprintf(stdout, "~ %s → %s（旧: %s を上書き）\n", key, it.Label, old)
+			changes++
+			if !dry {
+				m.InjectPlacement[it.PC][it.ShortDir] = it.Label
+			}
+		default:
+			fmt.Fprintf(stdout, "+ %s → %s（新規）\n", key, it.Label)
+			changes++
+			if !dry {
+				if m.InjectPlacement == nil {
+					m.InjectPlacement = map[string]map[string]string{}
+				}
+				if m.InjectPlacement[it.PC] == nil {
+					m.InjectPlacement[it.PC] = map[string]string{}
+				}
+				m.InjectPlacement[it.PC][it.ShortDir] = it.Label
+			}
+		}
+	}
+	return changes
 }
 
 // applyCaptureItems は capture 差分を必ず表示（+ 新規 / ~ 上書き / = 既存

@@ -44,6 +44,16 @@ type Map struct {
 	Exact   map[string]string `json:"exact,omitempty"`
 	Rules   []Rule            `json:"rules,omitempty"`
 	Default string            `json:"default,omitempty"`
+	// InjectPlacement は「リモート pane 注入」の着地ルール（v0.5.5〜）。
+	// 形式: {pc: {short_dir: workspace_label}}
+	// 例: {"mac-studio-herdr": {"obsidian-vault": "obsidian",
+	//                          "audio-router":   "hobby"}}
+	// reconcile が CREATE 時に (session.pc, session.short_dir) で引き、
+	// マッチすれば label を wsmap.ResolveWorkspaceID で workspace_id に変換して
+	// その WS に着地させる。マッチしなければ従来通り InjWorkspaceLabel
+	// （デフォルト "↗remote"）へ着地。
+	// **exact-match のみ**（prefix / heuristics は使わない＝鉄則③）。
+	InjectPlacement map[string]map[string]string `json:"inject_placement,omitempty"`
 }
 
 // Path は ~/.herdr-drover/workspaces.json（config.json/agent.pid と同 dir）。
@@ -116,7 +126,36 @@ func (m *Map) validate() error {
 			return fmt.Errorf("rules[%d]（prefix %q）の workspace label が空", i, r.Prefix)
 		}
 	}
+	for pc, byDir := range m.InjectPlacement {
+		if pc == "" {
+			return fmt.Errorf("inject_placement のキー pc が空")
+		}
+		for dir, label := range byDir {
+			if dir == "" {
+				return fmt.Errorf("inject_placement[%q] の short_dir が空", pc)
+			}
+			if label == "" {
+				return fmt.Errorf("inject_placement[%q][%q] の workspace label が空", pc, dir)
+			}
+		}
+	}
 	return nil
+}
+
+// ResolveInject は「リモート pane 注入」pane の着地 label を (pc, short_dir) の
+// exact-match で解決する。マッチなしは "" を返す（呼び手が既定の
+// InjWorkspaceLabel へフォールバックする）。ヒューリスティックは使わない
+// （鉄則③・キー正規化なし＝Save したものが Load でそのまま突き合わされる）。
+func (m *Map) ResolveInject(pc, shortDir string) string {
+	if m == nil || m.InjectPlacement == nil {
+		return ""
+	}
+	if byDir, ok := m.InjectPlacement[pc]; ok {
+		if label, ok := byDir[shortDir]; ok {
+			return label
+		}
+	}
+	return ""
 }
 
 func isRulePath(p string) bool {

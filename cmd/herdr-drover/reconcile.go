@@ -239,7 +239,18 @@ func reconcileRemote(ctx context.Context, api *herdrapi.Client, st remoteSource,
 		lg.Printf("[reconcile] CAP: 注入 pane=%d > %d → 作成停止し整理のみ", guard, maxPanes)
 	}
 
-	wsID := activeWSID // 既存の注入 workspace（無ければ作成時に遅延解決）
+	// wsmap の inject_placement を先読み（v0.5.5〜）。CREATE 時に (pc, short_dir)
+	// で一致する label があれば、その workspace へ着地させる（ユーザーが手動で
+	// 振り分けた配置を wsmap capture で保存 → reconcile が再現する経路）。
+	// Load 失敗は skip（inject_placement 無しと同等＝デフォルト着地）で握り潰さない
+	// 方針も検討したが、Placement 無し運用ユーザーが多いため warn ログのみで継続。
+	placement, plerr := wsmap.Load()
+	if plerr != nil {
+		lg.Printf("[reconcile] wsmap 読取失敗（inject_placement 無効・デフォルト着地）: %v", plerr)
+		placement = &wsmap.Map{}
+	}
+
+	defaultWSID := activeWSID // デフォルト着地先（inject_placement にマッチしない sd 用）
 	for mk, d := range desired {
 		var ids []string
 		for pid, m := range cur {
@@ -252,6 +263,17 @@ func reconcileRemote(ctx context.Context, api *herdrapi.Client, st remoteSource,
 			if noCreate {
 				continue
 			}
+			// (pc, short_dir) → label 解決。マッチすればその workspace へ着地。
+			// マッチしなければデフォルト（activeWSID）で従来挙動。
+			wsID := defaultWSID
+			if label := placement.ResolveInject(d.pc, d.dir); label != "" {
+				id, werr := wsmap.ResolveWorkspaceID(api, label)
+				if werr != nil {
+					lg.Printf("[reconcile] inject_placement %s/%s → %q 解決失敗（デフォルト着地に fallback）: %v", d.pc, d.dir, label, werr)
+				} else {
+					wsID = id
+				}
+			}
 			if wsID == "" {
 				id, werr := wsmap.ResolveWorkspaceID(api, injWorkspace)
 				if werr != nil {
@@ -259,6 +281,7 @@ func reconcileRemote(ctx context.Context, api *herdrapi.Client, st remoteSource,
 					continue
 				}
 				wsID = id
+				defaultWSID = id // 以降のイテレーションで再解決を避ける
 			}
 			argv := []string{selfExe, "attach", d.pc, d.sid}
 			pid, aerr := applyInjectPane(api, wsID, injTabName(d.dir), argv, env)

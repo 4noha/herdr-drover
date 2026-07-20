@@ -251,7 +251,7 @@ func TestCaptureSaveKeepsConcurrentWrite(t *testing.T) {
 	panes := []orgPane{{PaneID: "p1", WorkspaceID: "w1", Cwd: "/proj/a", Agent: "claude"}}
 	wss := []herdrapi.WorkspaceInfo{{WorkspaceID: "w1", Number: 1, Label: "newlabel"}}
 	var out bytes.Buffer
-	if err := runCaptureMode(m, panes, nil, wss, false, &out); err != nil {
+	if err := runCaptureMode(m, panes, nil, nil, wss, false, &out); err != nil {
 		t.Fatalf("runCaptureMode: %v\n%s", err, out.String())
 	}
 	got, err := wsmap.Load()
