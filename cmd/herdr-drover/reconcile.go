@@ -339,21 +339,27 @@ func reconcileRemote(ctx context.Context, api *herdrapi.Client, st remoteSource,
 			// (pc, short_dir) → label 解決。マッチすればその workspace へ着地。
 			// マッチしなければデフォルト（activeWSID）で従来挙動。
 			wsID := defaultWSID
+			// createdRoot: この周で workspace を**新規作成**した場合の空 root pane。
+			// inject pane を足した後に close して WorkspaceCreate 由来のゴミ root
+			// （label="1"）を残さない。既存 workspace 再利用の周は ""＝掃除不要。
+			var createdRoot string
 			if label := placement.ResolveInject(d.pc, d.dir); label != "" {
-				id, werr := wsmap.ResolveWorkspaceID(api, label)
+				id, root, werr := wsmap.ResolveWorkspaceIDWithRoot(api, label)
 				if werr != nil {
 					lg.Printf("[reconcile] inject_placement %s/%s → %q 解決失敗（デフォルト着地に fallback）: %v", d.pc, d.dir, label, werr)
 				} else {
 					wsID = id
+					createdRoot = root
 				}
 			}
 			if wsID == "" {
-				id, werr := wsmap.ResolveWorkspaceID(api, injWorkspace)
+				id, root, werr := wsmap.ResolveWorkspaceIDWithRoot(api, injWorkspace)
 				if werr != nil {
 					lg.Printf("[reconcile] workspace 解決失敗（作成 skip）: %v", werr)
 					continue
 				}
 				wsID = id
+				createdRoot = root
 				defaultWSID = id // 以降のイテレーションで再解決を避ける
 			}
 			argv := []string{selfExe, "attach", d.pc, d.sid}
@@ -392,6 +398,16 @@ func reconcileRemote(ctx context.Context, api *herdrapi.Client, st remoteSource,
 			}
 			lg.Printf("[reconcile] CREATE %s/%s -> %s", d.pc, d.sid, pid)
 			mirrorInjectedAgent(api, pid, d.name, d.status, reported, lg)
+			// workspace を新規作成した周のみ: inject pane が入った後に空 root pane を掃除。
+			// WorkspaceCreate 由来の label="1" ゴミ root を残さない（既存 ws 再利用は
+			// createdRoot=""＝no-op）。close 失敗はログのみ（致命でない・次周に残るだけ）。
+			if createdRoot != "" {
+				if cerr := api.PaneClose(createdRoot); cerr != nil {
+					lg.Printf("[reconcile] 新規 ws の空 root pane close 失敗 %s（残存）: %v", createdRoot, cerr)
+				} else {
+					lg.Printf("[reconcile] 新規 ws の空 root pane を掃除: %s", createdRoot)
+				}
+			}
 		} else {
 			for _, extra := range ids[1:] {
 				_ = api.PaneClose(extra) // 重複（過去 race）を自己修復

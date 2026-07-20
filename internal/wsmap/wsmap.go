@@ -336,18 +336,30 @@ type Caller interface {
 //   - 不在なら workspace.create {label, focus:false} で自動作成（focus 非奪取
 //     ＝Probe 実測 params。作成応答の workspace_id を返す）。
 func ResolveWorkspaceID(c Caller, label string) (string, error) {
+	wsID, _, err := ResolveWorkspaceIDWithRoot(c, label)
+	return wsID, err
+}
+
+// ResolveWorkspaceIDWithRoot は ResolveWorkspaceID に加え、**新規作成した場合の
+// root pane id** を返す（既存 workspace を再利用した場合は ""）。workspace.create は
+// 空の root pane（tab label="1"）を必ず 1 枚作るため、呼び手が「自分のコンテンツ
+// （tab/pane）を足した後」にこの root pane を close すると、WorkspaceCreate 由来の
+// 空 root がゴミとして残らない。**close は必ずコンテンツ追加の後**に行う（先に close
+// すると空 workspace が herdr に auto-close される）。返り値の root が "" の周
+// （既存 workspace 再利用）は close 不要。
+func ResolveWorkspaceIDWithRoot(c Caller, label string) (wsID, createdRoot string, err error) {
 	if label == "" {
-		return "", errors.New("wsmap: 空 label は解決できない（呼び手のバグ）")
+		return "", "", errors.New("wsmap: 空 label は解決できない（呼び手のバグ）")
 	}
 	raw, err := c.Call("workspace.list", nil)
 	if err != nil {
-		return "", fmt.Errorf("workspace.list: %w", err)
+		return "", "", fmt.Errorf("workspace.list: %w", err)
 	}
 	var list struct {
 		Workspaces []herdrapi.WorkspaceInfo `json:"workspaces"`
 	}
 	if err := json.Unmarshal(raw, &list); err != nil {
-		return "", fmt.Errorf("workspace_list decode: %w", err)
+		return "", "", fmt.Errorf("workspace_list decode: %w", err)
 	}
 	var found *herdrapi.WorkspaceInfo
 	for i := range list.Workspaces {
@@ -360,7 +372,7 @@ func ResolveWorkspaceID(c Caller, label string) (string, error) {
 		}
 	}
 	if found != nil {
-		return found.WorkspaceID, nil
+		return found.WorkspaceID, "", nil // 既存 workspace 再利用＝root 作成なし
 	}
 
 	raw, err = c.Call("workspace.create", struct {
@@ -368,14 +380,15 @@ func ResolveWorkspaceID(c Caller, label string) (string, error) {
 		Focus bool   `json:"focus"`
 	}{label, false})
 	if err != nil {
-		return "", fmt.Errorf("workspace.create label=%q: %w", label, err)
+		return "", "", fmt.Errorf("workspace.create label=%q: %w", label, err)
 	}
 	var created herdrapi.WorkspaceCreated
 	if err := json.Unmarshal(raw, &created); err != nil {
-		return "", fmt.Errorf("workspace_created decode: %w", err)
+		return "", "", fmt.Errorf("workspace_created decode: %w", err)
 	}
 	if created.Workspace.WorkspaceID == "" {
-		return "", fmt.Errorf("workspace.create 応答に workspace_id が無い（wire 変化?）")
+		return "", "", fmt.Errorf("workspace.create 応答に workspace_id が無い（wire 変化?）")
 	}
-	return created.Workspace.WorkspaceID, nil
+	// created.RootPane.PaneID＝呼び手がコンテンツ追加後に掃除すべき空 root。
+	return created.Workspace.WorkspaceID, created.RootPane.PaneID, nil
 }

@@ -184,31 +184,101 @@ func TestReconcileMirrorsRemoteAgentStatus(t *testing.T) {
 	const selfPC = "self-herdr"
 
 	// step はリモート agent_status を status に変えて 1 周 reconcile し、注入 pane の
-	// herdr 表示 agent_status が want になるまで待つ。want が status と違うのは herdr の
-	// seen 意味論による: report_agent の --state は idle/working/blocked/unknown の 4 値で、
-	// 内部 AgentState::Idle は「未 seen」で "done"、"seen" で "idle" と表示される
-	// （pane_agent_status(state, seen)）。本テストは pane を view しない＝seen=false なので
-	// リモートの idle も done も転記先では "done" と出る（状態としては同一の Idle）。
-	step := func(status, want string) {
+	// herdr 表示 agent_status が wants のいずれかになるまで待つ。idle 系（done/idle）が
+	// 2 値許容なのは herdr の seen 意味論による: report の --state は idle/working/
+	// blocked/unknown の 4 値で、内部 AgentState::Idle は pane_agent_status(state, seen)
+	// で「未 seen→done / seen→idle」と表示が変わる。CREATE 時の空 root pane 掃除で
+	// inject pane が（隔離 herdr では唯一 workspace ゆえ）focused=seen になり得るため、
+	// idle 系は done/idle どちらも同一状態（Idle）として許容する。working/blocked/
+	// unknown は seen 非依存で exact。
+	step := func(status string, wants ...string) {
 		t.Helper()
 		fr.sessions["remoteA"] = []map[string]any{fakeSessAgent("w9:pA", "projA", "claude", status)}
 		reconcileRemote(ctx, api, fr, Cloud{PCName: selfPC}, stub, idx, lg, reported)
-		waitCond(t, 15*time.Second, fmt.Sprintf("report=%q → 注入 pane の agent_status が %q になる", status, want), func() bool {
+		waitCond(t, 15*time.Second, fmt.Sprintf("report=%q → 注入 pane の agent_status ∈ %v", status, wants), func() bool {
 			s, ok := injPaneStatus(t, api, "remoteA", "w9:pA")
-			return ok && s == want
+			if !ok {
+				return false
+			}
+			for _, w := range wants {
+				if s == w {
+					return true
+				}
+			}
+			return false
 		})
 	}
 
 	// CREATE 周: working が注入 pane に転記される。
 	step("working", "working")
-	// 既存 pane で done → blocked → idle → working と追随（done/idle は未 seen で "done" 表示）。
-	step("done", "done")
+	// 既存 pane で done → blocked → idle → working と追随（done/idle は Idle の seen 差＝両許容）。
+	step("done", "done", "idle")
 	step("blocked", "blocked")
-	step("idle", "done")
+	step("idle", "done", "idle")
 	step("working", "working")
 	// リモート agent 終了（unknown）→ release_agent で stale が消え unknown に戻る
 	// （session 自体は残すので pane は close されない＝release 経路のみを分離検証）。
 	step("unknown", "unknown")
+}
+
+// TestReconcileCleansCreatedWorkspaceRoot は「reconcile が inject workspace を新規
+// 作成した時、WorkspaceCreate 由来の空 root pane を掃除する」ことの見張り（旧コードは
+// root を残す＝ゴミ Tab/Pane。ユーザー報告の再発防止）。fresh herdr に 1 セッション注入
+// → 新 workspace が作られ、その workspace の pane は inject pane 1 枚のみ（token 無し
+// root が 0 枚）であることを確認する。
+func TestReconcileCleansCreatedWorkspaceRoot(t *testing.T) {
+	sock := startHerdrForTest(t)
+	api := herdrapi.New(sock)
+	lg := log.New(io.Discard, "", 0)
+	stub := reconcileStub(t)
+	ctx := context.Background()
+	idx := newTestIndex(t)
+
+	fr := &fakeRemote{
+		pcs: []string{"self-herdr", "remoteA"},
+		sessions: map[string][]map[string]any{
+			"remoteA": {fakeSess("w9:pA", "projA")},
+		},
+	}
+	reconcileRemote(ctx, api, fr, Cloud{PCName: "self-herdr"}, stub, idx, lg)
+
+	var injWS string
+	waitCond(t, 15*time.Second, "inject pane 出現", func() bool {
+		panes, err := api.PaneList()
+		if err != nil {
+			return false
+		}
+		for i := range panes {
+			if panes[i].Tokens[injTokPC] == "remoteA" && panes[i].Tokens[injTokSID] == "w9:pA" {
+				injWS = panes[i].WorkspaceID
+				return true
+			}
+		}
+		return false
+	})
+
+	// root 掃除は close 後に反映されるため少し待って安定を見る。
+	time.Sleep(800 * time.Millisecond)
+	panes, err := api.PaneList()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wsPanes, tokenless := 0, 0
+	for i := range panes {
+		if panes[i].WorkspaceID != injWS {
+			continue
+		}
+		wsPanes++
+		if panes[i].Tokens[injTokPC] == "" {
+			tokenless++
+		}
+	}
+	if tokenless != 0 {
+		t.Fatalf("新規 inject workspace(%s) に token 無しの空 root pane が %d 枚残存（ゴミ root 掃除の退行）", injWS, tokenless)
+	}
+	if wsPanes != 1 {
+		t.Fatalf("inject workspace(%s) の pane 数=%d（inject pane 1 枚のみ＝root 掃除済みを期待）", injWS, wsPanes)
+	}
 }
 
 // TestReconcileAgentMirrorDisabled は opt-in ゲートの見張り: reported map を渡さない
