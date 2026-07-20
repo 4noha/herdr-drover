@@ -1,12 +1,15 @@
 # herdr-drover プロジェクト
 
 herdr（AI エージェント用ターミナルマルチプレクサ）の **standalone プラグイン**。
-herdr のセッション群にクラウド同期（Web/スマホ閲覧・リモート pane 注入・
-near-$0）を足し、`claude` シムで cwd 自動 attach／新 Tab 起動を提供する。
-Python 版 claude-master(cm) のクラウド同期を **herdr の世界**へ移した後継。
+herdr のセッション群にクラウド同期（Web/スマホ閲覧・リモート pane 注入 ↗窓・
+共用 PC(slave) 対応・一時 SSH エージェント転送・near-$0）を足し、`claude` シムで
+cwd 自動 attach／新 Tab 起動を提供する。Python 版 claude-master(cm) のクラウド
+同期を **herdr の世界**へ移した後継。稼働版 v0.5.0（pc=`mac-studio-herdr`）。
 
 - 導入手順: [SETUP.md](SETUP.md)／使い方: [README.md](README.md)／
   設計: [DESIGN.md](DESIGN.md)／**進行中作業の正: [TODO.md](TODO.md)**
+- 機能別設計: [DESIGN_SLAVE.md](DESIGN_SLAVE.md)＋[DESIGN_SLAVE_SPEC.md](DESIGN_SLAVE_SPEC.md)
+  （共用 PC）／[DESIGN_SSH_FORWARD.md](DESIGN_SSH_FORWARD.md)（SSH 転送）
 - **再開時はまず TODO.md を読む**（in-flight タスク・残課題・デプロイ手順の正）
 
 ## アーキテクチャ（要点）

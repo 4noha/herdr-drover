@@ -11,8 +11,12 @@
 - 📱 **ブラウザ/スマホからフル忠実ターミナル**: 任意のセッションへ Cloud Run
   relay (WSS) 越しに接続。herdr のサーバサイドレンダ差分フレーム
   （DECSET 2026 括り）をそのままストリーム
-- 🪟 **リモート pane 注入**: 他 PC のセッションをローカル herdr に pane として
-  自動出現（reconcile・自己修復）
+- 🪟 **リモート pane 注入（↗窓）**: 他 PC のセッションをローカル herdr に pane
+  として自動出現（reconcile・自己修復）。双方向に打鍵できる
+- 🤝 **共用 PC（slave）対応**: 1 アカウントを複数人で使う PC でも owner の私物
+  セッションが漏れないよう、制限クレデンシャルで動く slave モード
+- 🔑 **一時 SSH エージェント転送**: owner の SSH 鍵を slave のディスクに置かず、
+  relay 越しに一時的に貸して GitHub 操作（署名は owner 側で実行）
 - 💤 **near-$0**: 無通信 30s で自動切断、Firestore push で自動復帰。
   アイドル時のクラウド課金ほぼゼロ
 
@@ -177,6 +181,36 @@ mkdir -p ~/.claude/skills
 ln -s "$PWD/skills/mv-tab" ~/.claude/skills/mv-tab
 ```
 
+### ssh-forward（slave へ owner の SSH エージェントを一時転送）
+
+共用 slave 上で **owner の SSH 秘密鍵をディスクに置かず**、一時的に git/gh の
+SSH 認証を通す。owner の `ssh-agent` を drover-cloud relay 越しに slave へ転送し、
+**署名は owner Mac が実行**する（classic SSH agent forwarding を NAT 越しの relay に
+載せたもの）。用途は「同じリポジトリをローカルと slave 両方で検証」等
+（エージェント対エージェント）。設計は [DESIGN_SSH_FORWARD.md](DESIGN_SSH_FORWARD.md)。
+
+```sh
+# owner: 専用 deploy key を confirm 付きで登録（毎署名 owner Mac で承認）
+ssh-add -c ~/.ssh/repoA_deploy
+
+# owner: 転送ウィンドウを開く（Ctrl-C で撤去）
+herdr-drover ssh-forward n9htqcr6g0-herdr repoA
+#   → slave sock: ~/.herdr-drover/agent-fwd/afwd-repoA.sock
+
+# slave: 表示された sock を SSH_AUTH_SOCK に指定して git
+SSH_AUTH_SOCK=~/.herdr-drover/agent-fwd/afwd-repoA.sock git clone git@github.com:you/repoA
+#   → 署名は owner Mac が実行・秘密鍵は slave に出ない
+```
+
+- **脅威モデル**: slave は同一 UID を複数人で共有＝socket も 0600 も同 UID には
+  無力。本命の安全弁は **`ssh-add -c`（毎署名 owner 承認）** と **転送ウィンドウを
+  owner が開いている間だけ有効**（Ctrl-C/切断で socket 自動撤去）＋**専用 deploy
+  key（対象リポ限定・read-only 推奨）** で被害範囲を絞ること。
+- **仕組み**: `afwd:<label>` の wake で slave を起こし、既存の grant/relay 機構
+  （attach/↗窓 と同一）を再利用。relay/Firestore/Web は無改変。転送は
+  `internal/agentfwd` の多重化 mux（1 relay セッション上で複数 SSH agent 接続）。
+- ⚠ owner・slave 双方が本機能を持つビルド（>= v0.5.0）である必要がある。
+
 ### 複数クラウド（端末ごとにマルチ Google アカウント）
 
 1 台の PC が **複数の独立したクラウド**（別 Google アカウント＝別 GCP
@@ -201,14 +235,15 @@ ln -s "$PWD/skills/mv-tab" ~/.claude/skills/mv-tab
 
 ## Status
 
-Phase 1（一覧同期）・Phase 2（Web ターミナル）・**Phase 3（リモート pane 注入＝
-↗窓相当）**・Phase 4（プラグイン化・遠隔命令・install/launchd・配布）実装済み。
-各フェーズは実 herdr 隔離サーバ＋実 Firestore エミュレータ＋実 relay
-（drover-cloud build）の常設 e2e gate（`test/`）で検証している。⚠ リモート pane
-注入の実クラウド 2 PC 越しの完全 e2e（他 PC の実セッションが↗注入されて打鍵往復）は
-2 つ目のクラウド/PC が要るため未実施（reconcile の pane 生成/冪等/自己修復/fail-safe は
-実 herdr で機械検証済み・attach viewer の cm-wire は Phase 2 viewer と同形式）。実
-launchd へのロード（カットオーバー）は `herdr-drover install` を手動実行（テストは
+一覧同期・Web ターミナル・**リモート pane 注入（↗窓・実クラウド複数 PC 越しの
+実機 e2e 済み）**・プラグイン化・遠隔命令・install/launchd・配布、**共用 PC
+（slave）対応**、**一時 SSH エージェント転送（v0.5.0）** を実装済み。各機能は実
+herdr 隔離サーバ＋実 Firestore エミュレータ＋実 relay（drover-cloud build）の常設
+e2e gate（`test/`）で検証している。稼働版 v0.5.0（`mac-studio-herdr` ほか）。
+
+進行中の残課題（in-flight・保留の再開ポイント）は **[TODO.md](TODO.md)** が正
+（SSH 転送の実機 git e2e／IME Ctrl キー／resume backstop 等）。実 launchd への
+ロード（カットオーバー）は `herdr-drover install` を手動実行（テストは
 `--no-launchctl`＋隔離 HOME のみ＝実環境不可侵）。
 
 ## Requirements
