@@ -4,6 +4,8 @@ package main
 // 実体は internal/selfupdate＝遠隔命令 self-update と同じ経路）。
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"os"
@@ -30,6 +32,11 @@ func cmdUpdate(stdout io.Writer) error {
 	}
 	if !updated {
 		fmt.Fprintf(stdout, "既に最新です (%s)\n", tag)
+		// 「既に最新」でも stale CLI (~/.local/bin) の同期チェックは走らせる。
+		// 旧版 (~v0.5.6) からの持ち越しで CLI が binDst と一致していないケースの
+		// 追いつきに必要（v0.5.6 実測: 稼働 binDst は v0.5.6 でも CLI は v0.5.5 の
+		// まま残り、alias claude で workspaces.json 未知フィールドエラーを踏む）。
+		syncCLIBinaryOnLatestCheck(stdout)
 		return nil
 	}
 	fmt.Fprintf(stdout, "更新しました: %s → %s\n", version, tag)
@@ -82,10 +89,37 @@ func cmdUpdate(stdout io.Writer) error {
 	return nil
 }
 
+// syncCLIBinaryOnLatestCheck は「既に最新」early return 経路でも CLI 側の
+// stale チェックを 1 回だけ走らせる。前バージョンから持ち越された CLI と
+// 稼働 binDst が SHA 不一致な場合に追いつく（v0.5.6 実測: syncCLIBinary が
+// updated==false パスで skip され CLI stale が残った）。
+func syncCLIBinaryOnLatestCheck(stdout io.Writer) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	exe, err := updateExecutable()
+	if err != nil {
+		return
+	}
+	p := resolveInstallPaths(home)
+	if _, err := os.Stat(p.binDst); err != nil {
+		return // binDst 無し（未 install）は何もしない
+	}
+	exeReal, e1 := filepath.EvalSymlinks(exe)
+	dstReal, e2 := filepath.EvalSymlinks(p.binDst)
+	if e1 != nil || e2 != nil {
+		return
+	}
+	syncCLIBinary(exeReal, dstReal, p.cliBinPath, stdout)
+}
+
 // syncCLIBinary は ~/.local/bin/herdr-drover（CLI 側・install.sh が置く）を
 // binDst と同一版に揃える。selfupdate が binDst しか触らず CLI が stale になる
 // 実バグ（v0.5.5 で実測）の対策。存在しないパス／exe or binDst と同 inode は skip。
 // エラーは warn ログのみ（selfupdate 自体は成功しているので終了コードを汚さない）。
+// **追加ガード** (v0.5.7〜): 同 inode でなくても **SHA が一致** すれば skip
+// （cp -f で手動同期済のケースで無駄書き＋stdout 冗長を避ける）。
 func syncCLIBinary(exeReal, dstReal, cliBinPath string, stdout io.Writer) {
 	if cliBinPath == "" {
 		return
@@ -103,6 +137,11 @@ func syncCLIBinary(exeReal, dstReal, cliBinPath string, stdout io.Writer) {
 	if cliReal == exeReal || cliReal == dstReal {
 		return
 	}
+	// 内容 (SHA) 一致なら再配置不要（cp -f で手動同期済のケース）。
+	// 稼働 binDst と CLI が別 inode でも同一 binary なら書換無用＝stdout も冗長にしない。
+	if sameFileContent(cliReal, dstReal) {
+		return
+	}
 	// 新 inode 配置（rm→新規 write→rename＝macOS 署名キャッシュ罠を回避）。
 	// 上流の binDst 更新が既に済んでいるので dstReal をソースにする。
 	if err := placeBinaryNewInode(dstReal, cliBinPath); err != nil {
@@ -111,4 +150,34 @@ func syncCLIBinary(exeReal, dstReal, cliBinPath string, stdout io.Writer) {
 		return
 	}
 	fmt.Fprintf(stdout, "✔ CLI バイナリも同期: %s（新 inode）\n", cliBinPath)
+}
+
+// sameFileContent は 2 ファイルの内容が完全一致するかを SHA256 で判定する
+// （size 事前チェックで早期 false・巨大ファイルでも読取 1 pass）。
+// エラー時は false を返す（呼び手は再配置に進む＝安全側）。
+func sameFileContent(a, b string) bool {
+	fa, err := os.Open(a)
+	if err != nil {
+		return false
+	}
+	defer fa.Close()
+	fb, err := os.Open(b)
+	if err != nil {
+		return false
+	}
+	defer fb.Close()
+	sa, _ := fa.Stat()
+	sb, _ := fb.Stat()
+	if sa != nil && sb != nil && sa.Size() != sb.Size() {
+		return false
+	}
+	ha := sha256.New()
+	if _, err := io.Copy(ha, fa); err != nil {
+		return false
+	}
+	hb := sha256.New()
+	if _, err := io.Copy(hb, fb); err != nil {
+		return false
+	}
+	return bytes.Equal(ha.Sum(nil), hb.Sum(nil))
 }
