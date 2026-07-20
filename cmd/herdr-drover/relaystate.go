@@ -467,15 +467,88 @@ func (rs *relayState) pollWake(ctx context.Context, since string) (sid, ts strin
 	return "", "", 0, fmt.Errorf("slave wake: 401（token 更新しても不可）")
 }
 
-// WatchCommands は P4/optional（slave 遠隔命令は未配線）。即 nil で戻る
-// （CommandRunner.Run は err==nil でログしない）。
+// WatchCommands は slave 宛の遠隔命令を relay 越しに long-poll で受ける
+// （master の state.Client.WatchCommands 相当。slave は SA レスで Firestore を
+// 直読できないため relay の /slave/commands が仲介＝claim 済みのみ配信）。
+// WatchWake と同型: 200 で命令を fn へ流して即 re-poll、204 は即 re-poll、
+// 403/err は backoff。ctx 終了で戻る。relay の hold（~25s）で near-$0。
 func (rs *relayState) WatchCommands(ctx context.Context, fn func(state.Command)) error {
-	return nil
+	for {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		cmds, status, err := rs.pollCommands(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if !sleepCtx(ctx, wakeBackoff) {
+				return ctx.Err()
+			}
+			continue
+		}
+		switch status {
+		case 200:
+			for i := range cmds {
+				fn(cmds[i])
+			}
+			// 即 re-poll（次の命令の catch-up）。
+		case 204:
+			// hold 窓で命令無し。即 re-poll。
+		default: // 403（mid-hold 失効）/ その他は backoff。
+			if !sleepCtx(ctx, wakeBackoff) {
+				return ctx.Err()
+			}
+		}
+	}
 }
 
-// AckCommand も P4/optional（WatchCommands が発火しないため呼ばれない）。
+// pollCommands は /slave/commands の long-poll 1 回（pollWake と同型）。
+// 401 は 1 回だけ token 更新して再試行。200 は {commands:[...]} を parse。
+func (rs *relayState) pollCommands(ctx context.Context) (cmds []state.Command, status int, err error) {
+	for attempt := 0; attempt < 2; attempt++ {
+		tok, e := rs.bearer(ctx, attempt == 1)
+		if e != nil {
+			return nil, 0, e
+		}
+		pollCtx, cancel := context.WithTimeout(ctx, wakePollTimeout)
+		u := rs.httpBase + "/slave/commands"
+		req, e := http.NewRequestWithContext(pollCtx, http.MethodGet, u, nil)
+		if e != nil {
+			cancel()
+			return nil, 0, e
+		}
+		req.Header.Set("Authorization", "Bearer "+tok)
+		resp, e := rs.wakeHC.Do(req)
+		if e != nil {
+			cancel()
+			return nil, 0, e
+		}
+		if resp.StatusCode == 401 && attempt == 0 {
+			resp.Body.Close()
+			cancel()
+			rs.invalidateToken()
+			continue
+		}
+		st := resp.StatusCode
+		var cr struct {
+			Commands []state.Command `json:"commands"`
+		}
+		if st == 200 {
+			_ = json.NewDecoder(resp.Body).Decode(&cr)
+		}
+		resp.Body.Close()
+		cancel()
+		return cr.Commands, st, nil
+	}
+	return nil, 0, fmt.Errorf("slave commands: 401（token 更新しても不可）")
+}
+
+// AckCommand は命令の実行結果を relay 越しに書き戻す（/slave/command-ack へ POST）。
 func (rs *relayState) AckCommand(ctx context.Context, id, status, detail string) error {
-	return nil
+	return rs.call(ctx, http.MethodPost, "/slave/command-ack", map[string]any{
+		"id": id, "status": status, "detail": detail,
+	}, nil)
 }
 
 // DialSource は relay へ source 役で dial（Authorization: Bearer 付き）。

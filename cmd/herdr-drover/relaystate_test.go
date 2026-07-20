@@ -26,6 +26,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/4noha/drover-cloud/state"
 )
 
 // fakeRelay は /slave/* の最小実装。bearer 検証・token 鋳造・各操作の記録。
@@ -44,6 +46,10 @@ type fakeRelay struct {
 
 	force401Once atomic.Bool // 次の /slave/revoked を 1 回だけ 401 にする
 	wakeN        atomic.Int32
+	cmdN         atomic.Int32
+	ackMu        sync.Mutex
+	ackID        string
+	ackStatus    string
 }
 
 func newFakeRelay(t *testing.T, secret string) (*fakeRelay, *httptest.Server) {
@@ -176,6 +182,33 @@ func newFakeRelay(t *testing.T, secret string) (*fakeRelay, *httptest.Server) {
 		}
 		// 以降は hold（long-poll 模擬）。client の ctx cancel で戻る。
 		<-r.Context().Done()
+	})
+	mux.HandleFunc("/slave/commands", func(w http.ResponseWriter, r *http.Request) {
+		if !authed(w, r) {
+			return
+		}
+		if fr.cmdN.Add(1) == 1 {
+			writeJSON(w, map[string]any{"commands": []map[string]any{
+				{"id": "cmd1", "cmd": "self-update", "status": "running"},
+			}})
+			return
+		}
+		<-r.Context().Done() // 以降 hold（long-poll 模擬）
+	})
+	mux.HandleFunc("/slave/command-ack", func(w http.ResponseWriter, r *http.Request) {
+		if !authed(w, r) {
+			return
+		}
+		var b struct {
+			ID     string `json:"id"`
+			Status string `json:"status"`
+			Detail string `json:"detail"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&b)
+		fr.ackMu.Lock()
+		fr.ackID, fr.ackStatus = b.ID, b.Status
+		fr.ackMu.Unlock()
+		writeJSON(w, map[string]any{"ok": true})
 	})
 
 	ts := httptest.NewServer(mux)
@@ -332,6 +365,45 @@ func TestRelayStateWatchWakeLongPoll(t *testing.T) {
 		t.Fatal("WatchWake が cb を発火しない")
 	}
 	cancel() // hold 中の poll を解除して WatchWake を戻す
+}
+
+// WatchCommands の long-poll: 200 の {commands:[...]} を fn(state.Command) に流す。
+// AckCommand が /slave/command-ack へ POST することも確認（slave 遠隔命令配線）。
+func TestRelayStateWatchCommandsLongPoll(t *testing.T) {
+	fr, ts := newFakeRelay(t, "s3cr3t")
+	rs := newTestRelayState(ts, "s3cr3t")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	got := make(chan state.Command, 1)
+	go func() {
+		_ = rs.WatchCommands(ctx, func(cm state.Command) {
+			select {
+			case got <- cm:
+			default:
+			}
+		})
+	}()
+	select {
+	case cm := <-got:
+		if cm.ID != "cmd1" || cm.Cmd != "self-update" {
+			t.Fatalf("command 不一致: %+v", cm)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("WatchCommands が fn を発火しない（slave 遠隔命令が届かない）")
+	}
+	cancel() // hold 中の poll を解除して WatchCommands を戻す
+
+	// AckCommand が /slave/command-ack へ実行結果を POST する。
+	if err := rs.AckCommand(context.Background(), "cmd1", "done", "ok"); err != nil {
+		t.Fatalf("AckCommand: %v", err)
+	}
+	fr.ackMu.Lock()
+	id, st := fr.ackID, fr.ackStatus
+	fr.ackMu.Unlock()
+	if id != "cmd1" || st != "done" {
+		t.Fatalf("ack 記録不一致: id=%q status=%q", id, st)
+	}
 }
 
 // 401 で token を force-refresh して 1 回だけ再試行する。
