@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -25,8 +26,21 @@ import (
 	"github.com/4noha/drover-cloud/state"
 	"github.com/4noha/herdr-drover/internal/commands"
 	"github.com/4noha/herdr-drover/internal/herdrapi"
+	"github.com/4noha/herdr-drover/internal/injectindex"
 	"github.com/4noha/herdr-drover/internal/session"
 )
+
+// openInjectIndex は ~/.herdr-drover/inject-index.json（config.json / workspaces.json
+// と同 dir）を開く。cfg は将来「別 dir を env で override」する余地のために
+// 引数に取るが、現状は home 直下固定＝configFilePath と同流儀。
+// テスト seam（agent_test.go から差替え可能）にするため package-level 変数。
+var openInjectIndex = func(cfg Config) (*injectindex.Index, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("home ディレクトリ不明: %w", err)
+	}
+	return injectindex.Open(filepath.Join(home, ".herdr-drover", "inject-index.json"))
+}
 
 // restartSelf は launchd 配下の自分を kickstart -k で強制再起動する
 // （cm restartDaemons の drover 版＝単一 agent なので 1 本だけ）。
@@ -88,6 +102,17 @@ func cmdAgent(stdout, stderr io.Writer) error {
 	for _, w := range verifyHerdr(pong) {
 		lg.Println(w)
 	}
+
+	// inject-index を Open（Phase 1: 存在するだけで producer/reconcile はまだ
+	// 参照しない＝挙動不変）。壊れは loud エラーで agent 起動失敗＝launchd 再起動
+	// ＋人間目視。ファイル不在は空 Index で正常継続（初回起動 / rm 後の正規経路）。
+	// Phase 2/3 で reconcile CREATE/CLOSE と producer 除外判定の権威になる。
+	idx, err := openInjectIndex(cfg)
+	if err != nil {
+		return fmt.Errorf("inject-index 読取失敗: %w", err)
+	}
+	_ = idx // Phase 1: 保持のみ・使用は Phase 2/3
+	lg.Printf("inject-index ok: %d entries", len(idx.Snapshot()))
 
 	// graceful 終了（SIGTERM/SIGINT）と nudge（SIGUSR1）は別チャネル: 前者は
 	// ctx cancel、後者は producer ループの即時 re-scan トリガ。
