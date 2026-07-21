@@ -74,6 +74,13 @@ type Producer struct {
 	// prev は前 tick の生存キー集合。今 tick に居ないキーを
 	// DeleteSession で消す（in-memory 差分＝追加 Firestore 読み無し）。
 	prev map[string]bool
+
+	// onSessions は BuildSessions の結果を副作用専用に受け取る任意フック
+	// （nil 可。cmd 側の task-notify 等が isInjected と同じ後付け注入で使う）。
+	// Tick の push/delete 判定には一切影響しない＝呼んでも呼ばなくても
+	// Producer の契約は不変。呼び出しは PushStatus の**後**（push 成功可否に
+	// 関わらず新 sessions を渡す＝通知は Firestore 反映と独立でよい）。
+	onSessions func(sessions []map[string]any)
 	// seeded は prev を Firestore 実態（OwnSessionKeys）で初期化済みか。
 	// 初回 tick で seed し、失敗したら tick ごと skip して次回再試行する
 	// （seed 無しで進むと agent 停止中に終了した pane の doc が永久残留）。
@@ -93,6 +100,13 @@ func NewProducer(h HerdrClient, st StateClient) *Producer {
 // idx.IsInjected をそのまま渡す想定。テストでは任意の func を渡せる。
 func (p *Producer) WithIsInjected(fn func(paneID string) bool) *Producer {
 	p.isInjected = fn
+	return p
+}
+
+// WithOnSessions は onSessions フックを後付け注入する（返り値は self＝
+// method chain 可）。
+func (p *Producer) WithOnSessions(fn func(sessions []map[string]any)) *Producer {
+	p.onSessions = fn
 	return p
 }
 
@@ -251,6 +265,9 @@ func (p *Producer) Tick(ctx context.Context) error {
 		if _, perr := p.State.PushStatus(ctx, ss); perr != nil {
 			errs = append(errs, fmt.Errorf("session: PushStatus: %w", perr))
 		}
+	}
+	if p.onSessions != nil {
+		p.onSessions(ss)
 	}
 
 	// 消滅キーの delete。次 tick 用の集合は cur を基礎に、delete 失敗分

@@ -309,6 +309,17 @@ func runOneCloud(ctx context.Context, cfg Config, cl Cloud, primary bool, hcli *
 	// Pending / Live のどちらでも true を返し、token の race 窓と再起動消失を塞ぐ。
 	prod := session.NewProducer(hcli, st).WithIsInjected(idx.IsInjected)
 
+	// タスク完了 push 通知（Web Push・任意機能）。scConcrete が非 nil＝master
+	// のみ配線（slave は SA レスで Firestore の pushtokens/FCM 認証に触れない
+	// ＝runRemoteInject と同じ primary/master 限定の考え方）。push 鍵/SA 鍵が
+	// 無ければ taskNotifier 自体が内部で no-op になる（後方互換）。
+	if scConcrete != nil {
+		tn := newTaskNotifier(ctx, cl, lg)
+		prod = prod.WithOnSessions(func(sessions []map[string]any) {
+			tn.check(ctx, scConcrete, sessions)
+		})
+	}
+
 	// tick 冒頭の失効検査（tick 毎 1 read で near-$0 規律内）: 失効中は scan/
 	// push/delete を一切せず doc を再作成しない。owner の ClearRevoked（再
 	// enroll）で次 tick 自然復帰。ログは遷移時のみ（dormant 中に同文を tick
