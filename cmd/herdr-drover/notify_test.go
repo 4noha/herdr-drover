@@ -44,20 +44,39 @@ func sess(key, status, name string) map[string]any {
 	return map[string]any{"key": key, "agent_status": status, "window_name": name}
 }
 
-// fakeFCM は FCM v1 API を模す。sendCount はトークンごとの呼出回数を記録し、
+// sessDir は short_dir（プロジェクト名＝通知タイトルの優先ソース）付き版。
+func sessDir(key, status, name, dir string) map[string]any {
+	return map[string]any{"key": key, "agent_status": status, "window_name": name, "short_dir": dir}
+}
+
+// fcmCall は fakeFCM が記録する 1 回の送信内容（title/body/tag を検証するため）。
+type fcmCall struct {
+	title, body, tag string
+}
+
+// fakeFCM は FCM v1 API を模す。sendCount はトークンごとの呼出回数、calls は
+// トークン毎の直近送信内容（title/body/tag の中身検証用）を記録し、
 // unregistered に含まれる token へは UNREGISTERED エラーを返す。
-func fakeFCM(t *testing.T, unregistered map[string]bool) (*httptest.Server, map[string]int) {
+func fakeFCM(t *testing.T, unregistered map[string]bool) (*httptest.Server, map[string]int, map[string]fcmCall) {
 	t.Helper()
 	sendCount := map[string]int{}
+	calls := map[string]fcmCall{}
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			Message struct {
-				Token string `json:"token"`
+				Token        string                       `json:"token"`
+				Notification struct{ Title, Body string } `json:"notification"`
+				Data         map[string]string            `json:"data"`
 			} `json:"message"`
 		}
 		b, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(b, &body)
 		sendCount[body.Message.Token]++
+		calls[body.Message.Token] = fcmCall{
+			title: body.Message.Notification.Title,
+			body:  body.Message.Notification.Body,
+			tag:   body.Message.Data["tag"],
+		}
 		if unregistered[body.Message.Token] {
 			w.WriteHeader(http.StatusNotFound)
 			_ = json.NewEncoder(w).Encode(map[string]any{
@@ -70,7 +89,7 @@ func fakeFCM(t *testing.T, unregistered map[string]bool) (*httptest.Server, map[
 		_ = json.NewEncoder(w).Encode(map[string]string{"name": "ok"})
 	}))
 	t.Cleanup(ts.Close)
-	return ts, sendCount
+	return ts, sendCount, calls
 }
 
 func newTestNotifier(ts *httptest.Server) *taskNotifier {
@@ -79,6 +98,7 @@ func newTestNotifier(ts *httptest.Server) *taskNotifier {
 		hc:        ts.Client(),
 		baseURL:   ts.URL,
 		projectID: "demo-proj",
+		pcName:    "mac-studio-herdr",
 		lg:        log.New(io.Discard, "", 0),
 	}
 }
@@ -86,7 +106,7 @@ func newTestNotifier(ts *httptest.Server) *taskNotifier {
 // working→idle への遷移だけが通知を送る（working 以外→idle・working のまま
 // 維持・unknown への遷移は送らない）。
 func TestTaskNotifierDetectsTransition(t *testing.T) {
-	ts, sendCount := fakeFCM(t, nil)
+	ts, sendCount, _ := fakeFCM(t, nil)
 	tn := newTestNotifier(ts)
 	store := &fakePushStore{tokens: []string{"tok-1"}}
 	ctx := context.Background()
@@ -133,7 +153,7 @@ func TestTaskNotifierDetectsTransition(t *testing.T) {
 // 消滅した pane_id は prev から掃除される（次に同じ pane_id が別セッション
 // として working で現れても「初回」扱い＝誤って旧状態を引きずらない）。
 func TestTaskNotifierPrunesGoneKeys(t *testing.T) {
-	ts, sendCount := fakeFCM(t, nil)
+	ts, sendCount, _ := fakeFCM(t, nil)
 	tn := newTestNotifier(ts)
 	store := &fakePushStore{tokens: []string{"tok-1"}}
 	ctx := context.Background()
@@ -152,7 +172,7 @@ func TestTaskNotifierPrunesGoneKeys(t *testing.T) {
 
 // 登録トークンが複数あれば全員に送る。
 func TestTaskNotifierSendsToAllTokens(t *testing.T) {
-	ts, sendCount := fakeFCM(t, nil)
+	ts, sendCount, _ := fakeFCM(t, nil)
 	tn := newTestNotifier(ts)
 	store := &fakePushStore{tokens: []string{"tok-1", "tok-2", "tok-3"}}
 	ctx := context.Background()
@@ -166,9 +186,47 @@ func TestTaskNotifierSendsToAllTokens(t *testing.T) {
 	}
 }
 
+// title は short_dir（プロジェクト名）優先、無ければ window_name、それも
+// 無ければ既定文言。body は「PC名 · 状態」、tag は「PC名:key」で
+// セッションを一意に区別する（"どのタスクが終わったか"が通知だけで分かる）。
+func TestTaskNotifierNotificationContent(t *testing.T) {
+	ts, _, calls := fakeFCM(t, nil)
+	tn := newTestNotifier(ts) // pcName="mac-studio-herdr"
+	store := &fakePushStore{tokens: []string{"tok-1"}}
+	ctx := context.Background()
+
+	tn.check(ctx, store, []map[string]any{sessDir("w1:pW", "working", "claude", "herdr-drover")})
+	tn.check(ctx, store, []map[string]any{sessDir("w1:pW", "idle", "claude", "herdr-drover")})
+
+	c := calls["tok-1"]
+	if c.title != "herdr-drover" {
+		t.Fatalf("title = %q, want short_dir 'herdr-drover'", c.title)
+	}
+	if c.body != "mac-studio-herdr · タスク完了" {
+		t.Fatalf("body = %q, want 'mac-studio-herdr · タスク完了'", c.body)
+	}
+	if c.tag != "mac-studio-herdr:w1:pW" {
+		t.Fatalf("tag = %q, want 'mac-studio-herdr:w1:pW'", c.tag)
+	}
+
+	// blocked は "確認待ち" ラベル。
+	tn.check(ctx, store, []map[string]any{sessDir("w1:pW", "working", "claude", "herdr-drover")})
+	tn.check(ctx, store, []map[string]any{sessDir("w1:pW", "blocked", "claude", "herdr-drover")})
+	if calls["tok-1"].body != "mac-studio-herdr · 確認待ち" {
+		t.Fatalf("blocked body = %q, want '...確認待ち'", calls["tok-1"].body)
+	}
+
+	// short_dir が無ければ window_name にフォールバック。
+	tn.check(ctx, store, []map[string]any{sess("w2:p1", "working", "glm52")})
+	tn.check(ctx, store, []map[string]any{sess("w2:p1", "idle", "glm52")})
+	if calls["tok-1"].title != "glm52" {
+		t.Fatalf("short_dir 無しでの title = %q, want window_name 'glm52'", calls["tok-1"].title)
+	}
+}
+
 // UNREGISTERED を返す token は DeletePushToken で自己修復する。
 func TestTaskNotifierDeletesUnregisteredToken(t *testing.T) {
-	ts, _ := fakeFCM(t, map[string]bool{"stale-tok": true})
+	ts, _, _ := fakeFCM(t, map[string]bool{"stale-tok": true})
 	tn := newTestNotifier(ts)
 	store := &fakePushStore{tokens: []string{"stale-tok", "ok-tok"}}
 	ctx := context.Background()

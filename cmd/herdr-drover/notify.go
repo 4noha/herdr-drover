@@ -50,7 +50,11 @@ type taskNotifier struct {
 	prev      map[string]string
 	hc        *http.Client // nil なら push 無効（SA 鍵が読めなかった等）
 	projectID string
-	lg        *log.Logger
+	// pcName はこの daemon の PC 識別子（cl.PCName・常に非空＝既定 cfg.PCID。
+	// clouds.go LoadClouds 参照）。複数 PC が同じ push token 一覧へ送る構成
+	// （オーナーの端末全体が対象）で「どの PC のタスクか」を通知に出すため。
+	pcName string
+	lg     *log.Logger
 	// baseURL は push.Send の FCM エンドポイント上書き（""=本番）。
 	// テストが httptest.Server の URL を挿すための seam（push.Send 自体の
 	// baseURL 引数と同じ設計）。
@@ -63,7 +67,7 @@ type taskNotifier struct {
 // ログには残す。CLAUDE.md「silent な変更をしない」に対応しつつ、push は
 // 任意機能なので daemon 起動自体は継続する）。
 func newTaskNotifier(ctx context.Context, cl Cloud, lg *log.Logger) *taskNotifier {
-	tn := &taskNotifier{prev: map[string]string{}, projectID: cl.Project, lg: lg}
+	tn := &taskNotifier{prev: map[string]string{}, projectID: cl.Project, pcName: cl.PCName, lg: lg}
 	if cl.SAKeyPath == "" {
 		lg.Printf("[push] SA 鍵未設定＝タスク完了 push 通知は無効")
 		return tn
@@ -105,7 +109,8 @@ func (tn *taskNotifier) check(ctx context.Context, st pushTokenStore, sessions [
 			continue // push 無効でも遷移追跡自体は続ける（有効化後すぐ効くように）
 		}
 		name, _ := s["window_name"].(string)
-		tn.notify(ctx, st, name, status)
+		dir, _ := s["short_dir"].(string)
+		tn.notify(ctx, st, key, name, dir, status)
 	}
 	for key := range tn.prev {
 		if !cur[key] {
@@ -115,8 +120,12 @@ func (tn *taskNotifier) check(ctx context.Context, st pushTokenStore, sessions [
 }
 
 // notify は登録済み全ブラウザへ 1 セッション分の完了通知を送る。
+// title は「どのタスクか」が一目でわかるようディレクトリ名（プロジェクト名）
+// を優先し、body に PC 名と状態を添える（オーナーは複数 PC を運用しうる＝
+// 通知だけで発生元が分かる必要がある）。tag は pcName+key で通知を区別し、
+// 同一セッションの連続通知だけ最新1件に集約する（SW/devices.js 参照）。
 // UNREGISTERED（失効 token）は DeletePushToken で自己修復する。
-func (tn *taskNotifier) notify(ctx context.Context, st pushTokenStore, name, status string) {
+func (tn *taskNotifier) notify(ctx context.Context, st pushTokenStore, key, name, dir, status string) {
 	toks, err := st.ListPushTokens(ctx)
 	if err != nil {
 		tn.lg.Printf("[push] ListPushTokens 失敗: %v", err)
@@ -125,16 +134,27 @@ func (tn *taskNotifier) notify(ctx context.Context, st pushTokenStore, name, sta
 	if len(toks) == 0 {
 		return
 	}
-	title := "タスク完了"
-	if status == "blocked" {
-		title = "確認待ち"
+	title := dir
+	if title == "" {
+		title = name
 	}
-	body := name
-	if body == "" {
-		body = "herdr-drover セッション"
+	if title == "" {
+		title = "herdr-drover セッション"
+	}
+	statusLabel := "タスク完了"
+	if status == "blocked" {
+		statusLabel = "確認待ち"
+	}
+	body := statusLabel
+	if tn.pcName != "" {
+		body = tn.pcName + " · " + statusLabel
+	}
+	tag := key
+	if tn.pcName != "" {
+		tag = tn.pcName + ":" + key
 	}
 	for _, tok := range toks {
-		invalid, serr := push.Send(ctx, tn.hc, tn.baseURL, tn.projectID, tok, title, body)
+		invalid, serr := push.Send(ctx, tn.hc, tn.baseURL, tn.projectID, tok, title, body, tag)
 		if serr != nil {
 			tn.lg.Printf("[push] send 失敗: %v", serr)
 		}
