@@ -699,3 +699,78 @@ func TestReconcileRemoteSetsPaneTitleToRemoteCwd(t *testing.T) {
 		t.Fatalf("terminal_title = %q, want %q（cwd がリモートの実パスで表示されていない）", title, want)
 	}
 }
+
+// paneTitle は pane_id の現在の terminal_title を pane.list から読む。
+func paneTitle(t *testing.T, api *herdrapi.Client, pc, sid string) (string, bool) {
+	t.Helper()
+	panes, err := api.PaneList()
+	if err != nil {
+		t.Fatalf("pane.list: %v", err)
+	}
+	for i := range panes {
+		p := &panes[i]
+		if p.Tokens[injTokPC] == pc && p.Tokens[injTokSID] == sid {
+			return p.Title, true
+		}
+	}
+	return "", false
+}
+
+// TestReconcileRemoteRestoresClearedTitle は「herdr 再起動で terminal_title が
+// 消えても、次の reconcile 周で自動的に再表明される」ことを検証する（実運用
+// フィードバック「インジェクトされるときにタイトルなどが落ちる」への対処。
+// herdr 0.7.4 実測: pane.report_metadata の title は token と同様にサーバ
+// 再起動で失われる。token は既存の self-heal（index 救済）で貼り直るが、
+// title は別経路で貼り直す必要があった）。clear_title で実際に title を
+// 消してから reconcile を再実行し、期待 title が復元されることを確認する。
+func TestReconcileRemoteRestoresClearedTitle(t *testing.T) {
+	sock := startHerdrForTest(t)
+	api := herdrapi.New(sock)
+	lg := log.New(io.Discard, "", 0)
+	stub := reconcileStub(t)
+	ctx := context.Background()
+
+	fr := &fakeRemote{
+		pcs: []string{"remoteA"},
+		sessions: map[string][]map[string]any{
+			"remoteA": {fakeSessWithCwd("w9:pU", "projU", "/Users/remote/works/projU")},
+		},
+	}
+	idx := newTestIndex(t)
+	reconcileRemote(ctx, api, fr, Cloud{PCName: "self"}, stub, idx, lg)
+	waitCond(t, 15*time.Second, "注入 pane 出現", func() bool { return len(injectedPanes(t, api)) == 1 })
+
+	want := "↗ remoteA:/Users/remote/works/projU"
+	title, ok := paneTitle(t, api, "remoteA", "w9:pU")
+	if !ok || title != want {
+		t.Fatalf("初回 title = %q ok=%v, want %q", title, ok, want)
+	}
+
+	inj := injectedPanes(t, api)
+	var pid string
+	for id := range inj {
+		pid = id
+	}
+	if pid == "" {
+		t.Fatal("注入 pane_id が見つからない")
+	}
+
+	// herdr サーバ再起動相当（title 消失）を clear_title で模す。
+	if _, err := api.Call("pane.report_metadata", struct {
+		PaneID     string `json:"pane_id"`
+		Source     string `json:"source"`
+		ClearTitle bool   `json:"clear_title"`
+	}{pid, injSource, true}); err != nil {
+		t.Fatalf("pane.report_metadata clear_title: %v", err)
+	}
+	if title, ok := paneTitle(t, api, "remoteA", "w9:pU"); !ok || title != "" {
+		t.Fatalf("clear_title 後の title = %q ok=%v, want \"\"（消せていない＝この後の検証が無意味）", title, ok)
+	}
+
+	// 2 周目: title 消失を検知して再表明されるはず。
+	reconcileRemote(ctx, api, fr, Cloud{PCName: "self"}, stub, idx, lg)
+	waitCond(t, 15*time.Second, "title が再表明される", func() bool {
+		title, ok := paneTitle(t, api, "remoteA", "w9:pU")
+		return ok && title == want
+	})
+}

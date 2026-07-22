@@ -86,7 +86,9 @@ func injPaneTitle(pc, cwd string) string {
 	return "↗ " + pc + ":" + cwd
 }
 
-type injMeta struct{ pc, sid, dir, cwd, status, name string }
+// title は cur 側のみ使う（pane.list から読んだ現在の terminal_title。desired
+// 側は常に空＝比較は cur.title と injPaneTitle(desired.pc, desired.cwd) で行う）。
+type injMeta struct{ pc, sid, dir, cwd, status, name, title string }
 
 // injAPIState は producer が同期したリモートの agent_status（herdr の**表示値**＝
 // done/idle/working/blocked/unknown の 5 値）を、pane.report_agent の --state 語彙
@@ -252,12 +254,12 @@ func reconcileRemote(ctx context.Context, api *herdrapi.Client, st remoteSource,
 	//       （drover 単独再起動 / herdr 単独再起動どちらでも生き延びる）
 	// index に居ない token 無し pane は cur に入れない（構造 root pane・ユーザー任意 pane を
 	// 誤って掃除しないため）。
-	cur := map[string]injMeta{} // pane_id -> (pc,sid)
+	cur := map[string]injMeta{} // pane_id -> (pc,sid,title)
 	for i := range panes {
 		p := &panes[i]
 		pc, sid := p.Tokens[injTokPC], p.Tokens[injTokSID]
 		if pc != "" && sid != "" {
-			cur[p.PaneID] = injMeta{pc: pc, sid: sid}
+			cur[p.PaneID] = injMeta{pc: pc, sid: sid, title: p.Title}
 			// index 側にも取り込む（AdoptToken は既に一致していれば no-op＝persist 節約）。
 			if idx != nil {
 				_ = idx.AdoptToken(p.PaneID, pc, sid)
@@ -268,8 +270,12 @@ func reconcileRemote(ctx context.Context, api *herdrapi.Client, st remoteSource,
 			continue
 		}
 		if e, ok := idx.Get(p.PaneID); ok && !e.Pending {
-			// (b) token 消失の self-heal: cur に載せてから token 再表明。
-			cur[p.PaneID] = injMeta{pc: e.PC, sid: e.SID}
+			// (b) token 消失の self-heal: cur に載せてから token 再表明。herdr
+			// 再起動で report_metadata は title も token 同様に消える（実測）ため
+			// 両方を同時に貼り直す（title は desired 側の cwd が無いと復元できない
+			// ので、この時点では pc のみで再構築＝下の title 突合せループが desired
+			// マッチ後に cwd 込みで最終修復する）。
+			cur[p.PaneID] = injMeta{pc: e.PC, sid: e.SID, title: p.Title}
 			if merr := api.PaneReportMetadata(p.PaneID, injSource, herdrapi.ReportMetadata{
 				Tokens: map[string]string{injTokPC: e.PC, injTokSID: e.SID},
 			}); merr != nil {
@@ -346,8 +352,12 @@ func reconcileRemote(ctx context.Context, api *herdrapi.Client, st remoteSource,
 	defaultWSID := activeWSID // デフォルト着地先（inject_placement にマッチしない sd 用）
 	for mk, d := range desired {
 		var ids []string
+		var ids0Title string // ids[0] の現在 title（cur から delete する前に保存）
 		for pid, m := range cur {
 			if injMarkerKey(m.pc, m.sid) == mk {
+				if len(ids) == 0 {
+					ids0Title = m.title
+				}
 				ids = append(ids, pid)
 				delete(cur, pid)
 			}
@@ -438,6 +448,17 @@ func reconcileRemote(ctx context.Context, api *herdrapi.Client, st remoteSource,
 			}
 			// 既存の注入 pane にもリモートの現 agent_status を転記（idle↔working 等の追随）。
 			mirrorInjectedAgent(api, ids[0], d.name, d.status, reported, lg)
+			// herdr 再起動で report_metadata の title は token 同様に消える（実測。
+			// 上の (b) self-heal コメント参照）。desired 側の cwd がここで手に入るので、
+			// 期待 title と現在値が食い違う周だけ再表明する（毎周不要な write を避ける・
+			// 実運用フィードバック「インジェクト時に title が落ちる」への対処）。
+			if want := injPaneTitle(d.pc, d.cwd); ids0Title != want {
+				if terr := api.PaneReportMetadata(ids[0], injSource, herdrapi.ReportMetadata{
+					Title: want,
+				}); terr != nil {
+					lg.Printf("[reconcile] title 再表明失敗 %s（次周に再試行）: %v", ids[0], terr)
+				}
+			}
 		}
 	}
 	// desired に無い注入 pane = リモートで消えたセッション → close + index Forget。
