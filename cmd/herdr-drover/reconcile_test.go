@@ -57,6 +57,16 @@ func fakeSessWithCwd(sid, dir, cwd string) map[string]any {
 	return map[string]any{"key": sid, "session_id": sid, "short_dir": dir, "cwd": cwd}
 }
 
+// fakeSessWithIPs は cwd + local_ips 付きの session 行。local_ips は []any に
+// する（Firestore 往復後の実際の型＝reconcile.go の型アサーション経路を模す）。
+func fakeSessWithIPs(sid, dir, cwd string, ips ...string) map[string]any {
+	anyIPs := make([]any, len(ips))
+	for i, ip := range ips {
+		anyIPs[i] = ip
+	}
+	return map[string]any{"key": sid, "session_id": sid, "short_dir": dir, "cwd": cwd, "local_ips": anyIPs}
+}
+
 // reconcileStub は注入 pane が実行する無害な stub（argv 無視で生存＝pane が
 // 消えないので出現/消滅を安定に観測できる。実 attach の接続は別テスト）。
 func reconcileStub(t *testing.T) string {
@@ -773,4 +783,37 @@ func TestReconcileRemoteRestoresClearedTitle(t *testing.T) {
 		title, ok := paneTitle(t, api, "remoteA", "w9:pU")
 		return ok && title == want
 	})
+}
+
+// TestReconcileRemoteTitleIncludesLocalIPs は「実運用要望：SSH で機密情報を
+// 送る際に宛先確認したい」への対処＝リモート session の local_ips（1 PC が
+// 複数 IP を持つ場合を含む）が terminal_title に列挙されることを検証する。
+// local_ips 無し（DROVER_SHARE_LOCAL_IPS opt-out 相当）の PC では従来通り
+// IP 部分が出ないことも併せて確認する。
+func TestReconcileRemoteTitleIncludesLocalIPs(t *testing.T) {
+	sock := startHerdrForTest(t)
+	api := herdrapi.New(sock)
+	lg := log.New(io.Discard, "", 0)
+	stub := reconcileStub(t)
+	ctx := context.Background()
+
+	fr := &fakeRemote{
+		pcs: []string{"remoteA", "remoteB"},
+		sessions: map[string][]map[string]any{
+			"remoteA": {fakeSessWithIPs("w9:pV", "projV", "/Users/remote/works/projV", "10.0.0.5", "192.168.1.10")},
+			"remoteB": {fakeSessWithCwd("w9:pW", "projW", "/Users/remote/works/projW")}, // IP opt-out 相当
+		},
+	}
+	reconcileRemote(ctx, api, fr, Cloud{PCName: "self"}, stub, newTestIndex(t), lg)
+	waitCond(t, 15*time.Second, "両 PC の注入 pane 出現", func() bool { return len(injectedPanes(t, api)) == 2 })
+
+	wantV := "↗ remoteA:/Users/remote/works/projV [10.0.0.5, 192.168.1.10]"
+	if title, ok := paneTitle(t, api, "remoteA", "w9:pV"); !ok || title != wantV {
+		t.Fatalf("複数 IP 付き title = %q ok=%v, want %q", title, ok, wantV)
+	}
+
+	wantW := "↗ remoteB:/Users/remote/works/projW"
+	if title, ok := paneTitle(t, api, "remoteB", "w9:pW"); !ok || title != wantW {
+		t.Fatalf("IP 無し title = %q ok=%v, want %q（opt-out PC に IP 部分が出てはならない）", title, ok, wantW)
+	}
 }

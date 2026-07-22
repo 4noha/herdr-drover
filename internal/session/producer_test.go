@@ -650,7 +650,7 @@ func TestBuildSessions(t *testing.T) {
 	agents := []herdrapi.AgentInfo{
 		{PaneID: "w1:p2", Name: "claude", AgentStatus: "working"},
 	}
-	ss := BuildSessions(panes, agents, nil)
+	ss := BuildSessions(panes, agents, nil, nil)
 	if len(ss) != 3 {
 		t.Fatalf("3 sessions のはず: %v", ss)
 	}
@@ -688,6 +688,7 @@ func TestBuildSessions(t *testing.T) {
 //     Pending 予約するので producer は isInjected 経由で除外できる
 //   - herdr 再起動で token 消失 → agent 起動時 self-heal で token 再表明＋
 //     index にも Live entry が残るので isInjected で除外できる
+//
 // どちらの場面でも「token 無しの注入 pane」は index に居るので push されない。
 func TestBuildSessionsExcludesInjectedPanes(t *testing.T) {
 	// 注入 pane 判定関数（injectindex.Index.IsInjected の fake）。
@@ -717,7 +718,7 @@ func TestBuildSessionsExcludesInjectedPanes(t *testing.T) {
 			AgentStatus: "idle",
 		},
 	}
-	ss := BuildSessions(panes, nil, isInjected)
+	ss := BuildSessions(panes, nil, isInjected, nil)
 	if len(ss) != 2 {
 		t.Fatalf("除外後 2 session のはず（自 PC の本物 2 つ・注入 pane 2 種を除外）: got=%d %v", len(ss), ss)
 	}
@@ -742,7 +743,7 @@ func TestBuildSessionsWithoutIsInjectedFalltoTokenOnly(t *testing.T) {
 		{PaneID: "w9:p1", AgentStatus: "working",
 			Tokens: map[string]string{herdrapi.InjTokenPC: "other-pc", herdrapi.InjTokenSID: "w3:p2"}},
 	}
-	ss := BuildSessions(panes, nil, nil) // isInjected=nil
+	ss := BuildSessions(panes, nil, nil, nil) // isInjected=nil
 	if len(ss) != 1 || ss[0]["key"] != "w1:p1" {
 		t.Fatalf("nil isInjected でも token 判定は生きるべき: %v", ss)
 	}

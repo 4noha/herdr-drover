@@ -33,6 +33,13 @@ type Config struct {
 	// MirrorAgents は DROVER_MIRROR_AGENTS（リモート session の agent_status を注入
 	// pane(↗窓) に転記して herdr に agent 検出させるか）。既定 false=opt-in。
 	MirrorAgents bool
+	// ShareLocalIPs は DROVER_SHARE_LOCAL_IPS（自 PC の全ローカル IP アドレスを
+	// session データに載せて他 PC の注入 pane title へ表示させるか）。既定
+	// true（herdr-drover は個人利用前提＝SSH 到達先確認等の実利益が大きく、
+	// opt-out できれば十分という判断。slave の注入 pane も master の他 PC には
+	// 露出せず owner 本人のクラウドアカウント内でのみ見えるため role 別の既定
+	// 差は無い）。
+	ShareLocalIPs bool
 }
 
 // resolveConfig は Config を解決する。優先順位はキー単位で
@@ -57,7 +64,8 @@ func resolveConfig() (Config, error) {
 	// エラーとして返すが解決は続行する（沈黙で無視すると enroll 済のはずが
 	// 未設定で動く事故になる。契約: 判明分は埋めて返す）。
 	var fileErr error
-	var fcMirror *bool // mirror_agents の file 値（env 未設定なら採用）
+	var fcMirror *bool  // mirror_agents の file 値（env 未設定なら採用）
+	var fcShareIP *bool // share_local_ips の file 値（env 未設定なら採用）
 	if path, perr := configFilePath(); perr == nil {
 		fc, ferr := readFileConfig(path)
 		if ferr != nil {
@@ -79,6 +87,7 @@ func resolveConfig() (Config, error) {
 			cfg.Role = fc.Role
 		}
 		fcMirror = fc.MirrorAgents
+		fcShareIP = fc.ShareLocalIPs
 	}
 	if cfg.PCID == "" {
 		host, err := os.Hostname()
@@ -127,6 +136,22 @@ func resolveConfig() (Config, error) {
 		}
 		cfg.MirrorAgents = b
 	}
+	// DROVER_SHARE_LOCAL_IPS: 自 PC の全ローカル IP アドレスを session データに
+	// 載せ、注入 pane(↗窓) の terminal_title に表示させるか（SSH 到達先確認等の
+	// 実利益＝実運用要望）。既定 true（Config 冒頭コメント参照。slave の注入
+	// pane も owner 本人のクラウドアカウント内でのみ見え他人には露出しないため
+	// role 別の既定差は付けない）。優先順位 env > file(share_local_ips) > 既定。
+	cfg.ShareLocalIPs = true
+	if fcShareIP != nil {
+		cfg.ShareLocalIPs = *fcShareIP
+	}
+	if v := os.Getenv("DROVER_SHARE_LOCAL_IPS"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return cfg, fmt.Errorf("DROVER_SHARE_LOCAL_IPS が不正（true/false/1/0 等）: %q: %w", v, err)
+		}
+		cfg.ShareLocalIPs = b
+	}
 	return cfg, fileErr
 }
 
@@ -149,6 +174,8 @@ type fileConfig struct {
 	Role                         string `json:"role,omitempty"` // "slave"=共用 PC モード（enroll --slave が書く）
 	// MirrorAgents はポインタ（未設定=nil で env>file>既定の合成に乗せる）。
 	MirrorAgents *bool `json:"mirror_agents,omitempty"`
+	// ShareLocalIPs も同じくポインタ（未設定=nil で env>file>既定の合成）。
+	ShareLocalIPs *bool `json:"share_local_ips,omitempty"`
 }
 
 // readFileConfig は設定ファイルを読む。不在はゼロ値＋nil（enroll 前の

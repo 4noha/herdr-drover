@@ -81,6 +81,14 @@ type Producer struct {
 	// Producer の契約は不変。呼び出しは PushStatus の**後**（push 成功可否に
 	// 関わらず新 sessions を渡す＝通知は Firestore 反映と独立でよい）。
 	onSessions func(sessions []map[string]any)
+
+	// localIPs は「自 PC の全ローカル IP アドレス」を返す関数（nil 可＝
+	// 未注入なら session に local_ips を載せない。DROVER_SHARE_LOCAL_IPS
+	// opt-out 時はここに nil を注入する＝cmd 側の責務。session パッケージ
+	// 自体はポリシー判定をしない）。呼ぶたびに再取得する（インターフェース
+	// 変化＝Wi-Fi 切替等を都度反映。ローカル syscall のみで安価）。
+	localIPs func() []string
+
 	// seeded は prev を Firestore 実態（OwnSessionKeys）で初期化済みか。
 	// 初回 tick で seed し、失敗したら tick ごと skip して次回再試行する
 	// （seed 無しで進むと agent 停止中に終了した pane の doc が永久残留）。
@@ -107,6 +115,15 @@ func (p *Producer) WithIsInjected(fn func(paneID string) bool) *Producer {
 // method chain 可）。
 func (p *Producer) WithOnSessions(fn func(sessions []map[string]any)) *Producer {
 	p.onSessions = fn
+	return p
+}
+
+// WithLocalIPs は「自 PC の全ローカル IP アドレス」取得関数を注入する
+// （返り値は self＝method chain 可。fn==nil は無注入と同義＝session に
+// local_ips を載せない）。cmd 側が DROVER_SHARE_LOCAL_IPS の opt-out 判定
+// をした上で呼ぶかどうかを決める（session パッケージはポリシーを持たない）。
+func (p *Producer) WithLocalIPs(fn func() []string) *Producer {
+	p.localIPs = fn
 	return p
 }
 
@@ -157,7 +174,11 @@ func isActive(agentStatus string) bool {
 // nil 可（テスト・過渡期のフォールバック）。producer は token OR isInjected で
 // 除外する（token 権威化の 2 穴 (a) create race / (b) herdr 再起動での token
 // 消失、を index の Pending 予約と起動時 self-heal で塞ぐ）。
-func BuildSessions(panes []herdrapi.PaneInfo, agents []herdrapi.AgentInfo, isInjected func(paneID string) bool) []map[string]any {
+// localIPs は自 PC の全ローカル IP アドレス（PC 単位の値・実運用要望「SSH
+// 到達先確認用に各 tab へ IP を出したい」への対処）。nil/空なら session に
+// local_ips キー自体を載せない（opt-out・未設定 PC は追加フィールド無しの
+// 従来スキーマのまま＝後方互換）。
+func BuildSessions(panes []herdrapi.PaneInfo, agents []herdrapi.AgentInfo, isInjected func(paneID string) bool, localIPs []string) []map[string]any {
 	// pane_id → agent の対応（agent の name/status を優先採用するため）。
 	agentByPane := make(map[string]herdrapi.AgentInfo, len(agents))
 	for _, a := range agents {
@@ -196,7 +217,7 @@ func BuildSessions(panes []herdrapi.PaneInfo, agents []herdrapi.AgentInfo, isInj
 		if name == "" {
 			name = p.PaneID
 		}
-		out = append(out, map[string]any{
+		sess := map[string]any{
 			"key":          p.PaneID,
 			"session_id":   p.PaneID,
 			"cwd":          p.Cwd,
@@ -204,7 +225,15 @@ func BuildSessions(panes []herdrapi.PaneInfo, agents []herdrapi.AgentInfo, isInj
 			"window_name":  name,
 			"is_active":    isActive(status),
 			"agent_status": status,
-		})
+		}
+		if len(localIPs) > 0 {
+			ips := make([]any, len(localIPs))
+			for i, ip := range localIPs {
+				ips[i] = ip
+			}
+			sess["local_ips"] = ips
+		}
+		out = append(out, sess)
 	}
 	// 決定的順序（テスト・ログ比較のため。Firestore 書込は doc 単位なので
 	// 意味論には影響しない）。
@@ -254,7 +283,11 @@ func (p *Producer) Tick(ctx context.Context) error {
 		p.seeded = true
 	}
 
-	ss := BuildSessions(panes, agents, p.isInjected)
+	var ips []string
+	if p.localIPs != nil {
+		ips = p.localIPs()
+	}
+	ss := BuildSessions(panes, agents, p.isInjected, ips)
 	cur := make(map[string]bool, len(ss))
 	for _, s := range ss {
 		cur[s["key"].(string)] = true

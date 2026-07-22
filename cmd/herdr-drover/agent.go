@@ -308,6 +308,13 @@ func runOneCloud(ctx context.Context, cfg Config, cl Cloud, primary bool, hcli *
 	// 注入 pane 判定は injectindex を権威にする（v0.5.x〜）。idx.IsInjected は
 	// Pending / Live のどちらでも true を返し、token の race 窓と再起動消失を塞ぐ。
 	prod := session.NewProducer(hcli, st).WithIsInjected(idx.IsInjected)
+	// DROVER_SHARE_LOCAL_IPS（既定 true・config.go 参照）: 自 PC の全ローカル IP を
+	// session に載せ、他 PC の注入 pane title で SSH 到達先確認等に使えるようにする。
+	// opt-out 時は WithLocalIPs 自体を呼ばない（producer は localIPs==nil のまま＝
+	// session に local_ips キーが一切乗らない・後方互換）。
+	if cfg.ShareLocalIPs {
+		prod = prod.WithLocalIPs(localIPs)
+	}
 
 	// タスク完了 push 通知（Web Push・任意機能）。scConcrete が非 nil＝master
 	// のみ配線（slave は SA レスで Firestore の pushtokens/FCM 認証に触れない

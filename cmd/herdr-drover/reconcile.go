@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/4noha/drover-cloud/state"
@@ -79,16 +80,29 @@ func injTabName(dir string) string {
 // フィールドの意味を汚さない・鉄則③のヒューリスティック分類回避と同じ
 // 精神＝表示は実データそのまま、推測で埋めない）。cwd が空（旧 session
 // データや取得失敗）なら pc のみ表示。
-func injPaneTitle(pc, cwd string) string {
-	if cwd == "" {
-		return "↗ " + pc
+//
+// ips はリモート PC の全ローカル IP アドレス（実運用要望「SSH で機密情報を
+// 送る時に宛先確認したい」への対処。1 台が複数 IP を持ちうる＝全部並べる）。
+// 空なら省略（DROVER_SHARE_LOCAL_IPS opt-out の PC・旧 session データ）。
+func injPaneTitle(pc, cwd string, ips []string) string {
+	t := "↗ " + pc
+	if cwd != "" {
+		t += ":" + cwd
 	}
-	return "↗ " + pc + ":" + cwd
+	if len(ips) > 0 {
+		t += " [" + strings.Join(ips, ", ") + "]"
+	}
+	return t
 }
 
 // title は cur 側のみ使う（pane.list から読んだ現在の terminal_title。desired
-// 側は常に空＝比較は cur.title と injPaneTitle(desired.pc, desired.cwd) で行う）。
-type injMeta struct{ pc, sid, dir, cwd, status, name, title string }
+// 側は常に空＝比較は cur.title と injPaneTitle(desired.pc, desired.cwd, desired.ips)
+// で行う）。ips は desired 側のみ使う（リモート session の local_ips。DROVER_
+// SHARE_LOCAL_IPS opt-out の PC からは常に空）。
+type injMeta struct {
+	pc, sid, dir, cwd, status, name, title string
+	ips                                    []string
+}
 
 // injAPIState は producer が同期したリモートの agent_status（herdr の**表示値**＝
 // done/idle/working/blocked/unknown の 5 値）を、pane.report_agent の --state 語彙
@@ -314,7 +328,18 @@ func reconcileRemote(ctx context.Context, api *herdrapi.Client, st remoteSource,
 			// herdr に agent 検出させるのに使う（reconcile 側で分類はしない）。
 			status, _ := s["agent_status"].(string)
 			name, _ := s["window_name"].(string)
-			desired[injMarkerKey(pc, sid)] = injMeta{pc: pc, sid: sid, dir: dir, cwd: cwd, status: status, name: name}
+			// local_ips は Firestore 往復で []any（各要素は string）になる
+			// （internal/session.BuildSessions が []any として書く）。型が違う
+			// 要素は捨てる（推測しない・壊れた値は無視して落ちない）。
+			var ips []string
+			if raw, ok := s["local_ips"].([]any); ok {
+				for _, v := range raw {
+					if ip, ok := v.(string); ok && ip != "" {
+						ips = append(ips, ip)
+					}
+				}
+			}
+			desired[injMarkerKey(pc, sid)] = injMeta{pc: pc, sid: sid, dir: dir, cwd: cwd, status: status, name: name, ips: ips}
 		}
 	}
 
@@ -410,7 +435,7 @@ func reconcileRemote(ctx context.Context, api *herdrapi.Client, st remoteSource,
 				}
 			}
 			if merr := api.PaneReportMetadata(pid, injSource, herdrapi.ReportMetadata{
-				Title:  injPaneTitle(d.pc, d.cwd),
+				Title:  injPaneTitle(d.pc, d.cwd, d.ips),
 				Tokens: map[string]string{injTokPC: d.pc, injTokSID: d.sid},
 			}); merr != nil {
 				// token 付与失敗＝orphan 化するので pane を close＋index からも Abandon。
@@ -452,7 +477,7 @@ func reconcileRemote(ctx context.Context, api *herdrapi.Client, st remoteSource,
 			// 上の (b) self-heal コメント参照）。desired 側の cwd がここで手に入るので、
 			// 期待 title と現在値が食い違う周だけ再表明する（毎周不要な write を避ける・
 			// 実運用フィードバック「インジェクト時に title が落ちる」への対処）。
-			if want := injPaneTitle(d.pc, d.cwd); ids0Title != want {
+			if want := injPaneTitle(d.pc, d.cwd, d.ips); ids0Title != want {
 				if terr := api.PaneReportMetadata(ids[0], injSource, herdrapi.ReportMetadata{
 					Title: want,
 				}); terr != nil {
