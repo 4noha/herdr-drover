@@ -43,6 +43,10 @@ import (
 // 同値＝relay grant 検証窓を対称に保つ）。
 const injGrantTTL = 60 * time.Second
 
+// DefaultIdle は attachOnce の quiescence 読取りタイムアウト（internal/bridge
+// の DefaultIdle=30s と同値。無通信 30s で「切断」とみなし backoff 再接続へ渡す）。
+const DefaultIdle = 30 * time.Second
+
 // connHolder は「現在の接続」を保持し、常駐 stdin reader が接続切替を跨いで現接続
 // へ書けるようにする（reader を cycle ごとに作らない＝キーストローク奪い合い防止）。
 // 未接続(nil)中の入力は破棄する（次の接続確立後の入力から届く）。
@@ -200,6 +204,15 @@ func attachOnce(ctx context.Context, st *state.Client, relayURL, injSid, remoteP
 
 	dctx, dcancel := context.WithCancel(ctx)
 	defer dcancel()
+	// ⚠ relayclient.DialViewerFrom へ渡す ctx は dial だけでなく websocket.NetConn
+	// の生存期間全体を縛る（coder/websocket の仕様＝ctx cancel で以後の
+	// read/write も死ぬ）。dial 局面だけを打ち切るタイムアウト付き ctx を渡すと
+	// dial 成功後も期限切れで正常な接続まで切ってしまう回帰になるため、
+	// ここは dctx（attachOnce 生存期間そのもの）をそのまま渡す。dial 自体が
+	// ネットワーク不通で長時間ブロックする問題は、下の quiescence 読取り
+	// タイムアウトとは別に残るが、pane close による手動 kick（今回の実運用対処）
+	// で回復できる範囲。
+	//
 	// source PC を spc で渡す＝relay の KeyFor が slave source PC の時だけ
 	// slaveSessionKey(spc,injSid) で viewer を Accept し、slave の #inj source と
 	// ペアする（master source PC では spc 無視＝従来と同一 wire）。
@@ -244,12 +257,41 @@ func attachOnce(ctx context.Context, st *state.Client, relayURL, injSid, remoteP
 	// 表示: conn（remote 画面フレーム）→ stdout（pane PTY）。conn 切断で戻る＝
 	// この attachOnce が終了し backoff ループが再接続する。
 	go func() { <-dctx.Done(); conn.Close() }()
+
+	pumpFrames(conn, out, DefaultIdle)
+}
+
+// deadlineConn は SetReadDeadline を持つ conn（net.Conn のうち pumpFrames が
+// 使う最小 seam。websocket.NetConn の実装を直接 import せず fake conn で
+// テストできるようにする）。
+type deadlineConn interface {
+	io.Reader
+	SetReadDeadline(t time.Time) error
+}
+
+// pumpFrames は conn（remote 画面フレーム）→ out（pane PTY）を転送し続ける。
+// quiescence 読取り監視（internal/bridge.Bridge の quiescence と同じ意味論の
+// viewer 側版）: ネットワーク切断（Wi-Fi 切替・VPN 再接続等）が起きると
+// conn.Read は TCP の OS 既定タイムアウト（実測 数十分オーダー）までブロック
+// し続け、上位の backoff ループへ一切戻らない（実障害で確認済み＝移動で
+// ネットワークが切れた後、手動で pane を close するまで自動復旧しなかった）。
+// websocket.NetConn は SetReadDeadline に対応する（ブロック中の Read も
+// deadline 到達で解ける＝doc.go 保証）ため、フレーム受信ごとに deadline を
+// idle 先へ延ばし、無通信 idle 超過で Read がタイムアウトしたら戻る＝
+// cmdAttach の backoff ループが再接続を試みる。idle<=0 は監視無効（テスト用）。
+func pumpFrames(conn deadlineConn, out io.Writer, idle time.Duration) {
+	if idle > 0 {
+		_ = conn.SetReadDeadline(time.Now().Add(idle))
+	}
 	buf := make([]byte, 32*1024)
 	for {
 		n, rerr := conn.Read(buf)
 		if n > 0 {
 			if _, werr := out.Write(buf[:n]); werr != nil {
 				return
+			}
+			if idle > 0 {
+				_ = conn.SetReadDeadline(time.Now().Add(idle))
 			}
 		}
 		if rerr != nil {
