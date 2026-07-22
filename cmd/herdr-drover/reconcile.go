@@ -435,10 +435,30 @@ func reconcileRemote(ctx context.Context, api *herdrapi.Client, st remoteSource,
 	// 再起動で token を失った pane は上の cur 救済で index から復元して token 再表明する。
 }
 
+// remoteInjectBackstopPoll は push（WatchSessions）が死んだままでも reconcile が
+// 止まらないための周期 backstop（DESIGN: producer 側 defaultTick の「events
+// nudge＋周期 poll backstop」と同じ思想の注入側版）。実障害で確認: Firestore の
+// gRPC ストリーム（Snapshots）はネットワーク切断（Wi-Fi 切替・VPN 再接続等）後に
+// エラーを返さず無期限ブロックすることがあり、その場合 WatchSessions の
+// keepSubscribed 再購読ループそのものが動かなくなる＝kick が一切来ず
+// reconcileRemote が完全停止する（手動 kickstart まで自動復旧しなかった）。
+// Firestore 読み取りが発生するため producer の 5s より大きく取り、
+// near-$0 設計を大きく損なわない値にする。
+const remoteInjectBackstopPoll = 2 * time.Minute
+
+// remoteInjectTimeout は reconcileRemote 1 周（PaneList/workspace.list/
+// DroverPCs/ListSessions 一式）に許す上限。同じ実障害（Firestore gRPC 呼び出しの
+// 無期限ブロック）が reconcileRemote 内で起きても、この 1 周だけ abort して
+// メインループ（trigger 待ち）へ確実に戻すための保険（remoteInjectBackstopPoll
+// の kick は「trigger に積む」だけで、reconcileRemote 自体が固まっていれば
+// 積まれた kick は消費されず無意味＝この timeout が実質の回復手段）。
+const remoteInjectTimeout = 20 * time.Second
+
 // runRemoteInject は他 PC のセッションをローカル herdr へ注入し続ける（push 駆動:
-// 起動時 1 回＋WatchSessions 変更のたび reconcile。5s ポーリングしない）。ctx 終了で
-// 戻る。**primary クラウドのみ**が呼ぶ（複数クラウドが同一 herdr へ同 pane を注入する
-// 二重窓・競合を構造的に防ぐ＝runOneCloud の primary 分岐から起動）。
+// 起動時 1 回＋WatchSessions 変更のたび reconcile＋remoteInjectBackstopPoll 周期の
+// backstop）。ctx 終了で戻る。**primary クラウドのみ**が呼ぶ（複数クラウドが同一
+// herdr へ同 pane を注入する二重窓・競合を構造的に防ぐ＝runOneCloud の primary
+// 分岐から起動）。
 func runRemoteInject(ctx context.Context, api *herdrapi.Client, st *state.Client,
 	cl Cloud, idx *injectindex.Index, lg *log.Logger, mirrorAgents bool) {
 
@@ -472,6 +492,19 @@ func runRemoteInject(ctx context.Context, api *herdrapi.Client, st *state.Client
 		}
 	}()
 
+	go func() {
+		t := time.NewTicker(remoteInjectBackstopPoll)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				kick()
+			}
+		}
+	}()
+
 	// reported は注入 pane の agent 転記（pane.report_agent）の release 追跡用に
 	// reconcile 間で持ち回る（paneID→最後に report した agent label）。mirrorAgents が
 	// false（既定・opt-in）なら nil のまま渡す＝reconcile は転記を一切しない。
@@ -491,7 +524,15 @@ func runRemoteInject(ctx context.Context, api *herdrapi.Client, st *state.Client
 			case <-ctx.Done():
 				return
 			}
-			reconcileRemote(ctx, api, st, cl, selfExe, idx, lg, reported)
+			// ⚠ reconcileRemote へ渡す ctx は 1 周のタイムアウトを持たせる（実障害で
+			// 確認: DroverPCs/ListSessions の Firestore 呼び出しがネットワーク切断で
+			// 応答なく無期限ブロックし、このループ自身が停止した＝上の
+			// remoteInjectBackstopPoll の kick も trigger に積まれるだけで消費されず
+			// 効かない。1 周のタイムアウトで確実にループへ戻す）。ctx（親）が先に
+			// Done なら Done を優先。
+			rctx, rcancel := context.WithTimeout(ctx, remoteInjectTimeout)
+			reconcileRemote(rctx, api, st, cl, selfExe, idx, lg, reported)
+			rcancel()
 		}
 	}
 }

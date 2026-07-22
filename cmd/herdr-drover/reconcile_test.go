@@ -604,3 +604,48 @@ func TestSelfHealDropsStaleIndexEntry(t *testing.T) {
 		t.Fatalf("stale entry が index に残っている")
 	}
 }
+
+// blockingRemote は DroverPCs が ctx.Done() まで応答なくブロックする fake（実障害
+// の再現: Firestore gRPC 呼び出しがネットワーク切断で無期限ブロックし、
+// reconcileRemote 自身が停止した不具合の回帰テスト）。
+type blockingRemote struct{}
+
+func (blockingRemote) DroverPCs(ctx context.Context) ([]string, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (blockingRemote) ListSessions(ctx context.Context, pc string) ([]map[string]any, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// TestReconcileRemoteReturnsOnContextTimeout は「1 周に上限タイムアウト付き ctx を
+// 渡せば、下流の Firestore 呼び出しが無期限ブロックしても reconcileRemote が
+// 確実に戻る（呼び出し元のメインループへ制御が戻る）」ことを検証する。
+// runRemoteInject が reconcileRemote へ remoteInjectTimeout 付きの ctx を渡す
+// 変更の根拠＝この ctx タイムアウト伝播が無いと、DroverPCs が永久ブロックした周は
+// reconcileRemote 自体が never-return し、以後どんな kick（WatchSessions 再接続や
+// backstop ticker）も trigger に積まれるだけで消費されない実障害を再現する。
+func TestReconcileRemoteReturnsOnContextTimeout(t *testing.T) {
+	sock := startHerdrForTest(t)
+	api := herdrapi.New(sock)
+	lg := log.New(io.Discard, "", 0)
+	stub := reconcileStub(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		reconcileRemote(ctx, api, blockingRemote{}, Cloud{PCName: "self"}, stub, newTestIndex(t), lg)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// ctx タイムアウトで DroverPCs が中断され abort して戻った＝期待どおり。
+	case <-time.After(5 * time.Second):
+		t.Fatal("reconcileRemote が ctx タイムアウト後も戻らなかった（実障害の再発）")
+	}
+}
