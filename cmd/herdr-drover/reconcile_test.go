@@ -51,6 +51,12 @@ func fakeSess(sid, dir string) map[string]any {
 	return map[string]any{"key": sid, "session_id": sid, "short_dir": dir}
 }
 
+// fakeSessWithCwd は cwd 付きの session 行（producer が同期する実 cwd フィールド
+// を模す）。title 転記の検証に使う。
+func fakeSessWithCwd(sid, dir, cwd string) map[string]any {
+	return map[string]any{"key": sid, "session_id": sid, "short_dir": dir, "cwd": cwd}
+}
+
 // reconcileStub は注入 pane が実行する無害な stub（argv 無視で生存＝pane が
 // 消えないので出現/消滅を安定に観測できる。実 attach の接続は別テスト）。
 func reconcileStub(t *testing.T) string {
@@ -647,5 +653,49 @@ func TestReconcileRemoteReturnsOnContextTimeout(t *testing.T) {
 		// ctx タイムアウトで DroverPCs が中断され abort して戻った＝期待どおり。
 	case <-time.After(5 * time.Second):
 		t.Fatal("reconcileRemote が ctx タイムアウト後も戻らなかった（実障害の再発）")
+	}
+}
+
+// TestReconcileRemoteSetsPaneTitleToRemoteCwd は「注入 pane の terminal_title に
+// リモート PC 名＋実 cwd が入る」ことを検証する（実運用フィードバック: layout.apply
+// に注入 pane 用の cwd 指定が無いため、同一 workspace 内の全 inject pane が
+// herdr 側の cwd フィールドで同じ値を示し「どのリモートの何の作業か」誤認しやすい
+// という指摘への対処）。cwd フィールド自体は偽装せず、title に実データをそのまま
+// 表示する。
+func TestReconcileRemoteSetsPaneTitleToRemoteCwd(t *testing.T) {
+	sock := startHerdrForTest(t)
+	api := herdrapi.New(sock)
+	lg := log.New(io.Discard, "", 0)
+	stub := reconcileStub(t)
+	ctx := context.Background()
+
+	fr := &fakeRemote{
+		pcs: []string{"remoteA"},
+		sessions: map[string][]map[string]any{
+			"remoteA": {fakeSessWithCwd("w9:pT", "projT", "/Users/remote/works/projT")},
+		},
+	}
+	reconcileRemote(ctx, api, fr, Cloud{PCName: "self"}, stub, newTestIndex(t), lg)
+	waitCond(t, 15*time.Second, "注入 pane 出現", func() bool { return len(injectedPanes(t, api)) == 1 })
+
+	panes, err := api.PaneList()
+	if err != nil {
+		t.Fatalf("pane.list: %v", err)
+	}
+	var title string
+	found := false
+	for i := range panes {
+		p := &panes[i]
+		if p.Tokens[injTokPC] == "remoteA" && p.Tokens[injTokSID] == "w9:pT" {
+			title = p.Title
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("対象の注入 pane が見つからない")
+	}
+	want := "↗ remoteA:/Users/remote/works/projT"
+	if title != want {
+		t.Fatalf("terminal_title = %q, want %q（cwd がリモートの実パスで表示されていない）", title, want)
 	}
 }

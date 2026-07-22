@@ -67,7 +67,26 @@ func injTabName(dir string) string {
 	return "↗" + dir
 }
 
-type injMeta struct{ pc, sid, dir, status, name string }
+// injPaneTitle は注入 pane の terminal_title（herdr の pane.report_metadata
+// title）。実装上の理由（layout.apply には注入 pane 用の cwd 指定が無く、
+// リモート PC の実パスはこのローカル PC のファイルシステムに存在しない
+// ため cwd フィールド自体には渡せない＝渡すと存在しないパスで attach
+// プロセスの起動に失敗し得る）で `pane.cwd`/`foreground_cwd` は同一
+// workspace 内の既存 pane の値を herdr が便宜的に継承し、全 inject pane が
+// 同じ値を示す（実運用フィードバックで報告された誤認要因）。cwd を偽装
+// する代わりに、**title へ「↗pc:実パス」を明示**して pane 選定時に画面を
+// 見れば出所と実際の作業ディレクトリが一目で分かるようにする（cwd
+// フィールドの意味を汚さない・鉄則③のヒューリスティック分類回避と同じ
+// 精神＝表示は実データそのまま、推測で埋めない）。cwd が空（旧 session
+// データや取得失敗）なら pc のみ表示。
+func injPaneTitle(pc, cwd string) string {
+	if cwd == "" {
+		return "↗ " + pc
+	}
+	return "↗ " + pc + ":" + cwd
+}
+
+type injMeta struct{ pc, sid, dir, cwd, status, name string }
 
 // injAPIState は producer が同期したリモートの agent_status（herdr の**表示値**＝
 // done/idle/working/blocked/unknown の 5 値）を、pane.report_agent の --state 語彙
@@ -283,12 +302,13 @@ func reconcileRemote(ctx context.Context, api *herdrapi.Client, st remoteSource,
 				continue
 			}
 			dir, _ := s["short_dir"].(string)
+			cwd, _ := s["cwd"].(string)
 			// agent_status / window_name は producer が既に同期している生値
 			// （producer.go BuildSessions）。注入 pane へ exact-match で転記して
 			// herdr に agent 検出させるのに使う（reconcile 側で分類はしない）。
 			status, _ := s["agent_status"].(string)
 			name, _ := s["window_name"].(string)
-			desired[injMarkerKey(pc, sid)] = injMeta{pc: pc, sid: sid, dir: dir, status: status, name: name}
+			desired[injMarkerKey(pc, sid)] = injMeta{pc: pc, sid: sid, dir: dir, cwd: cwd, status: status, name: name}
 		}
 	}
 
@@ -380,6 +400,7 @@ func reconcileRemote(ctx context.Context, api *herdrapi.Client, st remoteSource,
 				}
 			}
 			if merr := api.PaneReportMetadata(pid, injSource, herdrapi.ReportMetadata{
+				Title:  injPaneTitle(d.pc, d.cwd),
 				Tokens: map[string]string{injTokPC: d.pc, injTokSID: d.sid},
 			}); merr != nil {
 				// token 付与失敗＝orphan 化するので pane を close＋index からも Abandon。
