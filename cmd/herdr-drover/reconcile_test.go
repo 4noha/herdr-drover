@@ -817,3 +817,48 @@ func TestReconcileRemoteTitleIncludesLocalIPs(t *testing.T) {
 		t.Fatalf("IP 無し title = %q ok=%v, want %q（opt-out PC に IP 部分が出てはならない）", title, ok, wantW)
 	}
 }
+
+// TestReconcileWatchdogTriggersAtThreshold は「連続 max 回の失敗でちょうど
+// 1 回だけ再起動要求が立つ」ことを検証する（実障害の回帰テスト: Wi-Fi 切替後
+// gRPC コネクションが死んだまま reconcileRemote が延々と abort し続けた事象へ
+// の対処＝ runRemoteInject から切り出した純カウンタの単体テスト）。
+func TestReconcileWatchdogTriggersAtThreshold(t *testing.T) {
+	w := newReconcileWatchdog(3)
+	if w.observe(false) {
+		t.Fatal("1 回目の失敗で発火した（早すぎる）")
+	}
+	if w.observe(false) {
+		t.Fatal("2 回目の失敗で発火した（早すぎる）")
+	}
+	if !w.observe(false) {
+		t.Fatal("3 回目（閾値）の失敗で発火しなかった")
+	}
+	// reset 前に観測を続けると、閾値以上いつまでも true を返し続けてはならない
+	// （呼び手が reset を呼ばずに何度も observe した場合の再突入耐性）。
+	w.reset()
+	if w.observe(false) {
+		t.Fatal("reset 直後の 1 回目で再発火した（早すぎる）")
+	}
+}
+
+// TestReconcileWatchdogResetsOnSuccess は「途中で 1 回でも成功すればカウンタが
+// 0 に戻る」ことを検証する（一時的な数回の失敗は正常なリトライとして許容し、
+// 長期停滞だけを再起動対象にする設計の要）。
+func TestReconcileWatchdogResetsOnSuccess(t *testing.T) {
+	w := newReconcileWatchdog(3)
+	w.observe(false)
+	w.observe(false)
+	if w.observe(true) {
+		t.Fatal("成功周で発火した（成功は必ずリセットのはず）")
+	}
+	// リセット後は再び 3 回失敗するまで発火しないはず。
+	if w.observe(false) {
+		t.Fatal("リセット後 1 回目の失敗で発火した（早すぎる）")
+	}
+	if w.observe(false) {
+		t.Fatal("リセット後 2 回目の失敗で発火した（早すぎる）")
+	}
+	if !w.observe(false) {
+		t.Fatal("リセット後 3 回目（閾値）の失敗で発火しなかった")
+	}
+}

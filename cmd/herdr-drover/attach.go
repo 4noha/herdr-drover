@@ -59,6 +59,13 @@ const DefaultIdle = 30 * time.Second
 // conn を close して attachOnce 側の backoff 再接続に委ねる。
 const inputWriteTimeout = 2 * time.Second
 
+// dialTimeout は attachOnce の relay dial（DialViewerFrom）に許す上限。
+// 実障害（2026-07-23・ノート PC の Wi-Fi 切替）: dial 自体がネットワーク不通の
+// まま応答なく長時間ブロックし得た。grant/wake の 10s（injGrantTTL 手前の
+// gctx）より少し長く取り、正常なネットワークでの dial（実測 1s 未満）を
+// 誤検知しない範囲で切る。
+const dialTimeout = 15 * time.Second
+
 // connHolder は「現在の接続」を保持し、常駐 stdin reader が接続切替を跨いで現接続
 // へ書けるようにする（reader を cycle ごとに作らない＝キーストローク奪い合い防止）。
 // 未接続(nil)中の入力は破棄する（次の接続確立後の入力から届く）。
@@ -91,6 +98,40 @@ func (h *connHolder) write(p []byte) error {
 		_ = c.Close()
 	}
 	return err
+}
+
+// dialWithTimeout は dial（ブロッキング呼び出し）を別 goroutine で走らせ、
+// timeout 以内に完了しなければ dial 側の ctx を cancel（cancelDialCtx）して
+// タイムアウトエラーを返す純粋な制御フロー（attachOnce から切り出し・fake dial
+// 関数で単体テスト可能にする）。実障害（2026-07-23・ノート PC の Wi-Fi 切替）:
+// relayclient.DialViewerFrom へ渡す ctx は dial だけでなく websocket.NetConn の
+// 生存期間全体を縛る（coder/websocket の仕様）ため、dial 自体にタイムアウト付き
+// ctx を直接渡すと dial 成功後も期限切れで正常な接続まで切れる回帰になる。ここで
+// 外側から select でタイムアウトを掛け、dial に渡す ctx 自体（呼び手が保持する
+// dctx）は変えない。タイムアウト後に dial goroutine が遅れて成功しても、その
+// conn は即 Close する（呼び手はもう待っていない＝リーク防止）。
+func dialWithTimeout(timeout time.Duration, cancelDialCtx func(), dial func() (net.Conn, error)) (net.Conn, error) {
+	type result struct {
+		conn net.Conn
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		c, err := dial()
+		done <- result{c, err}
+	}()
+	select {
+	case r := <-done:
+		return r.conn, r.err
+	case <-time.After(timeout):
+		cancelDialCtx()
+		go func() {
+			if r := <-done; r.conn != nil {
+				_ = r.conn.Close()
+			}
+		}()
+		return nil, fmt.Errorf("relay 接続タイムアウト（%s）", timeout)
+	}
 }
 
 // cmdAttach は `herdr-drover attach <pc> <sid>`。ctx 終了（SIGTERM/pane close で
@@ -225,21 +266,14 @@ func attachOnce(ctx context.Context, st *state.Client, relayURL, injSid, remoteP
 
 	dctx, dcancel := context.WithCancel(ctx)
 	defer dcancel()
-	// ⚠ relayclient.DialViewerFrom へ渡す ctx は dial だけでなく websocket.NetConn
-	// の生存期間全体を縛る（coder/websocket の仕様＝ctx cancel で以後の
-	// read/write も死ぬ）。dial 局面だけを打ち切るタイムアウト付き ctx を渡すと
-	// dial 成功後も期限切れで正常な接続まで切ってしまう回帰になるため、
-	// ここは dctx（attachOnce 生存期間そのもの）をそのまま渡す。dial 自体が
-	// ネットワーク不通で長時間ブロックする問題は、下の quiescence 読取り
-	// タイムアウトとは別に残るが、pane close による手動 kick（今回の実運用対処）
-	// で回復できる範囲。
-	//
 	// source PC を spc で渡す＝relay の KeyFor が slave source PC の時だけ
 	// slaveSessionKey(spc,injSid) で viewer を Accept し、slave の #inj source と
 	// ペアする（master source PC では spc 無視＝従来と同一 wire）。
-	conn, err := relayclient.DialViewerFrom(dctx, relayURL, injSid, remotePC)
+	conn, err := dialWithTimeout(dialTimeout, dcancel, func() (net.Conn, error) {
+		return relayclient.DialViewerFrom(dctx, relayURL, injSid, remotePC)
+	})
 	if err != nil {
-		fmt.Fprintf(out, "\x1b[2J\x1b[H↗ %s / %s: relay 接続失敗（再試行）: %v\r\n", remotePC, injSid, err)
+		fmt.Fprintf(out, "\x1b[2J\x1b[H↗ %s / %s: %v（再試行）\r\n", remotePC, injSid, err)
 		return
 	}
 	defer conn.Close()

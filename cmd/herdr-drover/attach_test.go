@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"io"
 	"net"
 	"sync"
@@ -223,5 +224,85 @@ func TestConnHolderWriteClosesConnOnTimeout(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("2 回目の write が即座に返らなかった（conn が close されていない）")
+	}
+}
+
+// TestDialWithTimeoutReturnsOnSlowDial は「dial がネットワーク不通で応答なく
+// ブロックし続けても、dialWithTimeout が timeout で確実に戻る」ことを検証する
+// （実障害の回帰テスト: Wi-Fi 切替後 relayclient.DialViewerFrom が長時間
+// ブロックし得た事象への対処）。dial 関数自体は cancelDialCtx が呼ばれるまで
+// 戻らない fake で、無期限ブロックを模す。
+func TestDialWithTimeoutReturnsOnSlowDial(t *testing.T) {
+	cancelled := make(chan struct{})
+	cancelDialCtx := func() { close(cancelled) }
+	dial := func() (net.Conn, error) {
+		<-cancelled // cancelDialCtx が呼ばれるまで戻らない＝無期限ブロックの模擬
+		return nil, fmt.Errorf("dial canceled")
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := dialWithTimeout(30*time.Millisecond, cancelDialCtx, dial)
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("timeout のはずが nil error で戻った")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("dialWithTimeout が timeout 後も戻らなかった（無期限ブロックの再発）")
+	}
+}
+
+// TestDialWithTimeoutReturnsFastSuccess は「dial が timeout 内に成功すれば、
+// その conn がそのまま返る（不要に待たされない）」ことを検証する。
+func TestDialWithTimeoutReturnsFastSuccess(t *testing.T) {
+	client, peer := net.Pipe()
+	defer peer.Close()
+	dial := func() (net.Conn, error) { return client, nil }
+
+	conn, err := dialWithTimeout(time.Second, func() {}, dial)
+	if err != nil {
+		t.Fatalf("速い dial が失敗扱いになった: %v", err)
+	}
+	if conn != client {
+		t.Fatal("dial が返した conn がそのまま返っていない")
+	}
+}
+
+// TestDialWithTimeoutClosesLateSuccess は「timeout 後に dial が遅れて成功した
+// 場合、その conn は呼び手に返らず即 close される」ことを検証する（リーク防止・
+// 呼び手がもう待っていない conn を握り続けないことの確認）。
+func TestDialWithTimeoutClosesLateSuccess(t *testing.T) {
+	client, peer := net.Pipe()
+	dialReturn := make(chan struct{})
+	dial := func() (net.Conn, error) {
+		<-dialReturn // timeout 発火後にこちらを進める
+		return client, nil
+	}
+
+	_, err := dialWithTimeout(20*time.Millisecond, func() {}, dial)
+	if err == nil {
+		t.Fatal("timeout のはずが成功扱いになった")
+	}
+	close(dialReturn) // 遅れて dial を成功させる
+
+	// client 側が close されれば peer 側の Read は io.EOF で返る（close 済みの
+	// 証拠）。close されていなければ Read は無期限ブロックするので timeout で判定。
+	readDone := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 1)
+		_, rerr := peer.Read(buf)
+		readDone <- rerr
+	}()
+	select {
+	case rerr := <-readDone:
+		if rerr == nil {
+			t.Fatal("peer の Read が io.EOF 等のエラーなしで返った（client が close されていない）")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout 後に成功した conn が close されなかった（リーク）")
 	}
 }

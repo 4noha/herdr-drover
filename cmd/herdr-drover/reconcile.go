@@ -233,8 +233,15 @@ func resolveActiveInjectWSID(api *herdrapi.Client, idx *injectindex.Index, panes
 // reconcileRemote は他 PC のセッションをローカル herdr の注入 pane へ同期する 1 周。
 // cl は primary クラウド（selfPC=cl.PCName で自 PC を除外・pane env に設定を注入）。
 // idx は injectindex（判定の権威・race 窓予約・再起動 token 消失復元）。
+//
+// 戻り値 ok は「abort せず最後まで完走したか」。false は呼び手（runRemoteInject）の
+// watchdog が「進展なし」として数える対象＝Wi-Fi 切替等でネットワークが変わった後、
+// gRPC コネクションが死んだまま接続し続け ABORT だけを繰り返す実障害（2026-07-23
+// 実機で確認: DroverPCs が DeadlineExceeded を連発し続けた）を自動検知して自己再起動
+// するための一次情報。既存呼び出し（テスト含む・戻り値を無視する 20 箇所）は Go の
+// 仕様上戻り値追加だけでは無修正のままコンパイルが通る＝後方互換。
 func reconcileRemote(ctx context.Context, api *herdrapi.Client, st remoteSource,
-	cl Cloud, selfExe string, idx *injectindex.Index, lg *log.Logger, reportedOpt ...map[string]string) {
+	cl Cloud, selfExe string, idx *injectindex.Index, lg *log.Logger, reportedOpt ...map[string]string) (ok bool) {
 
 	selfPC := cl.PCName
 	env := injPaneEnv(cl)
@@ -251,7 +258,7 @@ func reconcileRemote(ctx context.Context, api *herdrapi.Client, st remoteSource,
 	panes, err := api.PaneList()
 	if err != nil {
 		lg.Printf("[reconcile] ABORT: pane.list 失敗（作成/削除しない）: %v", err)
-		return
+		return false
 	}
 
 	// アクティブ注入 workspace_id を index 集計 → label 検索の順で解決。
@@ -259,7 +266,7 @@ func reconcileRemote(ctx context.Context, api *herdrapi.Client, st remoteSource,
 	activeWSID, werr := resolveActiveInjectWSID(api, idx, panes)
 	if werr != nil {
 		lg.Printf("[reconcile] ABORT: workspace.list 失敗（active ws 解決不能）: %v", werr)
-		return
+		return false
 	}
 
 	// cur 構築: **判定の権威は token / index**（workspace 所属は見ない）。
@@ -304,7 +311,7 @@ func reconcileRemote(ctx context.Context, api *herdrapi.Client, st remoteSource,
 	pcs, perr := st.DroverPCs(ctx)
 	if perr != nil {
 		lg.Printf("[reconcile] ABORT: DroverPCs 失敗: %v", perr)
-		return
+		return false
 	}
 	desired := map[string]injMeta{} // markerKey -> (pc,sid,dir)
 	for _, pc := range pcs {
@@ -314,7 +321,7 @@ func reconcileRemote(ctx context.Context, api *herdrapi.Client, st remoteSource,
 		ss, serr := st.ListSessions(ctx, pc)
 		if serr != nil {
 			lg.Printf("[reconcile] ABORT: ListSessions(%s) 失敗: %v", pc, serr)
-			return
+			return false
 		}
 		for _, s := range ss {
 			sid := sessSID(s)
@@ -500,6 +507,7 @@ func reconcileRemote(ctx context.Context, api *herdrapi.Client, st remoteSource,
 	// ＝孤児」で掃除すると root pane を毎周 kill してしまう。index 権威になった今も、index に
 	// 無い token 無し pane（ユーザーが任意に置いた pane・root pane）を触らない規律は維持。
 	// 再起動で token を失った pane は上の cur 救済で index から復元して token 再表明する。
+	return true
 }
 
 // remoteInjectBackstopPoll は push（WatchSessions）が死んだままでも reconcile が
@@ -521,18 +529,66 @@ const remoteInjectBackstopPoll = 2 * time.Minute
 // 積まれた kick は消費されず無意味＝この timeout が実質の回復手段）。
 const remoteInjectTimeout = 20 * time.Second
 
+// remoteInjectMaxConsecutiveFailures は reconcileRemote の連続 abort 許容数。
+// これを超えたら restartFn（既定 restartSelf＝launchctl kickstart）でプロセス
+// 全体を再起動する。根拠（実障害 2026-07-23）: ノート PC の Wi-Fi 切替後、
+// Firestore の gRPC コネクションが死んだまま「TCP は繋がっているつもりで
+// 実際は応答が返らない」状態に陥り、reconcileRemote は remoteInjectTimeout で
+// 確実に abort するがそれ自体は無限に繰り返り続けた（15 分近く DroverPCs が
+// DeadlineExceeded を連発）。gRPC の keepalive 設定は drover-cloud（別リポジトリ）
+// 側の対処が必要で herdr-drover 単体では直せないため、"死んだコネクションを
+// 使い続けるプロセスを丸ごと再起動する" のが herdr-drover 側だけで完結する
+// 確実な対処。閾値 5 × backstop poll 2min ≈ 10 分＝一時的なネットワーク不安定
+// （数十秒〜数分）では発火せず、実際にコネクションが死んだままの長期停滞だけを
+// 捉える値。
+const remoteInjectMaxConsecutiveFailures = 5
+
+// reconcileWatchdog は「reconcileRemote が何周連続で abort したか」を数え、
+// remoteInjectMaxConsecutiveFailures に達したら再起動要求を出す純カウンタ
+// （runRemoteInject のループ本体から状態遷移だけを切り出したもの＝機械テスト対象。
+// goroutine/チャネル/ctx を持たないので単体テストで閾値到達を直接確認できる）。
+type reconcileWatchdog struct {
+	consecutive int
+	max         int
+}
+
+func newReconcileWatchdog(max int) *reconcileWatchdog {
+	return &reconcileWatchdog{max: max}
+}
+
+// observe は 1 周の結果を記録する。shouldRestart==true は「今回で閾値に
+// 達した」ことを示す（呼び手は実際に再起動したら reset を呼び、次の観測
+// サイクルへ進む＝毎周 true を返し続けて再起動を連打しないようにする）。
+func (w *reconcileWatchdog) observe(ok bool) (shouldRestart bool) {
+	if ok {
+		w.consecutive = 0
+		return false
+	}
+	w.consecutive++
+	return w.consecutive >= w.max
+}
+
+// reset はカウンタを 0 に戻す（再起動要求を出した後、次の観測サイクルを
+// 汚染しないための明示リセット）。
+func (w *reconcileWatchdog) reset() { w.consecutive = 0 }
+
 // runRemoteInject は他 PC のセッションをローカル herdr へ注入し続ける（push 駆動:
 // 起動時 1 回＋WatchSessions 変更のたび reconcile＋remoteInjectBackstopPoll 周期の
 // backstop）。ctx 終了で戻る。**primary クラウドのみ**が呼ぶ（複数クラウドが同一
 // herdr へ同 pane を注入する二重窓・競合を構造的に防ぐ＝runOneCloud の primary
 // 分岐から起動）。
+// restartFn は remoteInjectMaxConsecutiveFailures 連続で reconcileRemote が abort
+// した時に呼ぶプロセス再起動関数（既定 restartSelf。agent.go 呼び出しで注入）。
 func runRemoteInject(ctx context.Context, api *herdrapi.Client, st *state.Client,
-	cl Cloud, idx *injectindex.Index, lg *log.Logger, mirrorAgents bool) {
+	cl Cloud, idx *injectindex.Index, lg *log.Logger, mirrorAgents bool, restartFn func() error) {
 
 	selfExe, err := os.Executable()
 	if err != nil {
 		lg.Printf("[reconcile] 自 exe 解決失敗（リモート pane 注入 無効）: %v", err)
 		return
+	}
+	if restartFn == nil {
+		restartFn = func() error { return nil } // no-op（テスト等の未注入時は watchdog 無効化）
 	}
 	trigger := make(chan struct{}, 1)
 	kick := func() {
@@ -580,6 +636,10 @@ func runRemoteInject(ctx context.Context, api *herdrapi.Client, st *state.Client
 		reported = map[string]string{}
 		lg.Printf("[reconcile] agent 転記 有効（DROVER_MIRROR_AGENTS=on・↗窓 を herdr に agent 検出させる）")
 	}
+	// watchdog は「reconcileRemote が abort し続けている」ことのカウンタ
+	// （reconcileWatchdog 参照）。成功（ok==true）で 0 にリセットする＝一時的な
+	// 数回の失敗は正常なリトライとして許容し、長期停滞だけを自己再起動の対象にする。
+	watchdog := newReconcileWatchdog(remoteInjectMaxConsecutiveFailures)
 	for {
 		select {
 		case <-ctx.Done():
@@ -598,8 +658,21 @@ func runRemoteInject(ctx context.Context, api *herdrapi.Client, st *state.Client
 			// 効かない。1 周のタイムアウトで確実にループへ戻す）。ctx（親）が先に
 			// Done なら Done を優先。
 			rctx, rcancel := context.WithTimeout(ctx, remoteInjectTimeout)
-			reconcileRemote(rctx, api, st, cl, selfExe, idx, lg, reported)
+			ok := reconcileRemote(rctx, api, st, cl, selfExe, idx, lg, reported)
 			rcancel()
+			if !watchdog.observe(ok) {
+				continue
+			}
+			// 長期停滞＝gRPC コネクションが死んだまま（Wi-Fi 切替等）と判断し、
+			// プロセス全体を再起動する（herdr-drover 側だけで完結する対処。
+			// remoteInjectMaxConsecutiveFailures のコメント参照）。restartFn 自体が
+			// 失敗しても次周に持ち越さず re-panic はしない＝ログのみ（launchctl 不在
+			// 等の環境では手動 kickstart に委ねる）。
+			lg.Printf("[reconcile] watchdog: reconcileRemote が %d 周連続で abort＝プロセス再起動を試行", watchdog.max)
+			if rerr := restartFn(); rerr != nil {
+				lg.Printf("[reconcile] watchdog: 再起動失敗（次周も監視継続): %v", rerr)
+			}
+			watchdog.reset()
 		}
 	}
 }

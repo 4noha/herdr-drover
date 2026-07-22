@@ -272,7 +272,7 @@ func runOneCloud(ctx context.Context, cfg Config, cl Cloud, primary bool, hcli *
 	// へ漏れる直接原因＝この goroutine を起こさないことで構造的に断つ）。master
 	// は従来どおり primary クラウドのみ注入（scConcrete は master で非 nil）。
 	if cfg.Role != "slave" && primary && cl.RelayURL != "" {
-		go runRemoteInject(ctx, hcli, scConcrete, cl, idx, lg, cfg.MirrorAgents)
+		go runRemoteInject(ctx, hcli, scConcrete, cl, idx, lg, cfg.MirrorAgents, restartSelf)
 		lg.Printf("%sリモート pane 注入 起動（他 PC のセッションを↗注入・primary）", tag)
 	}
 
