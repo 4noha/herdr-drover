@@ -2,6 +2,7 @@ package main
 
 import (
 	"io"
+	"net"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -164,4 +165,63 @@ func (w *captureWriter) String() string {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return string(w.buf)
+}
+
+// TestConnHolderWriteTimesOutWhenPeerNotReading は「relay 側（webterm の viewer
+// accept）が読まなくなった状態」を net.Pipe（read side を誰も読まない）で模し、
+// connHolder.write が無期限ブロックせず inputWriteTimeout で打ち切って戻ることを
+// 検証する（実運用フィードバックで繰り返し観測された「TCP は ESTABLISHED のまま
+// 何を送っても pane に届かない」症状の回帰テスト。net.Pipe は unbuffered ＝
+// 読み手が居ないと Write は即座にブロックするため、relay 側の read 停止を
+// 忠実に再現できる）。
+func TestConnHolderWriteTimesOutWhenPeerNotReading(t *testing.T) {
+	client, peer := net.Pipe()
+	defer peer.Close() // read しない＝write 側を無期限ブロックさせる状況を維持
+
+	h := &connHolder{}
+	h.set(client)
+
+	done := make(chan error, 1)
+	go func() { done <- h.write([]byte("stuck-input")) }()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("peer が読まないのに write が成功として戻った（timeout が効いていない）")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("connHolder.write が inputWriteTimeout 後も戻らなかった（無期限ブロックの再発）")
+	}
+}
+
+// TestConnHolderWriteClosesConnOnTimeout は timeout 後に conn が close され、
+// 以後の write 呼出が（再ブロックせず）即座にエラーで返ることを確認する
+// （close 済み net.Conn への Write は net.ErrClosed 系で即返るという契約に依存）。
+func TestConnHolderWriteClosesConnOnTimeout(t *testing.T) {
+	client, peer := net.Pipe()
+	defer peer.Close()
+
+	h := &connHolder{}
+	h.set(client)
+
+	done := make(chan error, 1)
+	go func() { done <- h.write([]byte("first")) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("1 回目の write が戻らなかった")
+	}
+
+	// close 済みのはずの conn への 2 回目の write は即座にエラーで返るべき
+	// （再ブロックしないことの確認）。
+	done2 := make(chan error, 1)
+	go func() { done2 <- h.write([]byte("second")) }()
+	select {
+	case err := <-done2:
+		if err == nil {
+			t.Fatal("close 済み conn への write が成功として戻った")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("2 回目の write が即座に返らなかった（conn が close されていない）")
+	}
 }

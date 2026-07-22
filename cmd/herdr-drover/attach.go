@@ -47,6 +47,18 @@ const injGrantTTL = 60 * time.Second
 // の DefaultIdle=30s と同値。無通信 30s で「切断」とみなし backoff 再接続へ渡す）。
 const DefaultIdle = 30 * time.Second
 
+// inputWriteTimeout は connHolder.write（stdin→relay conn）1 回の書込上限
+// （internal/bridge.writeTimeout と同値・同クラスの対処）。実運用フィードバック
+// で「TCP は ESTABLISHED のまま何を送っても pane に届かない」症状が繰り返し
+// 観測された。原因は本ファイルの stdin reader が**プロセス生存中 1 goroutine
+// のみ**（上のコメント参照：複数 reader のキー奪い合いを避けるための設計）で
+// 逐次 write する構造にあり、relay 側（webterm の viewer accept）が読まなく
+// なると conn.Write が無期限ブロックし、この 1 goroutine が固まったまま以後の
+// 入力が一切処理されなくなる（bridge.go 側は同じ問題に writeTimeout で対処済み
+// だったが、viewer 側の本パスには対応漏れがあった）。タイムアウトで打ち切り、
+// conn を close して attachOnce 側の backoff 再接続に委ねる。
+const inputWriteTimeout = 2 * time.Second
+
 // connHolder は「現在の接続」を保持し、常駐 stdin reader が接続切替を跨いで現接続
 // へ書けるようにする（reader を cycle ごとに作らない＝キーストローク奪い合い防止）。
 // 未接続(nil)中の入力は破棄する（次の接続確立後の入力から届く）。
@@ -61,6 +73,11 @@ func (h *connHolder) set(c net.Conn) {
 	h.mu.Unlock()
 }
 
+// write は現接続へ書く。inputWriteTimeout 超過は無期限ブロックの回避策として
+// conn を close する（close 後の Write はエラーで即返るため、以後の write 呼出
+// がここで再ブロックすることはない）。attachOnce 側の pumpFrames が conn の
+// Read エラーで close を検知して backoff 再接続する（この関数自身は再接続しない
+// ＝責務分離）。
 func (h *connHolder) write(p []byte) error {
 	h.mu.Lock()
 	c := h.c
@@ -68,7 +85,11 @@ func (h *connHolder) write(p []byte) error {
 	if c == nil {
 		return nil // 未接続中の入力は破棄（次の接続から届く）
 	}
+	_ = c.SetWriteDeadline(time.Now().Add(inputWriteTimeout))
 	_, err := c.Write(p)
+	if err != nil {
+		_ = c.Close()
+	}
 	return err
 }
 
