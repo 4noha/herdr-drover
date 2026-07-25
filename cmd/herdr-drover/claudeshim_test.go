@@ -12,6 +12,8 @@ package main
 
 import (
 	"bufio"
+	"github.com/4noha/herdr-drover/internal/agentid"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -522,7 +524,7 @@ func TestClaudeCandidatesExactMatch(t *testing.T) {
 	}
 }
 
-// isClaudeAgentName は encode（claude / claude-N 採番）と round-trip する
+// 共有 decode（agentid.Decode）は encode（claude / claude-N 採番）と round-trip する
 // decode。構造一致のみ＝前方一致ヒューリスティックでないことを固定する。
 func TestIsClaudeAgentName(t *testing.T) {
 	cases := map[string]bool{
@@ -543,8 +545,9 @@ func TestIsClaudeAgentName(t *testing.T) {
 		"claude-02": false, // 先頭ゼロは %d が生成しない
 	}
 	for name, want := range cases {
-		if got := isClaudeAgentName(name); got != want {
-			t.Fatalf("isClaudeAgentName(%q)=%v want %v", name, got, want)
+		kind, ok := agentid.Decode(name)
+		if got := ok && kind == "claude"; got != want {
+			t.Fatalf("agentid.Decode(%q)=(%q,%v) want claude=%v", name, kind, ok, want)
 		}
 	}
 }
@@ -584,6 +587,161 @@ func TestPickerChoice(t *testing.T) {
 		}
 		if idx != c.idx || startNew != c.new {
 			t.Fatalf("pickerChoice(%q,%d)=(%d,%v) want (%d,%v)", c.in, c.n, idx, startNew, c.idx, c.new)
+		}
+	}
+}
+
+// バイナリ解決は**新規起動が要ると分かってから**行う（遅延化）。
+// 無条件に解決すると「ローカルに未導入のエージェントの既存セッションへ
+// attach だけしたい」が失敗する（↗窓/リモート運用で起こりうる）。
+//
+// codex は InstallSpec を持たない＝lookupAgentBin は必ず失敗する。それでも
+// cwd 一致の既存セッションがあれば attach 候補に挙がることを確認する。
+func TestShimResolvesBinaryLazily(t *testing.T) {
+	if _, err := lookupAgentBin("codex"); err == nil {
+		t.Skip("この環境には codex が導入されている（未導入前提のテスト）")
+	}
+	sock := startHerdrForTest(t)
+	api := herdrapi.New(sock)
+	stub := writeStubClaude(t)
+	cwd := t.TempDir()
+
+	wsID, err := currentWorkspaceID(api)
+	if err != nil {
+		t.Fatalf("currentWorkspaceID: %v", err)
+	}
+	pane, err := applyClaudeTab(api, wsID, "codex", []string{stub}, cwd)
+	if err != nil {
+		t.Fatalf("layout.apply: %v", err)
+	}
+	// codex セッションが既に走っている状況を作る（herdr の検出値で identity）。
+	if err := api.ReportAgent(pane, "test-native", "codex", "idle"); err != nil {
+		t.Fatalf("report_agent: %v", err)
+	}
+
+	agents, err := api.AgentList()
+	if err != nil {
+		t.Fatalf("agent.list: %v", err)
+	}
+	// cwd は herdr が物理パスで持つので、pane 側の値で突き合わせる。
+	var paneCwd string
+	for _, a := range agents {
+		if a.PaneID == pane {
+			paneCwd = a.Cwd
+		}
+	}
+	if paneCwd == "" {
+		t.Fatalf("pane %s が agent.list に出ない", pane)
+	}
+	got := agentCandidates(agents, "codex", paneCwd)
+	if len(got) != 1 || got[0].PaneID != pane {
+		t.Fatalf("未導入エージェントの既存セッションが attach 候補に出ない: %+v", got)
+	}
+}
+
+// 未知のエージェント種別は loud に撥ねる（canonical でない名前で symlink を
+// 張られても、勝手に何かを起動しない）。
+func TestShimRejectsUnknownAgent(t *testing.T) {
+	err := cmdAgentShim("totally-unknown", nil, io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "未知のエージェント種別") {
+		t.Fatalf("未知種別を撥ねていない: %v", err)
+	}
+}
+
+// InstallSpec を持たないエージェントの**新規起動**は推測せず error。
+func TestLookupAgentBinRefusesToGuess(t *testing.T) {
+	_, err := lookupAgentBin("gemini")
+	if err == nil || !strings.Contains(err.Error(), "InstallSpec") {
+		t.Fatalf("導入情報が無いのに推測した: %v", err)
+	}
+}
+
+// **別種別のセッションへ越境して attach しない**。
+//
+// 実バグ（P6 の一般化中に混入・実バイナリで検出）: シム入口だけ agent 駆動に
+// して候補選定・resume backstop・命名を claude 固定のまま残したため、
+// `gemini` シムが cwd 一致の **claude** セッション（開発中の当セッション）へ
+// 接続してしまった。種別を跨いだ attach は「別のエージェントに自分の会話を
+// 覗かせる」に等しく、静かに起きるので必ず機械で止める。
+func TestShimDoesNotCrossAgentKinds(t *testing.T) {
+	sock := startHerdrForTest(t)
+	api := herdrapi.New(sock)
+	stub := writeStubClaude(t)
+	cwd := t.TempDir()
+
+	wsID, err := currentWorkspaceID(api)
+	if err != nil {
+		t.Fatalf("currentWorkspaceID: %v", err)
+	}
+	pane, err := applyClaudeTab(api, wsID, "c", []string{stub}, cwd)
+	if err != nil {
+		t.Fatalf("layout.apply: %v", err)
+	}
+	if _, err := renameClaudePaneTo(api, pane, "claude"); err != nil {
+		t.Fatalf("agent.rename: %v", err)
+	}
+	if err := api.ReportAgentSession(pane, "herdr:claude", "claude",
+		"11111111-2222-4333-8444-555555555555"); err != nil {
+		t.Fatalf("report_agent_session: %v", err)
+	}
+
+	agents, err := api.AgentList()
+	if err != nil {
+		t.Fatalf("agent.list: %v", err)
+	}
+	var paneCwd string
+	for _, a := range agents {
+		if a.PaneID == pane {
+			paneCwd = a.Cwd
+		}
+	}
+
+	// (a) cwd 一致でも別種別なら候補に出ない。
+	for _, other := range []string{"codex", "gemini", "cursor"} {
+		if got := agentCandidates(agents, other, paneCwd); len(got) != 0 {
+			t.Errorf("%s シムが claude セッションを候補にした: %+v", other, got)
+		}
+	}
+	if got := agentCandidates(agents, "claude", paneCwd); len(got) != 1 {
+		t.Errorf("claude 自身の候補が出ない: %+v", got)
+	}
+
+	// (b) resume backstop も種別を跨がない（同じ ref 文字列でも別種別なら無視）。
+	const ref = "11111111-2222-4333-8444-555555555555"
+	for _, other := range []string{"codex", "devin", "droid"} {
+		p, err := findAgentPaneByResumeRef(api, other, ref)
+		if err != nil {
+			t.Fatalf("findAgentPaneByResumeRef(%s): %v", other, err)
+		}
+		if p != nil {
+			t.Errorf("%s の resume backstop が claude pane に一致した: %s", other, p.PaneID)
+		}
+	}
+	p, err := findAgentPaneByResumeRef(api, "claude", ref)
+	if err != nil || p == nil || p.PaneID != pane {
+		t.Errorf("claude 自身の resume backstop が効かない: p=%v err=%v", p, err)
+	}
+}
+
+// resume ref の抽出は Spec 駆動（値の書式では判定しない）。
+func TestParseResumeRefIsSpecDriven(t *testing.T) {
+	for _, tc := range []struct {
+		agent string
+		args  []string
+		want  string
+	}{
+		{"claude", []string{"--resume", "8b1e0e2c-0000-4000-8000-000000000000"}, "8b1e0e2c-0000-4000-8000-000000000000"},
+		{"claude", []string{"-r", "report.md"}, "report.md"}, // 書式で弾かない
+		{"claude", []string{"--resume"}, ""},                 // 値なし picker 形
+		{"claude", []string{"--resume", "--model", "opus"}, ""},
+		{"pi", []string{"--session", "/home/u/.pi/s.json"}, "/home/u/.pi/s.json"}, // path 形
+		{"copilot", []string{"--resume=abc"}, "abc"},
+		{"codex", []string{"resume", "sess-1"}, "sess-1"},
+		{"codex", []string{"exec", "hello"}, ""},
+		{"gemini", []string{"--resume", "x"}, ""}, // resume 非対応は常に ""
+	} {
+		if got := parseResumeRef(tc.agent, tc.args); got != tc.want {
+			t.Errorf("parseResumeRef(%s, %v) = %q, want %q", tc.agent, tc.args, got, tc.want)
 		}
 	}
 }

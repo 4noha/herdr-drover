@@ -243,6 +243,60 @@ DESIGN_MULTI_AGENT.md の P0（マルチエージェント化の根本ボトル�
 - ⚠herdr の resume argv テーブル（`agent_resume.rs plan()`）は **API 非公開**＝
   drover にミラーが要る（二重管理・herdr 更新で乖離しうる）。
 
+### 2026-07-25 追加: マルチエージェント対応 P1〜P7 完了（v0.5.23 / drover-cloud v0.1.11）
+
+DESIGN_MULTI_AGENT.md の着手順序を**全段完了**。**現行仕様の正は
+[SPEC.md](SPEC.md) §4.2〜4.3・§7**（同 DESIGN は設計の意図と根拠の記録として残す）。
+
+- **P1 identity 一元化** → `internal/agentid`（**cmd ではなく internal**。producer
+  からも呼べないと判定が再び分裂するため）。権威は 注入 token → agent_session →
+  シム命名 → herdr 検出値（canonical 21 への exact-match 必須）。矛盾は機械確定不能
+  ＝対象外＋報告。**restart/update も herdr UI 直接起動のセッションを拾うようになった**
+  （従来は organize だけが拾う非対称だった）。
+- **P2 producer に `agent`** — 空なら載せない（後方互換）。`window_name` の優先順に
+  検出種別を挿入＝シム経由でないセッションも意味のある名前になる。
+- **P3 Cloud Run 先行デプロイ**（rev 00049・環境変数 7 個の生存を確認）。新命令名
+  `restart-agent-session` / `update-agent-cli` / `restart-daemon`。**旧名は alias で残置**。
+- **P4 Spec テーブル** — ResumeSpec（herdr 実ソースから 14 種）/ UpdaterSpec /
+  InstallSpec。`--agent` を CLI・遠隔命令に開通。`ValidateSpecs()` が静的検証。
+- **P5 Web UI** — 文言を session の `agent` で動的化。不明なら総称へ degrade。
+- **P6 シム一般化** — `shim <agent>` ＋ **argv[0] multi-call**。バイナリ解決を
+  新規起動が要ると分かるまで**遅延**（未導入エージェントの既存セッションへも attach 可）。
+- **P7 ドキュメント同期** — SPEC / README / SETUP / CLAUDE / DESIGN_MULTI_AGENT。
+
+#### この作業で見つけて直した実バグ（すべて回帰テスト付き・旧コード FAIL 確認済み）
+
+1. **`gemini` シムが claude セッションに接続した**（実バイナリで symlink を張って
+   検出）。シム入口だけ一般化して候補選定・resume backstop・命名を claude 固定で
+   残したのが原因。**種別を跨いだ attach は「別エージェントに自分の会話を覗かせる」**
+   に等しい＝SPEC §7-13 に不変条件として明記。
+2. **update が恒常 abort しうる状態**。identity 拡大で非 shim pane の相対名 argv[0] が
+   バイナリ候補に混ざり「2 種類＝曖昧」error。単独なら相対名が採用され launchd の
+   PATH で exec 失敗＝**禁じたはずの PATH 依存の再導入**。→ 絶対パスかつ直接起動の
+   argv[0] のみを候補にする（除外は必ず 1 行出す）。
+3. **wrapper 起動 pane の誤再起動**。`zsh -lc '… claude'` に resume 引数を足しても
+   本体に届かず、**会話を失ったまま done と報告**していた。→ `IsDirectInvocation` で
+   loud に skip。identity（何か）と actionability（argv を組み直せるか）を分離。
+4. **未命名 pane への勝手な命名**（herdr ネイティブ pane が drover 管理名に化ける）。
+5. **`decodeAgentName` が `claude-+2` を通す**（`strconv.Atoi` の符号受理）。
+6. **`-r report.md` が位置引数（初期プロンプト）に化ける**。旧実装は値を uuid 形かで
+   判定していたが、`claude --help` 実測で `-r [value]` は **session ID か picker の
+   検索語のみ**と確定。Spec 駆動（「そのフラグが値を取るか」）で正しく落ちる。
+
+#### 引き継ぎ上の注意
+
+- **新しいエージェントを足すときは `internal/agentid/spec.go` に Spec を足すだけ**。
+  ⚠`InstallSpec.BinNames` は herdr の `lookup_agent` alias 表の要素にすること
+  （表に無い basename で起動すると herdr の検出に**一切載らない**＝resume も
+  organize も silent に無効化。`ValidateSpecs()` が起動時に落とす）。
+- **旧命令名を allowlist から外さない**（まだ更新していない PC から投げられなくなる）。
+- **テストの stub 名は `claude`**（`claude-stub` ではない）。argv ゲートは basename を
+  見るので、別名 stub だと本番と違う経路（skip）に落ちてテストが担保にならない。
+- resume 表は herdr の **API 非公開**部分のミラー＝herdr 更新時は要照合
+  （取りこぼしても「resume 非対応」へ loud に落ちるだけで破壊はしない）。
+
+---
+
 ---
 
 ## 進行中 / 保留（再開ポイント）
@@ -353,8 +407,8 @@ launchctl kickstart -k gui/$(id -u)/com.4noha.herdr-drover
 2. **organize/claudeshim の空 root pane 掃除**（上記 D・reconcile は v0.5.8 で修正済＝
    同経路の残り。稀だが同種ゴミ）。
 3. **IME Ctrl キー**（上記 B・WezTerm 設定で解決＝副作用チェックのみ残）。
-4. **resume backstop**（上記 C・未着手）。⚠claudeshim.go を触るので他タスクと衝突注意
-   （organize/claudeshim root 掃除と同ファイル＝まとめて着手が吉）。
+4. ~~**resume backstop**~~ → **実装済**（`parseResumeRef` / `findAgentPaneByResumeRef`。
+   Spec 駆動＝全 14 種の resume 形に対応・種別を跨がない）。
 5. GitHub 公開: リポジトリ push＋topic `herdr-plugin`→marketplace 掲載
    （**対外操作＝ユーザー明示確認後**）。※herdr-drover は既に GitHub 公開済み
    （release 発行運用中）。marketplace topic 付与が残。
@@ -377,6 +431,7 @@ launchctl kickstart -k gui/$(id -u)/com.4noha.herdr-drover
     `herdr-drover update` 要）。v0.5.9 の遠隔コマンド（`slave/commands` long-poll）で
     slave にも push 到達するはずだが実機確認は SSH 転送 Phase 3 と併せて要検証。
 - `claude` alias は drover シム（`~/.herdr-drover/bin/herdr-drover claude`）。
+  別エージェントは symlink（argv[0] multi-call）か `herdr-drover shim <agent>`。
 - owner の `herdr-drover` は PATH 未登録＝full path で起動。SSH_AUTH_SOCK は稼働中。
 - SA 鍵 `~/.herdr-drover/sa.json`（600・非コミット）。cm 世界は本 Mac では店じまい済み。
 - herdr ソースクローン（v0.7.4・AGPL＝vendor 禁止・参照のみ）: scratchpad の `herdr/`
@@ -386,8 +441,11 @@ launchctl kickstart -k gui/$(id -u)/com.4noha.herdr-drover
 
 ## 旧仕様メモ（参考保持・resume backstop 用）
 
-- claude pane 同定は 2 系統 OR・どちらも exact: (a) シム命名 `claude`/`claude-N`
-  (b) herdr 検出種別 `agent=="claude"`（name=None の直接起動も対象）。
+⚠ **以下は v0.5.23 より前の記述**。現行の同定規則は `internal/agentid.Resolve`
+（SPEC.md §4.2）＝注入 token → agent_session → シム命名 → 検出値の優先順。
+
+- ~~claude pane 同定は 2 系統 OR・どちらも exact: (a) シム命名 `claude`/`claude-N`
+  (b) herdr 検出種別 `agent=="claude"`（name=None の直接起動も対象）。~~
 - `--resume <uuid>` 起動時に `pane.report_metadata` token へ uuid を記録
   （`PaneInfo.Tokens`・exact-match 可）→2 回目は token 一致 live pane に attach。
   「args 非空→常に新規」の例外は --resume のみ。⚠Tab 版が claudeshim.go を

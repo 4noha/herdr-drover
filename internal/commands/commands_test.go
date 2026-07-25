@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -192,7 +193,7 @@ func TestCommandRunnerDispatchAndRevocation(t *testing.T) {
 		},
 		// restart-claude 写像: agent 自身は死なない＝Ack は実行**後**で、
 		// 実行結果の要約が detail に載る（何件やって何件 skip したかを監査で追う）。
-		DoRestartClaude: func(_ context.Context, sid string) (string, error) {
+		DoRestartClaude: func(_ context.Context, sid, agent string) (string, error) {
 			claudeSid.Store(sid)
 			if sid == "w9:p9" {
 				return "", fmt.Errorf("sid %q は再起動対象のローカル claude pane ではない", sid)
@@ -207,7 +208,7 @@ func TestCommandRunnerDispatchAndRevocation(t *testing.T) {
 			return "claude: 更新 2.1.219 → 2.1.220 / 再起動 1 件: claude / drover: 更新 v9.9.9", true, nil
 		},
 		// update-claude 写像: claude 本体更新＋再起動の要約が detail に載る。
-		DoUpdateClaude: func(_ context.Context, sid string) (string, error) {
+		DoUpdateClaude: func(_ context.Context, sid, agent string) (string, error) {
 			claudeSid.Store(sid)
 			claudeUpdates.Add(1)
 			return "更新 2.1.214 → 2.1.219 / 再起動 2 件: claude,claude-2", nil
@@ -217,7 +218,7 @@ func TestCommandRunnerDispatchAndRevocation(t *testing.T) {
 	time.Sleep(1500 * time.Millisecond) // listener attach
 
 	push := func(cmd, sid string) string {
-		id, err := st.PushCommand(ctx, pc, cmd, sid, "owner@example.com")
+		id, err := st.PushCommand(ctx, pc, cmd, sid, "", "owner@example.com")
 		if err != nil {
 			t.Fatalf("PushCommand(%s): %v", cmd, err)
 		}
@@ -352,15 +353,19 @@ func TestCommandRunnerUnwiredAcksError(t *testing.T) {
 	go func() { _ = cr.Run(ctx) }()
 	time.Sleep(1500 * time.Millisecond)
 
+	// 旧名で投入しても **新名として処理される**（NormalizeCommand）ので、
+	// 未配線 Ack の文言は新名で出る。旧 PC からの投入を受け続けるための仕組み。
 	for cmd, wantDetail := range map[string]string{
-		"restart-agent":  "restart 未配線",
-		"self-update":    "update 未配線",
-		"restart-proxy":  "restart-proxy 未配線",
-		"restart-claude": "restart-claude 未配線",
-		"update-claude":  "update-claude 未配線",
-		"update-all":     "update-all 未配線",
+		"restart-agent":         "restart 未配線",
+		"self-update":           "update 未配線",
+		"restart-proxy":         "restart-proxy 未配線",
+		"restart-claude":        "restart-agent-session 未配線", // 旧名 → 新名
+		"update-claude":         "update-agent-cli 未配線",      // 旧名 → 新名
+		"restart-agent-session": "restart-agent-session 未配線",
+		"update-agent-cli":      "update-agent-cli 未配線",
+		"update-all":            "update-all 未配線",
 	} {
-		id, err := st.PushCommand(ctx, pc, cmd, "w1:p1", "owner@example.com")
+		id, err := st.PushCommand(ctx, pc, cmd, "w1:p1", "", "owner@example.com")
 		if err != nil {
 			t.Fatalf("PushCommand(%s): %v", cmd, err)
 		}
@@ -397,7 +402,7 @@ func TestCommandClaimPreventsDoubleExecution(t *testing.T) {
 	go func() { _ = mk(st2, &n2).Run(ctx) }()
 	time.Sleep(1500 * time.Millisecond) // 両 listener attach
 
-	id, err := st1.PushCommand(ctx, pc, "restart-agent", "", "owner@example.com")
+	id, err := st1.PushCommand(ctx, pc, "restart-agent", "", "", "owner@example.com")
 	if err != nil {
 		t.Fatalf("PushCommand: %v", err)
 	}
@@ -410,5 +415,84 @@ func TestCommandClaimPreventsDoubleExecution(t *testing.T) {
 	if total := n1.Load() + n2.Load(); total != 1 {
 		t.Fatalf("二重実行防止が破れている: 実行 %d 回（n1=%d n2=%d）",
 			total, n1.Load(), n2.Load())
+	}
+}
+
+// 旧命令名は新名へ写像され、agent は "claude" に固定される（旧名は claude 専用
+// だった＝推測ではなく事実）。**どう解釈したかは必ず Ack detail に残す**。
+// まだ更新していない PC の Web/CLI から旧名が飛んでくるので、この経路は生き続ける。
+func TestLegacyCommandNameMapsToClaude(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pc := "cmd-drover-legacy"
+	st := newState(t, pc)
+	var mu sync.Mutex
+	var gotSID, gotAgent string
+	cr := &CommandRunner{
+		St:      st,
+		Revoked: func(context.Context) bool { return false },
+		DoRestartClaude: func(_ context.Context, sid, agent string) (string, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			gotSID, gotAgent = sid, agent
+			return "再起動 1 件", nil
+		},
+	}
+	go func() { _ = cr.Run(ctx) }()
+	time.Sleep(1500 * time.Millisecond)
+
+	id, err := st.PushCommand(ctx, pc, "restart-claude", "w1:p1", "", "owner@example.com")
+	if err != nil {
+		t.Fatalf("PushCommand: %v", err)
+	}
+	c := waitCmdStatus(t, st, pc, id, 8*time.Second)
+	if c.Status != "done" {
+		t.Fatalf("Ack = %+v", c)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if gotAgent != "claude" {
+		t.Errorf("旧名 restart-claude の agent = %q, want claude", gotAgent)
+	}
+	if gotSID != "w1:p1" {
+		t.Errorf("sid = %q", gotSID)
+	}
+	if !strings.Contains(c.Detail, "旧名") {
+		t.Errorf("旧名として解釈したことが監査に残っていない: %q", c.Detail)
+	}
+}
+
+// 新名 + agent 指定はそのまま透過する。
+func TestNewCommandNameCarriesAgent(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pc := "cmd-drover-newname"
+	st := newState(t, pc)
+	var mu sync.Mutex
+	var gotAgent string
+	cr := &CommandRunner{
+		St:      st,
+		Revoked: func(context.Context) bool { return false },
+		DoRestartClaude: func(_ context.Context, sid, agent string) (string, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			gotAgent = agent
+			return "再起動 1 件", nil
+		},
+	}
+	go func() { _ = cr.Run(ctx) }()
+	time.Sleep(1500 * time.Millisecond)
+
+	id, err := st.PushCommand(ctx, pc, "restart-agent-session", "", "codex", "owner@example.com")
+	if err != nil {
+		t.Fatalf("PushCommand: %v", err)
+	}
+	if c := waitCmdStatus(t, st, pc, id, 8*time.Second); c.Status != "done" {
+		t.Fatalf("Ack = %+v", c)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if gotAgent != "codex" {
+		t.Errorf("agent = %q, want codex", gotAgent)
 	}
 }

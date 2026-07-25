@@ -42,7 +42,7 @@
 
 ## 使い方
 
-### claude シム（cwd 自動 attach / 新規起動）
+### エージェントシム（cwd 自動 attach / 新規起動）
 
 `herdr-drover claude [args...]` は claude-master `start` の C 案（自動 attach/
 復帰）を herdr 世界で再現するシム:
@@ -109,6 +109,21 @@
 ```sh
 alias claude='~/.herdr-drover/bin/herdr-drover claude'
 ```
+
+別のエージェント（codex 等）も同じ仕組みで使えます。**alias は exec に効かない**
+ので、シムを起動する側から見て名前が一致している必要があります:
+
+```sh
+# 方法 1: canonical label の名前で symlink（argv[0] multi-call）
+ln -s ~/.herdr-drover/bin/herdr-drover ~/bin/codex   # PATH の前方に置く
+
+# 方法 2: 明示形（symlink を張れない場合）
+herdr-drover shim codex
+```
+
+種別を跨いだ attach はしません（`codex` シムが claude セッションに繋がることは
+ない）。本体バイナリの解決は**新規起動が要ると分かってから**行うので、ローカルに
+未導入のエージェントでも既存セッションへ attach できます。
 
 ### organize / capture / live 学習（Tab 単位の Workspace 整理）
 
@@ -183,61 +198,75 @@ mkdir -p ~/.claude/skills
 ln -s "$PWD/skills/mv-tab" ~/.claude/skills/mv-tab
 ```
 
-### update-claude（claude 本体の更新 → セッション反映をワンコマンドで）
+### update-agent-cli（エージェント本体の更新 → セッション反映をワンコマンドで）
 
 ```sh
-# claude を最新にして、そのままこの PC のセッションへ反映
-herdr-drover update-claude
+# エージェントを最新にして、そのままこの PC のセッションへ反映
+herdr-drover update-agent-cli          # 旧名 update-claude も使えます
 
 # 何が起きるか確認（実行しない）／1 枚だけ／作業中も強制
-herdr-drover update-claude --dry-run
-herdr-drover update-claude w1:pD
-herdr-drover update-claude --force
+herdr-drover update-agent-cli --dry-run
+herdr-drover update-agent-cli w1:pD
+herdr-drover update-agent-cli --force
+
+# 種別を指定（省略時は更新口を持つ既定＝claude）
+herdr-drover update-agent-cli --agent claude
 ```
 
-Web からは端末カードの「claude 更新」。他 PC・slave にも届く。
+Web からは端末カードの「更新」ボタン。他 PC・slave にも届く。
 
 - `claude update` は symlink を差し替えるだけで**走っているセッションには効かない**、
   逆に再起動だけでは**ディスクが古いままなら何も新しくならない**。この 2 段を 1
-  コマンドに閉じたもの。中身は `claude update` → 下記 restart-claude。
+  コマンドに閉じたもの。中身は `claude update` → 下記 restart-agent-session。
 - **更新が無くても再起動する**。「ディスクは最新だがセッションは旧版」がまさに
   直したい状態なので、そこで止まらない。
 - 更新対象のバイナリは稼働中セッションの起動パスから決める（PATH は使わない）。
   根拠を毎回出力し、種類が食い違う場合は推測せずエラーにする。
 - 更新に失敗した場合はセッションを触らない（古いまま作り直しても無意味なため）。
 
-⚠ `herdr-drover update` は **herdr-drover 自身**の更新です（claude 本体は
-`update-claude`）。
+⚠ `herdr-drover update` は **herdr-drover 自身**の更新です（エージェント本体は
+`update-agent-cli`）。
 
-### restart-claude（claude バイナリ更新をセッションへ反映）
+### restart-agent-session（エージェントのバイナリ更新をセッションへ反映）
 
-claude 本体を更新しても、**すでに起動しているセッションは古いバイナリのまま**動く
-（`~/.local/bin/claude` は `versions/<ver>` への symlink＝プロセスは exec した時点の
-実体に貼り付く）。`restart-claude` は claude pane を**会話を引き継いだまま**作り直し、
-新しいバイナリを掴ませる。
+エージェント本体を更新しても、**すでに起動しているセッションは古いバイナリのまま**
+動く（`~/.local/bin/claude` は `versions/<ver>` への symlink＝プロセスは exec した
+時点の実体に貼り付く）。`restart-agent-session` は pane を**会話を引き継いだまま**
+作り直し、新しいバイナリを掴ませる。
 
 ```sh
 # 何が対象になるか確認（実行しない）
-herdr-drover restart-claude --dry-run
+herdr-drover restart-agent-session --dry-run   # 旧名 restart-claude も使えます
 
-# この PC のローカル claude セッションを全部（作業中は自動 skip）
-herdr-drover restart-claude
+# この PC のローカルセッションを全部（作業中は自動 skip）
+herdr-drover restart-agent-session
 
 # 1 枚だけ／作業中でも強制
-herdr-drover restart-claude w1:pD
-herdr-drover restart-claude --force w1:pD
+herdr-drover restart-agent-session w1:pD
+herdr-drover restart-agent-session --force w1:pD
+
+# 種別で絞る（省略時は全種別）
+herdr-drover restart-agent-session --agent claude
 
 # モデルを切り替える（例: 既存の会話も Opus へ）
-herdr-drover restart-claude --model opus
+herdr-drover restart-agent-session --model opus
 ```
+
+会話の引き継ぎ方はエージェントごとに違います（`--resume` / `--session` /
+`--thread` / `--resume=` / codex は位置引数）。herdr が会話 ref を出さない 7 種
+（agy・amp・cline・gemini・grok・kiro・maki）は**原理的に再開できない**ため、
+会話なしで起動し直したうえでその旨を明示します（黙って会話を失いません）。
+
+また、`zsh -lc '… claude'` のように**ラッパー経由で起動された pane は触りません**
+（resume 引数を足してもエージェント本体に届かないため）。
 
 ⚠ **`--resume` した会話は settings.json の既定モデルを無視して、その会話に紐づいた
 モデルのまま動きます**（実測）。既存の会話のモデルを変えるには `--model` が要ります。
 `--model` は起動時の指定なので、セッション内で `/model` を使えば従来どおり変更できます。
 
-Web からは端末カードの「claude 再起動」（PC 一括）、セッション行とターミナル画面の
-「⟳claude」（1 枚）で同じことができる（遠隔命令 `restart-claude`）。他 PC・slave にも
-届く。
+Web からはセッション行とターミナル画面の「⟳」ボタン（1 枚）で同じことができる
+（遠隔命令 `restart-agent-session`）。ボタンの文言はそのセッションのエージェント名に
+変わります。他 PC・slave にも届く。
 
 - **会話は失われない**: herdr が持つ会話 uuid を `--resume <uuid>` として渡し直す。
   Tab の位置・ラベル・agent 名もそのまま保つ。

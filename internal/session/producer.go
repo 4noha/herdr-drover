@@ -27,6 +27,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/4noha/herdr-drover/internal/agentid"
 	"sort"
 	"strings"
 
@@ -161,8 +162,10 @@ func isActive(agentStatus string) bool {
 //   - cwd / short_dir: pane の cwd とその末尾（ForegroundCwd は意図的に
 //     使わない: fg プロセスの cd で毎回 content_hash が動き書込が増える上、
 //     DESIGN の指定は cwd）
-//   - window_name: pane に agent が居ればその name、無ければ pane label、
-//     どちらも無ければ pane_id（exact な優先順位・推測しない）
+//   - window_name: シム命名 → herdr の検出種別 → pane label → pane_id の
+//     優先順（exact・推測しない）
+//   - agent: エージェント種別の canonical label（agentid.Resolve）。**空なら
+//     キー自体を載せない**（後方互換）。Web の文言出し分け・per-agent 命令の入力
 //   - is_active: agent_status=="working" の exact-match
 //   - agent_status: 生の値（Web/診断用。enum なので content_hash は安定）
 //
@@ -206,13 +209,28 @@ func BuildSessions(panes []herdrapi.PaneInfo, agents []herdrapi.AgentInfo, isInj
 		}
 		status := p.AgentStatus
 		name := p.Label
-		if a, ok := agentByPane[p.PaneID]; ok {
+		shimName := ""
+		a, hasAgent := agentByPane[p.PaneID]
+		if hasAgent {
 			// agent pane は agent レコードを権威にする（name は agent.start
 			// の指定名＝reconcile の表示名経路と同じ源）。
 			status = a.AgentStatus
+			shimName = a.Name
 			if a.Name != "" {
 				name = a.Name
 			}
+		}
+		// エージェント種別（canonical label）。判定は agentid に一元化＝
+		// restart/update/organize/shim と同じ規則で解決する。矛盾（機械確定
+		// 不能）なら載せない＝Web 側は「不明」として旧文言に degrade する。
+		kind, _ := agentid.Resolve(agentid.OfPane(p, shimName))
+		// window_name の優先順（exact・推測しない）:
+		//   シム命名 → herdr の検出種別 → pane label → pane_id
+		// 検出種別を name より先に見るのではなく **label より先**に入れるのが要点。
+		// シム経由でないエージェント（herdr UI 直接起動）は Name が空で label も
+		// 空になりがちで、従来は pane_id という無意味な名前になっていた。
+		if name == "" && kind != "" {
+			name = kind
 		}
 		if name == "" {
 			name = p.PaneID
@@ -225,6 +243,13 @@ func BuildSessions(panes []herdrapi.PaneInfo, agents []herdrapi.AgentInfo, isInj
 			"window_name":  name,
 			"is_active":    isActive(status),
 			"agent_status": status,
+		}
+		// agent は**空なら載せない**（後方互換＝旧 Web/旧 agent は追加キーを
+		// 知らない。session doc は端から端まで pass-through なので、1 キー足す
+		// だけで Firestore→Web まで中間層の改修ゼロで届く。影響は初回 1 回だけ
+		// content_hash が変わって write が 1 回増えることのみ）。
+		if kind != "" {
+			sess["agent"] = kind
 		}
 		if len(localIPs) > 0 {
 			ips := make([]any, len(localIPs))

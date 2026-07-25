@@ -290,8 +290,8 @@ func runOneCloud(ctx context.Context, cfg Config, cl Cloud, primary bool, hcli *
 		// コマンドでも同じローカル herdr の claude pane を作り直す。sid 空は
 		// 「この PC のローカル claude pane 全部」。進捗行は daemon ログへ流す
 		// （silent 実行にしない＝skip 理由まで残る）。
-		DoRestartClaude: func(_ context.Context, sid string) (string, error) {
-			results, err := restartClaudePanes(hcli, restartOptions{SID: sid}, lg.Writer())
+		DoRestartClaude: func(_ context.Context, sid, agent string) (string, error) {
+			results, err := restartClaudePanes(hcli, restartOptions{SID: sid, Agent: agent}, lg.Writer())
 			if err != nil {
 				return "", err
 			}
@@ -303,16 +303,18 @@ func runOneCloud(ctx context.Context, cfg Config, cl Cloud, primary bool, hcli *
 		// DoUpdateAll は Web のワンボタン。claude 更新→自己更新→（呼び手が）exit。
 		// 上限は claude のダウンロードを含むので update-claude と同じ枠を使う。
 		DoUpdateAll: func(parent context.Context) (string, bool, error) {
-			uctx, cancel := context.WithTimeout(parent, claudeUpdateTimeout)
+			// 遠隔 update-all は agent 指定を持たない（PC 全体が対象）＝更新口を
+			// 持つ既定エージェントの予算を使う。
+			uctx, cancel := context.WithTimeout(parent, updateTimeoutFor(""))
 			defer cancel()
 			res, restart, err := runUpdateAll(uctx, hcli, restartOptions{},
 				func() (string, bool, error) { return selfupdate.Update(version) }, lg.Writer())
 			return summarizeUpdateAll(res), restart, err
 		},
-		DoUpdateClaude: func(parent context.Context, sid string) (string, error) {
-			uctx, cancel := context.WithTimeout(parent, claudeUpdateTimeout)
+		DoUpdateClaude: func(parent context.Context, sid, agent string) (string, error) {
+			uctx, cancel := context.WithTimeout(parent, updateTimeoutFor(agent))
 			defer cancel()
-			return updateClaudeAndRestart(uctx, hcli, restartOptions{SID: sid}, lg.Writer())
+			return updateClaudeAndRestart(uctx, hcli, restartOptions{SID: sid, Agent: agent}, lg.Writer())
 		},
 	}
 	if wt != nil {

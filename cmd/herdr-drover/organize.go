@@ -20,7 +20,7 @@ package main
 //     空で自動 close。pane.move は単一 pane しか分割できないため単軸/右偏り連鎖は
 //     厳密・複雑な入れ子は連鎖近似。moveWholeTab）。曖昧（1 Tab に別 cwd の claude
 //     複数）は skip＋報告。
-//   - claude pane の同定は **resolveAgentKind（agentid.go）に一元化**
+//   - claude pane の同定は **agentid.Resolve（agentid.go）に一元化**
 //     （v0.5.23）。権威は強い順に agent_session の (source,agent) ／
 //     シム命名 claude・claude-N ／ herdr の検出値 agent（canonical 21 label
 //     への exact-match のみ）。注入 pane は最優先で除外。権威同士が矛盾する
@@ -43,6 +43,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/4noha/herdr-drover/internal/agentid"
 	"io"
 	"io/fs"
 	"log"
@@ -250,15 +251,15 @@ func claudeNamesByPane(agents []herdrapi.AgentInfo) map[string]string {
 }
 
 // classifyClaudePane は pane が claude セッションかを判定する。
-// **判定の実体は resolveAgentKind（agentid.go）に一元化**（v0.5.23）。
+// **判定の実体は agentid.Resolve（agentid.go）に一元化**（v0.5.23）。
 // 以前はここが独自に「2 系統 OR ＋矛盾判定」を持っており、restart/update 側の
 // 判定（シム命名のみ）と非対称だった＝organize は拾うのに restart は拾わない、
 // という静かな穴になっていた。
 //
 // conflict が非空なら「機械確定不能」＝対象外＋報告（推測で動かさない）。
-// ↗窓 注入 pane は resolveAgentKind が最優先で弾く。
+// ↗窓 注入 pane は agentid.Resolve が最優先で弾く。
 func classifyClaudePane(p herdrapi.PaneInfo, names map[string]string) (isClaude bool, conflict string) {
-	kind, conflict := resolveAgentKind(identityOfPane(p, names[p.PaneID]))
+	kind, conflict := agentid.Resolve(agentid.OfPane(p, names[p.PaneID]))
 	if conflict != "" {
 		return false, conflict
 	}

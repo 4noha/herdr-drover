@@ -21,7 +21,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"github.com/4noha/herdr-drover/internal/agentid"
 	"io"
 	"os"
 	"os/exec"
@@ -43,6 +45,16 @@ import (
 // Wi-Fi では 5 分を超えて `signal: killed`（＝この上限による中断）になった。
 // 有線/高速回線の 2 台は 4 分以内に完了しており、回線差が素直に出る。上限は
 // 「暴走を止める backstop」であって「普通は間に合う値」であるべきなので 15 分。
+// updateTimeoutFor はそのエージェント単体の更新予算（UpdaterSpec.Timeout）。
+// **全体に 1 本掛けない** — 複数エージェントを更新するとき、遅い 1 つが他の
+// 予算を食い潰さないようにする。Spec が無い場合の既定は claude 実測由来の 15 分。
+func updateTimeoutFor(agent string) time.Duration {
+	if sp, ok := agentid.Updater(agent); ok && sp.Timeout > 0 {
+		return sp.Timeout
+	}
+	return claudeUpdateTimeout
+}
+
 const claudeUpdateTimeout = 15 * time.Minute
 
 // claudeBinsFromPanes は稼働中のローカル claude pane が実際に起動している argv[0]
@@ -59,16 +71,16 @@ const claudeUpdateTimeout = 15 * time.Minute
 //
 // よって **絶対パスかつ claude の直接起動**の argv[0] だけを候補にする。
 // 落としたものは必ず 1 行出す（silent skip 禁止）。
-func claudeBinsFromPanes(api *herdrapi.Client, out io.Writer) ([]string, error) {
+func claudeBinsFromPanes(api *herdrapi.Client, agent string, out io.Writer) ([]string, error) {
 	agents, err := api.AgentList()
 	if err != nil {
 		return nil, fmt.Errorf("agent.list: %w", err)
 	}
-	targets, conflicts, err := selectRestartTargets(agents, "")
+	targets, conflicts, err := selectRestartTargets(agents, "", agent)
 	// 失敗経路（バイナリ特定に失敗して restartClaudePanes へ到達しない場合）でも
 	// 「なぜこの pane が対象外なのか」が残るよう、ここでも矛盾を報告する。
 	for _, c := range conflicts {
-		fmt.Fprintf(out, "update-claude: skip  %s\n", c)
+		fmt.Fprintf(out, "update-agent-cli: skip  %s\n", c)
 	}
 	if err != nil {
 		return nil, err
@@ -85,13 +97,13 @@ func claudeBinsFromPanes(api *herdrapi.Client, out io.Writer) ([]string, error) 
 				continue
 			}
 			bin := l.Command[0]
-			if !isDirectAgentInvocation("claude", l.Command) {
-				fmt.Fprintf(out, "update-claude: note: pane=%s は claude の直接起動でない"+
-					"（argv[0]=%q）＝バイナリ特定の根拠にしない\n", t.PaneID, bin)
+			if !agentid.IsDirectInvocation(agent, l.Command) {
+				fmt.Fprintf(out, "update-agent-cli: note: pane=%s は %s の直接起動でない"+
+					"（argv[0]=%q）＝バイナリ特定の根拠にしない\n", t.PaneID, agent, bin)
 				continue
 			}
 			if !filepath.IsAbs(bin) {
-				fmt.Fprintf(out, "update-claude: note: pane=%s の argv[0] が相対名 %q "+
+				fmt.Fprintf(out, "update-agent-cli: note: pane=%s の argv[0] が相対名 %q "+
 					"＝daemon の PATH では解決できないのでバイナリ特定の根拠にしない\n", t.PaneID, bin)
 				continue
 			}
@@ -110,51 +122,80 @@ func claudeBinsFromPanes(api *herdrapi.Client, out io.Writer) ([]string, error) 
 //     ＝どれを更新すべきか推測しない）
 //  2. PATH（CLI 実行時に有効。daemon では通常引けない）
 //  3. `~/.local/bin/claude`（native installer の既定配置＝推測ではなく既知の規約）
-func resolveClaudeBin(api *herdrapi.Client, out io.Writer) (bin, source string, err error) {
-	bins, berr := claudeBinsFromPanes(api, out)
+func resolveClaudeBin(api *herdrapi.Client, agent string, out io.Writer) (bin, source string, err error) {
+	bins, berr := claudeBinsFromPanes(api, agent, out)
 	if berr == nil && len(bins) == 1 {
-		return bins[0], "稼働中の claude pane の argv[0]", nil
+		return bins[0], fmt.Sprintf("稼働中の %s pane の argv[0]", agent), nil
 	}
 	if berr == nil && len(bins) > 1 {
-		return "", "", fmt.Errorf("稼働中の claude pane が %d 種類のバイナリを使っていて"+
-			"更新対象を一意に決められない（推測しない）: %s", len(bins), strings.Join(bins, " / "))
+		return "", "", fmt.Errorf("稼働中の %s pane が %d 種類のバイナリを使っていて"+
+			"更新対象を一意に決められない（推測しない）: %s",
+			agent, len(bins), strings.Join(bins, " / "))
 	}
-	if p, lerr := exec.LookPath("claude"); lerr == nil {
-		if abs, aerr := filepath.Abs(p); aerr == nil {
-			return abs, "PATH の claude", nil
+	sp, ok := agentid.Install(agent)
+	if !ok {
+		return "", "", fmt.Errorf("%s の導入情報（InstallSpec）が無く、稼働 pane からも"+
+			"バイナリを特定できない＝更新対象を推測しない", agent)
+	}
+	for _, name := range sp.BinNames {
+		if p, lerr := exec.LookPath(name); lerr == nil {
+			if abs, aerr := filepath.Abs(p); aerr == nil {
+				return abs, "PATH の " + name, nil
+			}
 		}
 	}
 	if home, herr := os.UserHomeDir(); herr == nil {
-		wellKnown := filepath.Join(home, ".local", "bin", "claude")
-		if fi, serr := os.Stat(wellKnown); serr == nil && !fi.IsDir() {
-			return wellKnown, "native installer 既定の ~/.local/bin/claude", nil
+		for _, wk := range sp.WellKnownPaths {
+			p := filepath.Join(home, strings.TrimPrefix(wk, "~/"))
+			if fi, serr := os.Stat(p); serr == nil && !fi.IsDir() {
+				return p, "既定の導入先 " + wk, nil
+			}
 		}
 	}
-	return "", "", fmt.Errorf("claude 実バイナリを特定できない" +
-		"（claude セッションが 1 つも無く、PATH にも ~/.local/bin/claude にも見つからない）")
+	return "", "", fmt.Errorf("%s の実バイナリを特定できない"+
+		"（セッションが 1 つも無く、PATH %v にも既定の導入先 %v にも見つからない）",
+		agent, sp.BinNames, sp.WellKnownPaths)
 }
 
 // claudeVersion は `<bin> --version` の 1 行（例 "2.1.219 (Claude Code)"）。
-func claudeVersion(ctx context.Context, bin string) (string, error) {
-	out, err := exec.CommandContext(ctx, bin, "--version").Output()
+// 版取得の引数はエージェントごとに違いうる（UpdaterSpec.VersionArgv）。
+// nil = 版を問い合わせる口が無い＝呼び手は「版比較 skip・更新有無不明」と
+// 明示ログして再起動段へ進む（更新前に return しない）。
+func claudeVersion(ctx context.Context, agent, bin string) (string, error) {
+	sp, ok := agentid.Updater(agent)
+	if !ok || sp.VersionArgv == nil {
+		return "", errNoVersionProbe
+	}
+	out, err := exec.CommandContext(ctx, bin, sp.VersionArgv...).Output()
 	if err != nil {
-		return "", fmt.Errorf("%s --version: %w", bin, err)
+		return "", fmt.Errorf("%s %v: %w", bin, sp.VersionArgv, err)
 	}
 	return strings.TrimSpace(string(out)), nil
 }
 
+// errNoVersionProbe は「版を問い合わせる口が無い」ことを示す番兵。
+// **失敗ではない**ので呼び手は中断せず、版比較を skip して再起動段へ進む。
+var errNoVersionProbe = errors.New("このエージェントは版を問い合わせる口を持たない")
+
+// errNoUpdater は「自己更新の口が無い」ことを示す番兵（再起動のみ行う）。
+var errNoUpdater = errors.New("このエージェントは自己更新の口を持たない")
+
 // runClaudeUpdate は `<bin> update` を実行して結合出力を返す。実測 2.1.219: 最新でも
 // exit 0 で "Claude Code is up to date (x.y.z)" を出す＝exit code だけでは
 // 「更新された/されていない」は判定できないので、版の前後比較を権威にする。
-func runClaudeUpdate(ctx context.Context, bin string) (string, error) {
-	out, err := exec.CommandContext(ctx, bin, "update").CombinedOutput()
+func runClaudeUpdate(ctx context.Context, agent, bin string) (string, error) {
+	sp, ok := agentid.Updater(agent)
+	if !ok || sp.UpdateArgv == nil {
+		return "", errNoUpdater
+	}
+	out, err := exec.CommandContext(ctx, bin, sp.UpdateArgv...).CombinedOutput()
 	text := strings.TrimSpace(string(out))
 	// 上限で kill したときの生エラーは "signal: killed" で**原因が読み取れない**
 	// （実測 2026-07-25: ユーザーからは回線が遅いのか claude が壊れたのか区別が
 	// つかなかった）。ctx の期限切れなら理由と対処を明示して返す。
 	if err != nil && ctx.Err() != nil {
 		return text, fmt.Errorf("%v の上限内に終わらず中断した"+
-			"（回線が遅い/更新が大きい。claude 本体は数百 MB ある）: %w", claudeUpdateTimeout, ctx.Err())
+			"（回線が遅い/更新が大きい。エージェント本体は数百 MB ある）: %w", sp.Timeout, ctx.Err())
 	}
 	return text, err
 }
@@ -163,21 +204,44 @@ func runClaudeUpdate(ctx context.Context, bin string) (string, error) {
 // 共有する（経路ごとに別ロジックを持たない）。戻り値は監査用の 1 行要約。
 func updateClaudeAndRestart(ctx context.Context, api *herdrapi.Client, opt restartOptions,
 	out io.Writer) (string, error) {
-	bin, source, err := resolveClaudeBin(api, out)
+	// opt.Agent 空は「全エージェント」だが、更新は**種別ごと**に本体が違う。
+	// 現状 UpdaterSpec を持つのは claude のみ＝空なら claude を既定にする
+	// （どの種別を更新したかは必ず 1 行出す）。
+	agent := opt.Agent
+	if agent == "" {
+		agent = "claude"
+		fmt.Fprintf(out, "update-agent-cli: note: --agent 未指定＝%s を対象にする"+
+			"（更新口を持つエージェントは現状これのみ）\n", agent)
+	}
+	if _, ok := agentid.Updater(agent); !ok {
+		return "", fmt.Errorf("%s は更新口（UpdaterSpec）を持たない"+
+			"＝どうやって更新するか推測しない（手動更新後に restart-agent-session を使う）", agent)
+	}
+
+	bin, source, err := resolveClaudeBin(api, agent, out)
 	if err != nil {
 		return "", err
 	}
-	fmt.Fprintf(out, "update-claude: 対象バイナリ %s（根拠: %s）\n", bin, source)
+	fmt.Fprintf(out, "update-agent-cli: 対象バイナリ %s（根拠: %s）\n", bin, source)
 
-	before, err := claudeVersion(ctx, bin)
+	// 版が取れないのは**失敗ではない**（口を持たないエージェントがある）。
+	// 更新有無が不明になるだけなので、明示ログして先へ進む。
+	before, err := claudeVersion(ctx, agent, bin)
+	if errors.Is(err, errNoVersionProbe) {
+		fmt.Fprintf(out, "update-agent-cli: note: %s は版を問い合わせる口が無い"+
+			"＝更新有無は判定できない（版比較 skip）\n", agent)
+		before, err = "", nil
+	}
 	if err != nil {
 		return "", err
 	}
 
 	if opt.DryRun {
-		fmt.Fprintf(out, "update-claude: [dry-run] 現在 %s → `%s update` を実行し"+
-			"セッションを再起動します\n", before, bin)
+		usp, _ := agentid.Updater(agent)
+		fmt.Fprintf(out, "update-agent-cli: [dry-run] 現在 %s → `%s %s` を実行し"+
+			"セッションを再起動します\n", before, bin, strings.Join(usp.UpdateArgv, " "))
 		dry := opt
+		dry.Agent = agent
 		dry.DryRun = true
 		if _, rerr := restartClaudePanes(api, dry, out); rerr != nil {
 			return "", rerr
@@ -185,31 +249,44 @@ func updateClaudeAndRestart(ctx context.Context, api *herdrapi.Client, opt resta
 		return fmt.Sprintf("[dry-run] %s（更新も再起動も未実行）", before), nil
 	}
 
-	updOut, uerr := runClaudeUpdate(ctx, bin)
+	updOut, uerr := runClaudeUpdate(ctx, agent, bin)
+	if errors.Is(uerr, errNoUpdater) {
+		// 自己更新の口が無いエージェントは更新段を skip して再起動だけ行う。
+		fmt.Fprintf(out, "update-agent-cli: note: %s は自己更新の口が無い＝更新段を skip し"+
+			"セッション再起動のみ行う\n", agent)
+		updOut, uerr = "", nil
+	}
 	if updOut != "" {
 		for _, line := range strings.Split(updOut, "\n") {
-			fmt.Fprintf(out, "update-claude: claude> %s\n", line)
+			fmt.Fprintf(out, "update-agent-cli: claude> %s\n", line)
 		}
 	}
 	if uerr != nil {
 		// 更新に失敗しても**セッション再起動へは進まない**（古いままで作り直しても
 		// 目的を達さず、pane を無駄に作り直すだけ）。
-		return "", fmt.Errorf("`%s update` 失敗: %w", bin, uerr)
+		return "", fmt.Errorf("`%s` の更新失敗: %w", bin, uerr)
 	}
 
-	after, err := claudeVersion(ctx, bin)
+	after, err := claudeVersion(ctx, agent, bin)
+	if errors.Is(err, errNoVersionProbe) {
+		after, err = "", nil
+	}
 	if err != nil {
 		return "", err
 	}
 	verMsg := "既に最新 " + after
-	if before != after {
+	switch {
+	case before == "" && after == "":
+		verMsg = "版不明（版を問い合わせる口が無い＝更新有無は判定できない）"
+	case before != after:
 		verMsg = fmt.Sprintf("更新 %s → %s", before, after)
 	}
-	fmt.Fprintf(out, "update-claude: %s\n", verMsg)
+	fmt.Fprintf(out, "update-agent-cli: %s\n", verMsg)
 
 	// 版が変わらなくても再起動する: ディスクが最新でもセッションが旧版のまま、
 	// というのがまさに直したい状態（本コマンドの存在理由）。
 	run := opt
+	run.Agent = agent
 	run.DryRun = false
 	results, rerr := restartClaudePanes(api, run, out)
 	if rerr != nil {
@@ -225,6 +302,7 @@ func cmdUpdateClaude(args []string, stdout, stderr io.Writer) error {
 	force := fs.Bool("force", false, "agent_status=working の pane も再起動する（実行中タスクは失われる）")
 	dryRun := fs.Bool("dry-run", false, "対象バイナリと再起動予定を表示するだけで何もしない")
 	model := fs.String("model", "", "再起動時に claude へ渡すモデル（例 opus）。空なら既存指定に触らない")
+	agentFlag := fs.String("agent", "", "更新するエージェント種別（空なら更新口を持つ既定＝claude）")
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("%w: %v", errUsage, err)
 	}
@@ -241,14 +319,14 @@ func cmdUpdateClaude(args []string, stdout, stderr io.Writer) error {
 	if _, err := api.Ping(); err != nil {
 		return fmt.Errorf("herdr server に繋がらない（socket=%s）: %w", api.SocketPath, err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), claudeUpdateTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), updateTimeoutFor(*agentFlag))
 	defer cancel()
 	summary, err := updateClaudeAndRestart(ctx, api,
-		restartOptions{SID: sid, Force: *force, DryRun: *dryRun, Model: *model}, stdout)
+		restartOptions{SID: sid, Agent: *agentFlag, Force: *force, DryRun: *dryRun, Model: *model}, stdout)
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "update-claude: %s\n", summary)
+	fmt.Fprintf(stdout, "update-agent-cli: %s\n", summary)
 	return nil
 }
 
@@ -346,7 +424,7 @@ func cmdUpdateAll(args []string, stdout, stderr io.Writer) error {
 	if _, err := api.Ping(); err != nil {
 		return fmt.Errorf("herdr server に繋がらない（socket=%s）: %w", api.SocketPath, err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), claudeUpdateTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), updateTimeoutFor(""))
 	defer cancel()
 	res, _, err := runUpdateAll(ctx, api, restartOptions{Force: *force, Model: *model},
 		func() (string, bool, error) { return selfupdate.Update(version) }, stdout)

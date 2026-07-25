@@ -30,6 +30,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/4noha/herdr-drover/internal/agentid"
 	"io"
 	"os"
 	"os/exec"
@@ -79,20 +80,34 @@ var (
 // pkill herdr で他者サーバを殺した実インシデントの再発防止）から参照する。
 var lastSpawnedServerPID int
 
-// cmdClaude は claude シム本体。args は実 claude へそのまま渡す引数列。
+// cmdClaude は claude シムの入口（後方互換の薄いラッパ）。
 func cmdClaude(args []string, stdout, stderr io.Writer) error {
-	claudeAbs, err := lookupClaude()
-	if err != nil {
-		return err
+	return cmdAgentShim("claude", args, stdout, stderr)
+}
+
+// cmdAgentShim はエージェントシム本体。agent は canonical label、
+// args は実バイナリへそのまま渡す引数列。
+//
+// ⚠**バイナリ解決は遅延させる**（新規起動が要ると分かってから）。無条件に
+// 解決すると「ローカルに未導入のエージェントの**既存セッションへ attach だけ
+// したい**」が失敗する（↗窓/リモート運用では起こりうる）。
+func cmdAgentShim(agent string, args []string, stdout, stderr io.Writer) error {
+	if !agentid.IsCanonical(agent) {
+		return fmt.Errorf("未知のエージェント種別 %q（canonical label 21 種のいずれか）", agent)
 	}
 
-	// 非 TTY×引数あり: herdr を経由せず素の claude へプロセス置換する。
+	// 非 TTY×引数あり: herdr を経由せず素のバイナリへプロセス置換する。
 	// pane 経由にすると `echo prompt | claude -p …` の stdin が pane に届かず
 	// stdout も返らないまま exit 0＝自動化が silent に壊れ、呼ばれるたび
 	// pane が作り捨てられる（旧コードの実バグ・回帰テストで FAIL 確認済み）。
 	// server 自動起動より前に判定＝cron 等から herdr server を勝手に建てない。
 	if len(args) > 0 && !stdinIsTTY() {
-		return execAttach(claudeAbs, append([]string{claudeAbs}, args...), os.Environ())
+		// この経路は必ず新規起動するのでここでは解決が要る。
+		bin, err := lookupAgentBin(agent)
+		if err != nil {
+			return err
+		}
+		return execAttach(bin, append([]string{bin}, args...), os.Environ())
 	}
 
 	api := herdrapi.New("")
@@ -126,17 +141,17 @@ func cmdClaude(args []string, stdout, stderr io.Writer) error {
 		if err != nil {
 			return fmt.Errorf("agent.list: %w", err)
 		}
-		cands := claudeCandidates(agents, cwd)
+		cands := agentCandidates(agents, agent, cwd)
 		switch {
 		case len(cands) == 1:
-			fmt.Fprintf(stdout, "cwd 一致の既存 claude セッションへ接続します\n")
+			fmt.Fprintf(stdout, "cwd 一致の既存 %s セッションへ接続します\n", agent)
 			return attachOrReport(api, cands[0], stdout)
 		case len(cands) > 1:
 			if !stdinIsTTY() {
 				// 非 TTY は picker を出せない。勝手に attach も新規もせず
 				// 先頭情報だけ報告して終了（dup を作らない backstop）。
 				c := cands[0]
-				fmt.Fprintf(stdout, "cwd 一致の claude セッションが %d 件あります（非 TTY のため attach しません）\n", len(cands))
+				fmt.Fprintf(stdout, "cwd 一致の %s セッションが %d 件あります（非 TTY のため attach しません）\n", agent, len(cands))
 				fmt.Fprintf(stdout, "pane_id=%s terminal_id=%s cwd=%s\n", c.PaneID, c.TerminalID, c.Cwd)
 				return nil
 			}
@@ -158,9 +173,9 @@ func cmdClaude(args []string, stdout, stderr io.Writer) error {
 	// （exact-match・非ヒューリスティック＝権威は herdr の検出値）。「args 非空→
 	// 常に新規」の唯一の例外＝--resume（他フラグは従来どおり新規）。非 TTY×args は
 	// 上流(94 行)で素通し済＝ここは TTY のみ。
-	if uuid := parseResumeUUID(args); uuid != "" {
-		if p, ferr := findClaudePaneByResumeUUID(api, uuid); ferr == nil && p != nil {
-			fmt.Fprintf(stdout, "会話 %s を実行中の既存セッションへ接続します（新規プロセスを作りません）\n", uuid)
+	if ref := parseResumeRef(agent, args); ref != "" {
+		if p, ferr := findAgentPaneByResumeRef(api, agent, ref); ferr == nil && p != nil {
+			fmt.Fprintf(stdout, "会話 %s を実行中の既存セッションへ接続します（新規プロセスを作りません）\n", ref)
 			return attachOrReport(api, herdrapi.AgentInfo{PaneID: p.PaneID, TerminalID: p.TerminalID}, stdout)
 		}
 		// 一致なし＝その会話はまだ herdr で起動していない → 下の新規経路で
@@ -169,11 +184,16 @@ func cmdClaude(args []string, stdout, stderr io.Writer) error {
 
 	// 新規: 実 claude の絶対パスを argv[0] に渡す。exec.LookPath は shell
 	// alias の影響を受けず、herdr server 側の PATH 差異にも免疫になる。
-	ag, err := startClaudeAgent(api, append([]string{claudeAbs}, args...), cwd)
+	// ここで初めてバイナリ解決（attach で済むケースは解決不要＝未導入でも動く）。
+	bin, err := lookupAgentBin(agent)
+	if err != nil {
+		return err
+	}
+	ag, err := startClaudeAgent(api, agent, append([]string{bin}, args...), cwd)
 	if err != nil {
 		return fmt.Errorf("agent.start: %w", err)
 	}
-	fmt.Fprintf(stdout, "claude セッションを新規起動しました\n")
+	fmt.Fprintf(stdout, "%s セッションを新規起動しました\n", agent)
 	return attachOrReport(api, *ag, stdout)
 }
 
@@ -199,11 +219,11 @@ const maxClaudeAgents = 64
 //
 // agent 名の一意制約（実測 agent_name_taken）への対応は従来と同じ
 // 「encode/decode の構造往復」: encode は claude → claude-2 → … を順に試し、
-// decode（isClaudeAgentName）がその形だけを exact に受ける。
+// decode（agentid.Decode）がその形だけを exact に受ける。
 // ⚠旧 agent.start は名前予約が pane 生成と原子的だったが、本経路は pane 生成
 // →命名の 2 段になる。同時 2 シムは双方 Tab を作り得るが、これは従来から
 // 許容している可視の race（picker が扱う正規状態）と同型＝silent 破壊はない。
-func startClaudeAgent(api *herdrapi.Client, argv []string, cwd string) (*herdrapi.AgentInfo, error) {
+func startClaudeAgent(api *herdrapi.Client, agent string, argv []string, cwd string) (*herdrapi.AgentInfo, error) {
 	rules, err := wsmap.Load()
 	if err != nil {
 		return nil, err
@@ -229,7 +249,7 @@ func startClaudeAgent(api *herdrapi.Client, argv []string, cwd string) (*herdrap
 	if err != nil {
 		return nil, err
 	}
-	return nameClaudePane(api, paneID)
+	return nameAgentPane(api, agent, paneID)
 }
 
 // currentWorkspaceID は「現 workspace」を決定的に選ぶ:
@@ -306,8 +326,15 @@ func applyClaudeTab(api *herdrapi.Client, wsID, tabLabel string, argv []string, 
 // target は pane_id 可＝実測）。応答 {"type":"agent_info","agent":{...}} は
 // terminal_id 込みの AgentInfo＝attach にそのまま使える。
 func nameClaudePane(api *herdrapi.Client, paneID string) (*herdrapi.AgentInfo, error) {
+	return nameAgentPane(api, "claude", paneID)
+}
+
+// nameAgentPane は pane に `<agent>` / `<agent>-N` を採番して付ける。
+// **採番は agent ごとの名前空間**（claude-2 と codex-2 は別物）。ただし herdr の
+// agent 名はサーバ全体でグローバル一意なので、衝突したら次の番号へ進む。
+func nameAgentPane(api *herdrapi.Client, agent, paneID string) (*herdrapi.AgentInfo, error) {
 	for i := 1; i <= maxClaudeAgents; i++ {
-		name := encodeAgentName("claude", i)
+		name := agentid.Encode(agent, i)
 		raw, err := api.Call("agent.rename", struct {
 			Target string `json:"target"`
 			Name   string `json:"name"`
@@ -384,29 +411,56 @@ func ensureHerdrServer(api *herdrapi.Client, stderr io.Writer) error {
 // lookupClaude は実 claude バイナリを PATH から絶対パスで解決する。
 // shell の alias claude='…' は exec.LookPath に影響しない（実環境の claude が
 // cm シム alias でも実バイナリ ~/.local/bin/claude が解決される）。
-func lookupClaude() (string, error) {
-	p, err := exec.LookPath("claude")
-	if err != nil {
-		return "", fmt.Errorf("claude が PATH に見つからない（alias は exec に効かない＝実バイナリを PATH へ）: %w", err)
+func lookupClaude() (string, error) { return lookupAgentBin("claude") }
+
+// lookupAgentBin はエージェント本体の絶対パスを返す（InstallSpec 駆動）。
+//
+// ⚠**BinNames は herdr の lookup_agent 表の要素でなければならない**
+// （ValidateSpecs が静的検証済み）。表に無い basename で起動すると herdr の
+// 検出（前景プロセス名基準）に一切載らず、pane.agent も agent_session も
+// 付かない＝resume backstop も organize の検出系統も silent に無効化される。
+func lookupAgentBin(agent string) (string, error) {
+	sp, ok := agentid.Install(agent)
+	if !ok {
+		return "", fmt.Errorf("%s の導入情報（InstallSpec）が無い＝実バイナリの名前を推測しない", agent)
 	}
-	return filepath.Abs(p)
+	for _, name := range sp.BinNames {
+		if p, err := exec.LookPath(name); err == nil {
+			return filepath.Abs(p)
+		}
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		for _, wk := range sp.WellKnownPaths {
+			p := filepath.Join(home, strings.TrimPrefix(wk, "~/"))
+			if fi, serr := os.Stat(p); serr == nil && !fi.IsDir() {
+				return p, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("%s が PATH %v にも既定の導入先 %v にも見つからない"+
+		"（alias は exec に効かない＝実バイナリを PATH へ）", agent, sp.BinNames, sp.WellKnownPaths)
 }
 
 // claudeCandidates は cwd 一致の claude セッションを返す（シムの attach 候補）。
-// **identity は resolveAgentKind に一元化**（v0.5.23）。以前はここだけ
+// **identity は agentid.Resolve に一元化**（v0.5.23）。以前はここだけ
 // 「シム命名のみ」で判定しており、herdr UI から直接起動された claude が
 // 候補に挙がらず（＝cwd 一致 attach というシムの存在理由が効かず）2 本目を
 // 新規 Tab に作ってしまっていた。organize/restart は同じ pane を claude と
 // 数えるので、経路によって「この cwd の claude 数」が食い違っていた。
 //
-// 注入 pane の除外も resolveAgentKind が最優先で行う。
+// 注入 pane の除外も agentid.Resolve が最優先で行う。
 func claudeCandidates(agents []herdrapi.AgentInfo, cwd string) []herdrapi.AgentInfo {
+	return agentCandidates(agents, "claude", cwd)
+}
+
+// agentCandidates は cwd 一致・指定種別のセッションを返す。
+func agentCandidates(agents []herdrapi.AgentInfo, agent, cwd string) []herdrapi.AgentInfo {
 	var out []herdrapi.AgentInfo
 	for _, a := range agents {
 		if a.Cwd != cwd {
 			continue
 		}
-		if kind, conflict := resolveAgentKind(identityOfAgent(a)); conflict != "" || kind != "claude" {
+		if kind, conflict := agentid.Resolve(agentid.OfAgent(a)); conflict != "" || kind != agent {
 			continue
 		}
 		out = append(out, a)
@@ -459,57 +513,80 @@ func runPicker(cands []herdrapi.AgentInfo, stdout io.Writer) (int, bool, error) 
 // `-r <uuid>` から会話 uuid を取り出す純関数。uuid が続かない（対話 picker 起動）
 // や非 uuid 値は "" を返す＝backstop を発火させない（新規/対話に委ねる）。厳密な
 // uuid 形（8-4-4-4-12 hex）だけを受ける＝`-r report.md` 等の誤検出を防ぐ。
-func parseResumeUUID(args []string) string {
+func parseResumeUUID(args []string) string { return parseResumeRef("claude", args) }
+
+// parseResumeRef は args から会話 ref を取り出す（ResumeSpec 駆動）。
+// **値の書式は判定しない** — claude はたまたま uuid だが pi / omp は path も取る。
+// 妥当性は herdr 相当（非空・512B 以下・制御文字なし）で見る。
+// resume 非対応エージェントは常に ""（backstop を発火させない）。
+func parseResumeRef(agent string, args []string) string {
+	sp := agentid.Resume(agent)
+	if !sp.Supported {
+		return ""
+	}
+	flags := append([]string{sp.Flag}, sp.Aliases...)
+	isFlag := func(a string) bool {
+		for _, f := range flags {
+			if a == f {
+				return true
+			}
+		}
+		return false
+	}
 	for i, a := range args {
 		var cand string
 		switch {
-		case a == "--resume" || a == "-r":
-			if i+1 < len(args) {
+		case sp.Form == agentid.FormSubcommand:
+			// `codex resume <v>` — 位置引数。argv[0] は含まれないので args[0] を見る。
+			if i == 0 && a == sp.Subcommand && len(args) > 1 && !strings.HasPrefix(args[1], "-") {
+				cand = args[1]
+			}
+		case isFlag(a):
+			// **そのフラグが値を取るか**で決める（値の書式では決めない）。
+			if sp.Form == agentid.FormSpace && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
 				cand = args[i+1]
 			}
-		case strings.HasPrefix(a, "--resume="):
-			cand = strings.TrimPrefix(a, "--resume=")
+		default:
+			for _, f := range flags {
+				if strings.HasPrefix(a, f+"=") {
+					cand = strings.TrimPrefix(a, f+"=")
+					break
+				}
+			}
 		}
-		if isUUID(cand) {
+		if agentid.ValidSessionRef(cand) {
 			return cand
 		}
 	}
 	return ""
 }
 
-// isUUID は 8-4-4-4-12 の 16 進 uuid か（大小文字許容）。
-func isUUID(s string) bool {
-	if len(s) != 36 {
-		return false
-	}
-	for i := 0; i < 36; i++ {
-		c := s[i]
-		if i == 8 || i == 13 || i == 18 || i == 23 {
-			if c != '-' {
-				return false
-			}
-			continue
-		}
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
-			return false
-		}
-	}
-	return true
-}
-
 // findClaudePaneByResumeUUID は uuid の会話を実行中の live claude pane を返す
 // （無ければ nil,nil）。判定は herdr の検出値 agent_session の exact-match のみ
 // （value==uuid かつ kind=="id"＝会話 uuid の権威。ヒューリスティック分類なし）。
 func findClaudePaneByResumeUUID(api *herdrapi.Client, uuid string) (*herdrapi.PaneInfo, error) {
+	return findAgentPaneByResumeRef(api, "claude", uuid)
+}
+
+// findAgentPaneByResumeRef は ref の会話を実行中の live pane を返す（無ければ nil,nil）。
+// 判定は herdr の agent_session の exact-match のみ。
+//
+// ⚠**種別も一致させる**こと。ref だけで探すと、別エージェントがたまたま同じ
+// 文字列の会話 ref を持っていたときに他人の pane へ attach してしまう。
+func findAgentPaneByResumeRef(api *herdrapi.Client, agent, ref string) (*herdrapi.PaneInfo, error) {
 	panes, err := api.PaneList()
 	if err != nil {
 		return nil, err
 	}
 	for i := range panes {
 		p := &panes[i]
-		if p.AgentSession.Kind == "id" && p.AgentSession.Value == uuid {
-			return p, nil
+		if p.AgentSession.Value != ref || !agentid.SupportsKind(agent, p.AgentSession.Kind) {
+			continue
 		}
+		if kind, conflict := agentid.Resolve(agentid.OfPane(*p, "")); conflict != "" || kind != agent {
+			continue
+		}
+		return p, nil
 	}
 	return nil, nil
 }

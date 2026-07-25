@@ -11,9 +11,11 @@ cwd 自動 attach／新 Tab 起動を提供する。Python 版 claude-master(cm)
 - **機能・インターフェース仕様の正: [SPEC.md](SPEC.md)**（CLI・遠隔命令の Ack
   セマンティクス・クラウドスキーマ・herdr API 契約・**不変条件**・デプロイ手順）
 - **マルチエージェント対応: [DESIGN_MULTI_AGENT.md](DESIGN_MULTI_AGENT.md)**
-  （Claude 専用箇所の棚卸しと一般化設計。**別エージェント導入時はまずこれ**。
-  herdr は既にマルチエージェント基盤＝検出 21 種／resume 14 種で、drover 側が
-  追いついていないという構図）
+  （棚卸しと一般化設計の**意図と根拠**。P0〜P7 実装済み＝v0.5.23。現行仕様の正は
+  SPEC.md §4.2〜4.3）。identity 判定は `internal/agentid` に一元化、エージェント
+  差分（resume/updater/install）は Spec テーブルでデータとして持つ。
+  **別エージェント導入時は `internal/agentid/spec.go` に Spec を足すだけ**
+  （BinNames は herdr の lookup_agent 表の要素にすること＝ValidateSpecs が検証）
 - 機能別設計: [DESIGN_SLAVE.md](DESIGN_SLAVE.md)＋[DESIGN_SLAVE_SPEC.md](DESIGN_SLAVE_SPEC.md)
   （共用 PC）／[DESIGN_SSH_FORWARD.md](DESIGN_SSH_FORWARD.md)（SSH 転送）
 - **再開時はまず TODO.md を読む**（in-flight タスク・残課題・デプロイ手順の正）
@@ -61,6 +63,11 @@ cwd 自動 attach／新 Tab 起動を提供する。Python 版 claude-master(cm)
 - ndjson API は **1 接続=1 リクエスト**（毎回再接続。events.subscribe のみ長寿命）。
 - 入力は `pane.send_input`(text) だと \r が落ちる＝**`pane.send_text`**（\r 込み）
   か `pane.send_keys` を使う。
+- **エージェント検出は前景プロセス名基準**＝`lookup_agent` の alias 表に無い
+  basename で起動すると `pane.agent` も `agent_session` も**一切付かない**
+  （resume も organize の検出系統も silent に無効化）。
+- `agent_resume.rs plan()`（resume argv の形・14 種）は **API 非公開**＝drover に
+  ミラー（`internal/agentid/spec.go`）を持つしかない。
 - `terminal session control` は**隠し CLI**（`--help` 非掲載。`--cols/--rows/
   --takeover`）。ControlTerminal＝attach と同じ **pane resize＋lock**。
   `observe` はロック非取得・観測側サイズへ仮想描画（観測 < grid は上寄せクリップ）。

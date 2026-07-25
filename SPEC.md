@@ -68,13 +68,14 @@ Firestore サーバは Cloud Run に 1 回デプロイして全 PC で共有す�
 | `organize` | `--dry-run` `--capture` | claude セッションを含む Tab を wsmap ルール解決先 Workspace へ整理 | [要一般化]（同定のみ） |
 | `mv-tab` | `--self` `--src-tab` `--dst-ws` `--dst-ws-label` | Tab を別 Workspace へ丸ごと引っ越し | [非依存] |
 | `mv-tab-launch` | なし | plugin action の実体（新 Tab を開いて対話モードを走らせる） | [非依存] |
-| `restart-claude` | `--force` `--dry-run` `--model <alias>` `[sid]` | claude セッションを会話ごと作り直す | [要一般化] |
-| `update-claude` | `--force` `--dry-run` `--model <alias>` `[sid]` | claude 本体更新＋セッション反映 | [要一般化] |
-| `update-all` | `--force` `--model <alias>` | 上記＋自己更新（Web のワンボタン相当） | [要一般化] |
+| `restart-agent-session`<br>（旧名 `restart-claude` も可） | `--force` `--dry-run` `--model <alias>` `--agent <kind>` `[sid]` | エージェントセッションを会話ごと作り直す | [一般化済 v0.5.23] |
+| `update-agent-cli`<br>（旧名 `update-claude` も可） | 同上 | エージェント本体更新＋セッション反映 | [一般化済 v0.5.23] |
+| `update-all` | `--force` `--model <alias>` | 上記＋自己更新（Web のワンボタン相当） | [agent 非依存] |
+| `shim <agent> [args...]`<br>（`claude` は別名） | — | エージェントシム。argv[0] multi-call でも起動可 | [一般化済 v0.5.23] |
 | `ssh-forward` | `<pc> [label]` | owner の ssh-agent を slave へ relay 越しに一時転送 | [非依存] |
 | `attach` | `<pc> <sid>` | ↗窓 の viewer client（reconcile が注入 pane 内で起動する内部コマンド） | [非依存] |
 
-### 2.4 `restart-claude` の詳細仕様
+### 2.4 `restart-agent-session` の詳細仕様
 
 **目的**: claude バイナリを入れ替えても exec 済みプロセスは旧 inode に貼り付く
 （`~/.local/bin/claude` は `versions/<ver>` への symlink）。pane を作り直して
@@ -148,7 +149,7 @@ Tab ごと自動 close される**。よって差し替え後に生存を確認�
 生存判定は `pane.get` の `pane_not_found` **exact** のみを「死」と扱う（socket
 一時障害で作り直しを誘発して二重に壊さない）。
 
-### 2.5 `update-claude` / `update-all` の詳細仕様
+### 2.5 `update-agent-cli` / `update-all` の詳細仕様
 
 **バイナリ解決の権威順**（どの経路で決めたかを必ず出力）:
 
@@ -193,12 +194,26 @@ Firestore `commands/{pc}/q/{id}` 経由。owner 認証済み Web が投入し、
 
 | 命令 | sid | 実体 | Ack の位置 | 結合度 |
 |---|---|---|---|---|
-| `restart-agent` | — | `launchctl kickstart -k`（**herdr-drover デーモン**） | **先行**（自己 kill するため） | [非依存] |
+| `restart-daemon`<br>（旧名 `restart-agent`） | — | `launchctl kickstart -k`（**herdr-drover デーモン**） | **先行**（自己 kill するため） | [非依存] |
 | `self-update` | — | selfupdate.Update → `os.Exit(0)` | **先行** | [非依存] |
 | `restart-proxy` | 必須 | 当該 sid の bridge respawn（**claude プロセスには触らない**） | 後 | [非依存] |
-| `restart-claude` | 空=全部 | claude セッションを会話ごと作り直す | 後 | [要一般化] |
-| `update-claude` | 空=全部 | claude 本体更新＋セッション反映 | 後 | [要一般化] |
-| `update-all` | — | 上記＋自己更新＋再起動 | **先行**（この後 exit する） | [要一般化] |
+| `restart-agent-session` | 空=全部 | エージェントセッションを会話ごと作り直す | 後 | [一般化済] |
+| `update-agent-cli` | 空=全部 | エージェント本体更新＋セッション反映 | 後 | [一般化済] |
+| `update-all` | — | 上記＋自己更新＋再起動 | **先行**（この後 exit する） | [agent 非依存] |
+
+**旧命令名は alias として allowlist に残す**（`restart-claude` / `update-claude` /
+`restart-agent`）。まだ更新していない PC の Web/CLI から投げられなくなるため、
+外してはいけない。`state.NormalizeCommand` が新名へ写像し、`agent` を `"claude"` に
+固定する（旧名は claude 専用だった＝推測ではなく事実）。`restart-agent` だけは
+元々 agent 概念を持たないので空のまま `restart-daemon` になる。**どう解釈したかは
+必ず Ack detail に残す**。
+
+**`agent` パラメータ**: 空 = その PC の全エージェント種別（`sid` 空と同型）。
+Cloud 側 `ValidAgents`（canonical 21 種）で投入時に検証する — 未知の値を通すと
+受け手が「知らないので全 agent」に degrade して**意図より広い破壊**をしかねない。
+
+⚠**デプロイ順序**: Cloud Run を**先に**デプロイして新命令名を allowlist へ追加
+→ その後 agent 側。逆順だと `未知のコマンド` で投入できない。
 
 **Ack 先行の規律**: 自プロセスが死ぬ命令は Ack を**実行前**に打つ。後 Ack だと
 プロセスが死んで監査が `running` のまま永久に滞留する。
@@ -214,6 +229,7 @@ Firestore `commands/{pc}/q/{id}` 経由。owner 認証済み Web が投入し、
 id           string  // 12 バイト乱数の hex
 cmd          string  // allowlist の語
 sid          string  // 対象セッション（空=PC 全体）
+agent        string  // エージェント種別（canonical label。空=全種別）  ← v0.5.23
 requested_by string  // ログイン email（監査）
 ts           string  // RFC3339Nano
 status       string  // pending → running → done|error
@@ -221,9 +237,10 @@ detail       string  // 実行結果の要約（履歴に表示）
 finished_at  string  // RFC3339Nano
 ```
 
-⚠ **パラメータは `cmd` と `sid` の 2 つだけ**。`--model` のような追加引数を
-遠隔から渡す口が無い（[DESIGN_MULTI_AGENT.md](DESIGN_MULTI_AGENT.md) §2.5 で
-`agent` フィールド追加を提案）。
+⚠ `agent` は **struct タグだけでは Firestore に書かれない**（`Set` は map を
+そのまま書く）。`PushCommand` の**map リテラルにも `"agent"` を足すこと**。
+
+⚠ **`--model` を遠隔から渡す口はまだ無い**（`cmd` / `sid` / `agent` の 3 つ）。
 
 ---
 
@@ -248,20 +265,70 @@ key          string  // pane_id（server 再起動を跨いで安定）
 session_id   string  // = key
 cwd          string
 short_dir    string  // cwd の末尾（表示用）
-window_name  string  // agent 名 → pane label → pane_id の優先順
+window_name  string  // シム命名 → herdr 検出種別 → pane label → pane_id の優先順
 is_active    bool    // agent_status == "working" の exact 写像
 agent_status string  // herdr の生値（idle/working/blocked/done/unknown）
+agent        string  // エージェント種別（canonical label）。**空なら載せない** ← v0.5.23
 ```
 
 **除外**は「pane_id が空」と「↗窓 注入 pane」の 2 条件のみ（agent 種別で絞って
 いない＝[非依存]）。
 
-⚠ **`agent` フィールドが無い**。Web はどのセッションがどのエージェントか判別
-できない（[DESIGN_MULTI_AGENT.md](DESIGN_MULTI_AGENT.md) §2.7）。
+`agent` は `agentid.Resolve` の結果。**空／canonical 外／権威が矛盾なら
+キー自体を載せない**（後方互換＝旧 Web・旧 agent は追加キーを知らない）。
+session doc は端から端まで pass-through なので、1 キー足すだけで Firestore→Web
+まで中間層の改修ゼロで届く。影響は初回 1 回だけ `content_hash` が変わって
+write が 1 回増えることのみ。
 
 **`agent_kind: "herdr-drover"`** は「↗窓 に応答できる drover が居る PC か」の
 製品マーカーであり、**コーディングエージェント種別ではない**。流用禁止
 （`DroverPCs` が注入対象の絞り込みに使うため、壊すと ↗窓 が全滅する）。
+
+---
+
+## 4.2 エージェント種別（canonical label）
+
+herdr が検出する **21 種**（`src/detect/mod.rs agent_label()` から実ソース抽出）:
+
+```
+agy amp claude cline codex copilot cursor devin droid gemini grok
+hermes kilo kimi kiro maki mastracode omp opencode pi qodercli
+```
+
+**identity 判定は `internal/agentid.Resolve` に一元化**（shim / restart・update /
+organize / producer が共有）。権威は強い順に:
+
+| # | 権威 | 供給元 | 備考 |
+|---|---|---|---|
+| 0 | 注入 token | `drover_inj_pc` / `drover_inj_sid` | **最優先で対象外**。reconcile の `mirror_agents` が注入 pane の検出値に `claude` を書くため、後段に置くとリモートの鏡を誤認する |
+| 1 | `agent_session.(source,agent)` | herdr の 14 組 allowlist | 値域が canonical に閉じる。ただし `report_agent_session` は無認証の公開 API＝**偽装不能ではない** |
+| 2 | シム命名 `<agent>` / `<agent>-N` | drover が慣習的に書く | ユーザーも `herdr agent rename` で書ける同一フィールド |
+| 3 | herdr の検出値 `agent` | プロセス名検出 ∪ hook 申告 | **canonical への exact-match 必須**（未知文字列は捨てる） |
+
+権威同士が矛盾したら **機械確定不能**＝対象外＋必ず報告（推測で動かさない）。
+
+### 4.3 エージェント差分の Spec テーブル
+
+`internal/agentid/spec.go`。**分岐をコードに散らさずデータで持つ**。
+
+- **ResumeSpec**（herdr `agent_resume.rs plan()` の写し・14 種）— resume 引数の形は
+  4 通り: `--resume <v>`（claude/devin/droid/hermes/qodercli/cursor）／
+  `--session <v>`（kimi/opencode/kilo/pi）／`--thread <v>`（mastracode）／
+  `--resume=<v>`（copilot/omp）／`codex resume <v>`（**位置引数サブコマンド**）。
+  `cursor` だけ argv[0] が `cursor-agent`。`pi`/`omp` は `path` kind も取る。
+  **残り 7 種（agy/amp/cline/gemini/grok/kiro/maki）は resume 原理的に不可**
+  （herdr が `agent_session` を出さない）＝素起動へ落として loud に報告。
+- **UpdaterSpec** — `VersionArgv`（nil=版比較 skip）／`UpdateArgv`（nil=更新口なし＝
+  再起動のみ）／`Timeout`（**per-agent 予算**。全体に 1 本掛けない）。
+- **InstallSpec** — `BinNames` / `WellKnownPaths`。⚠**`BinNames` は herdr の
+  `lookup_agent` alias 表の要素でなければならない**。表に無い basename で起動すると
+  herdr の検出（前景プロセス名基準）に**一切載らず**、`pane.agent` も
+  `agent_session` も付かない＝resume backstop も organize の検出系統も silent に
+  無効化される。`ValidateSpecs()` が静的検証する。
+
+⚠ resume 引数の抽出は **Spec 駆動**（「そのフラグが値を取るか」で決める）。
+**値の書式で判定しない** — claude の会話 ref はたまたま uuid だが pi/omp は path も
+取るので、uuid 判定だと二重指定や誤削除、他エージェントでの backstop 不発が起きる。
 
 ---
 
@@ -358,11 +425,19 @@ workspace.close  workspace.create  workspace.focus  workspace.list  workspace.re
     放置される（実測 2026-07-25: 11→0 のまま停止）。daemon の起動時 reconcile が
     唯一の確実な再生成契機。
 11. **identity ≠ 破壊してよい対象**。pane を作り直す操作（restart / update）は
-    `resolveAgentKind` に加えて `isDirectAgentInvocation`（`launch_argv[0]` の
-    basename）を必ず確認する。wrapper 起動 pane に `--resume` を足しても
+    `agentid.Resolve` に加えて `agentid.IsDirectInvocation`（`launch_argv[0]` の
+    basename）を必ず確認する。wrapper 起動 pane に resume 引数を足しても
     エージェントに届かず、会話を失ったまま成功と報告してしまう。
 12. **未命名 pane に勝手に命名しない**。herdr UI 起動の pane を再起動しても
     agent 名を付けない（頼まれていない identity 変更になる）。
+13. **エージェント種別を跨いで attach しない**。シムの候補選定・resume backstop・
+    命名はすべて種別を一致させる。跨ぐと「別のエージェントに自分の会話を覗かせる」
+    ことになり、静かに起きる（実バグ: `gemini` シムが cwd 一致の claude
+    セッションへ接続した。v0.5.23 で修正・回帰テスト済み）。
+14. **バイナリ解決は新規起動が要ると分かってから**（遅延化）。無条件に解決すると
+    「ローカル未導入のエージェントの既存セッションへ attach だけしたい」が失敗する。
+15. **旧命令名を allowlist から外さない**。まだ更新していない PC の Web/CLI から
+    投げられなくなる（先行デプロイの意味が消える）。
 
 ---
 

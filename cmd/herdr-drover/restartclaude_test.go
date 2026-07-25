@@ -64,10 +64,16 @@ func TestRebuildResumeArgv(t *testing.T) {
 			want: []string{"/p/claude", "--model", "opus", "--verbose", "--resume", uuid},
 		},
 		{
-			name: "-r の非 uuid 値は claude 側の別解釈＝値を落とさない",
+			// 旧実装は「値が uuid 形でなければ claude の別解釈」とみなして残して
+			// いたが、これは誤り。`claude --help` 実測: `-r, --resume [value]` の
+			// value は **session ID か picker の検索語**でしかない。残すと
+			// ["/p/claude","report.md","--resume",uuid] になり report.md が
+			// **位置引数（初期プロンプト）**に化ける。Spec 駆動では「そのフラグが
+			// 値を取るか」で決めるので正しく落ちる。
+			name: "-r の値は書式に関わらず落とす（残すと初期プロンプトに化ける）",
 			argv: []string{"/p/claude", "-r", "report.md"},
 			uuid: uuid,
-			want: []string{"/p/claude", "report.md", "--resume", uuid},
+			want: []string{"/p/claude", "--resume", uuid},
 		},
 		{
 			name: "uuid 未検出なら argv を一切いじらない（既存 resume を失わない）",
@@ -83,9 +89,9 @@ func TestRebuildResumeArgv(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := rebuildResumeArgv(tc.argv, tc.uuid, "")
+			got := rebuildResumeArgv("claude", tc.argv, herdrapi.AgentSession{Kind: "id", Value: tc.uuid}, "")
 			if strings.Join(got, "\x00") != strings.Join(tc.want, "\x00") {
-				t.Fatalf("rebuildResumeArgv(%v, %q) = %v, want %v", tc.argv, tc.uuid, got, tc.want)
+				t.Fatalf("rebuildResumeArgv(claude, %v, %q) = %v, want %v", tc.argv, tc.uuid, got, tc.want)
 			}
 		})
 	}
@@ -130,7 +136,7 @@ func TestRebuildResumeArgvModel(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := rebuildResumeArgv(tc.argv, tc.uuid, tc.model)
+			got := rebuildResumeArgv("claude", tc.argv, herdrapi.AgentSession{Kind: "id", Value: tc.uuid}, tc.model)
 			// 順序は実装都合で変わり得るので集合＋隣接ペアで検証する。
 			if len(got) != len(tc.want) {
 				t.Fatalf("got %v, want %v（要素数違い）", got, tc.want)
@@ -173,15 +179,18 @@ func TestSelectRestartTargets(t *testing.T) {
 	}
 
 	t.Run("sid 空は全ローカル claude pane", func(t *testing.T) {
-		got, _, err := selectRestartTargets(agents, "")
+		got, _, err := selectRestartTargets(agents, "", "")
 		if err != nil {
 			t.Fatalf("err: %v", err)
 		}
 		if len(got) != 2 {
 			t.Fatalf("対象 %d 件: %+v（claude と claude-2 の 2 件のはず）", len(got), got)
 		}
-		if got[0].PaneID != "w1:p1" || got[0].ResumeUUID != "u-1" {
-			t.Fatalf("1 件目 = %+v（pane w1:p1・uuid u-1 のはず）", got[0])
+		if got[0].PaneID != "w1:p1" || got[0].Session.Value != "u-1" {
+			t.Fatalf("1 件目 = %+v（pane w1:p1・会話 ref u-1 のはず）", got[0])
+		}
+		if got[0].AgentKind != "claude" {
+			t.Fatalf("1 件目の AgentKind = %q（claude のはず）", got[0].AgentKind)
 		}
 		if got[1].AgentStatus != "working" {
 			t.Fatalf("2 件目の status = %q（working のはず）", got[1].AgentStatus)
@@ -189,7 +198,7 @@ func TestSelectRestartTargets(t *testing.T) {
 	})
 
 	t.Run("注入 pane は token で構造的に除外", func(t *testing.T) {
-		got, _, _ := selectRestartTargets(agents, "")
+		got, _, _ := selectRestartTargets(agents, "", "")
 		for _, g := range got {
 			if g.PaneID == "w1:p4" || g.PaneID == "w1:p5" {
 				t.Fatalf("↗窓 注入 pane %s が対象に入った（token 除外が効いていない）: %+v", g.PaneID, got)
@@ -198,7 +207,7 @@ func TestSelectRestartTargets(t *testing.T) {
 	})
 
 	t.Run("sid 指定はその 1 枚だけ", func(t *testing.T) {
-		got, _, err := selectRestartTargets(agents, "w1:p2")
+		got, _, err := selectRestartTargets(agents, "w1:p2", "")
 		if err != nil {
 			t.Fatalf("err: %v", err)
 		}
@@ -209,7 +218,7 @@ func TestSelectRestartTargets(t *testing.T) {
 
 	t.Run("対象外 sid は loud に error（黙って 0 件にしない）", func(t *testing.T) {
 		for _, sid := range []string{"w1:p3", "w1:p4", "w1:p5", "w1:pZZ"} {
-			if _, _, err := selectRestartTargets(agents, sid); err == nil {
+			if _, _, err := selectRestartTargets(agents, sid, ""); err == nil {
 				t.Fatalf("sid %q が error にならなかった", sid)
 			}
 		}
@@ -262,7 +271,7 @@ func TestSummarizeRestart(t *testing.T) {
 // writeStubClaude は生存し続ける stub を作って**絶対パスだけ**返す（PATH には
 // 置かない＝PATH 解決に退行したらこの e2e が落ちる）。
 // ⚠stub の**ファイル名は "claude" でなければならない**。restart/update は
-// isDirectAgentInvocation（argv[0] の basename）で「claude の直接起動か」を
+// agentid.IsDirectInvocation（argv[0] の basename）で「claude の直接起動か」を
 // 確認するため、別名の stub は本番と違う経路（skip）に落ちてテストが本番を
 // 担保しなくなる。各呼び出しは t.TempDir() で別ディレクトリになるので、
 // 同名でも「別バイナリ」を作れる（曖昧判定のテストが成立する）。
@@ -708,7 +717,7 @@ func TestAgentListCarriesTokensAndSession(t *testing.T) {
 		t.Fatalf("agent.list と pane.list が食い違う: agent=%+v pane=%+v", got, p)
 	}
 	// この状態なら注入 pane として除外されること。
-	if targets, _, _ := selectRestartTargets(agents, ""); len(targets) != 0 {
+	if targets, _, _ := selectRestartTargets(agents, "", ""); len(targets) != 0 {
 		t.Fatalf("token 付き pane が対象に入った: %+v", targets)
 	}
 }
@@ -743,7 +752,7 @@ func TestRestartClaudeKeepsUnnamedPaneUnnamed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("agent.list: %v", err)
 	}
-	targets, conflicts, err := selectRestartTargets(agents, "")
+	targets, conflicts, err := selectRestartTargets(agents, "", "")
 	if err != nil {
 		t.Fatalf("selectRestartTargets: %v（conflicts=%v）", err, conflicts)
 	}

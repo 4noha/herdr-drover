@@ -11,10 +11,31 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+
+	"github.com/4noha/herdr-drover/internal/agentid"
 )
 
 func main() {
+	// argv[0] multi-call: シムを `claude` / `codex` 等の名前で symlink すると、
+	// その名前のエージェントシムとして振る舞う（busybox 方式）。エージェントを
+	// 増やすたびに専用サブコマンドを足さなくて済む。
+	//
+	// ⚠自分自身の名前（herdr-drover）では発火させない。また canonical label に
+	// 一致する名前のときだけ＝未知の名前は通常 dispatch へ落とす。
+	if agent := filepath.Base(os.Args[0]); agentid.IsCanonical(agent) {
+		os.Exit(runShim(agent, os.Args[1:], os.Stdout, os.Stderr))
+	}
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+}
+
+// runShim は argv[0] multi-call / `shim <agent>` 共通のシム実行。
+func runShim(agent string, args []string, stdout, stderr io.Writer) int {
+	if err := cmdAgentShim(agent, args, stdout, stderr); err != nil {
+		fmt.Fprintf(stderr, "herdr-drover %s: %v\n", agent, err)
+		return 1
+	}
+	return 0
 }
 
 // run は引数 dispatch の本体。戻り値は exit code
@@ -92,12 +113,17 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 0
 	case "claude":
 		// claude シム（claudeshim.go）。rest は実 claude へそのまま渡す
-		// 引数列なので余分引数チェックはしない。
-		if err := cmdClaude(rest, stdout, stderr); err != nil {
-			fmt.Fprintf(stderr, "herdr-drover claude: %v\n", err)
-			return 1
+		// 引数列なので余分引数チェックはしない。`shim claude` と同義（後方互換）。
+		return runShim("claude", rest, stdout, stderr)
+	case "shim":
+		// `herdr-drover shim <agent> [args...]` — 汎用シム入口。
+		// symlink を張れない環境（PATH に置けない等）でも使える明示形。
+		if len(rest) == 0 {
+			fmt.Fprintf(stderr, "herdr-drover shim: エージェント種別が要る"+
+				"（例: herdr-drover shim claude）\n")
+			return 2
 		}
-		return 0
+		return runShim(rest[0], rest[1:], stdout, stderr)
 	case "organize":
 		// organize はフラグ（--capture/--dry-run）を取るので rest を渡す
 		//（organize.go が flag.FlagSet で解析）。
@@ -135,11 +161,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		return 0
-	case "restart-claude":
-		// claude セッションを会話ごと作り直して新バイナリを掴ませる
-		// （restartclaude.go）。--force/--dry-run と任意の sid を取る。
+	case "restart-agent-session", "restart-claude":
+		// エージェントセッションを会話ごと作り直して新バイナリを掴ませる
+		// （restartclaude.go）。--force/--dry-run/--agent と任意の sid を取る。
+		// 旧名 restart-claude は alias（既存の手順書・スクリプトを壊さない）。
 		if err := cmdRestartClaude(rest, stdout, stderr); err != nil {
-			fmt.Fprintf(stderr, "herdr-drover restart-claude: %v\n", err)
+			fmt.Fprintf(stderr, "herdr-drover %s: %v\n", cmd, err)
 			if errors.Is(err, errUsage) {
 				return 2
 			}
@@ -156,10 +183,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		return 0
-	case "update-claude":
-		// claude 本体の更新＋セッション反映を 1 コマンドで（updateclaude.go）。
+	case "update-agent-cli", "update-claude":
+		// エージェント本体の更新＋セッション反映を 1 コマンドで（updateclaude.go）。
+		// 旧名 update-claude は alias。
 		if err := cmdUpdateClaude(rest, stdout, stderr); err != nil {
-			fmt.Fprintf(stderr, "herdr-drover update-claude: %v\n", err)
+			fmt.Fprintf(stderr, "herdr-drover %s: %v\n", cmd, err)
 			if errors.Is(err, errUsage) {
 				return 2
 			}
@@ -197,12 +225,17 @@ func usage(w io.Writer) {
   herdr-drover enroll <code> --relay wss://<host>
                           Web「＋ 端末を追加」のコードで SA 鍵と設定を自動配置
                           （表示コマンドは claude-master 用＝code と --relay を読み替える）
-  herdr-drover claude [args...]
-                          claude シム（cm start の C案）: server 自動起動＋cwd
-                          完全一致の既存 claude セッションへ attach／複数は番号
-                          picker（Enter=先頭・n/0=新規・数字=指定）／無し or
-                          引数あり(TTY)は新規 pane／引数あり×非 TTY は素の
-                          claude へ透過（alias claude='herdr-drover claude'）
+  herdr-drover claude [args...]   （= herdr-drover shim claude）
+  herdr-drover shim <agent> [args...]
+                          エージェントシム: server 自動起動＋cwd 完全一致の既存
+                          セッションへ attach／複数は番号 picker（Enter=先頭・
+                          n/0=新規・数字=指定）／無し or 引数あり(TTY)は新規 pane／
+                          引数あり×非 TTY は素のバイナリへ透過。
+                          **argv[0] multi-call**: 本体を canonical label 名
+                          （claude / codex …）で symlink すればその名前で起動できる
+                          （alias は exec に効かないので symlink か shim 形を使う）。
+                          種別を跨いで attach しない／本体の解決は新規起動が要ると
+                          分かってから（未導入エージェントの既存セッションへも繋げる）
   herdr-drover organize [--dry-run]
                           claude セッションを含む Tab を wsmap ルール
                           （exact-cwd > 最長 prefix > default）解決先の
@@ -228,23 +261,30 @@ func usage(w io.Writer) {
                           実行。表示された ~/.herdr-drover/agent-fwd/*.sock を slave で
                           SSH_AUTH_SOCK に指定して git。Ctrl-C で撤去（推奨: 専用
                           deploy key を ssh-add -c で confirm 付き登録）
-  herdr-drover restart-claude [--force] [--dry-run] [sid]
-                          claude セッションを**会話を引き継いだまま**作り直して
-                          新しい claude バイナリを掴ませる（exec 済みプロセスは
-                          symlink 張替えを追わないため。sid 省略でその PC の
-                          ローカル claude pane 全部）。起動 argv は herdr が持つ
-                          launch_argv をそのまま再利用し PATH 解決はしない。
-                          会話は agent_session の uuid で --resume 継続。
+  herdr-drover restart-agent-session [--force] [--dry-run] [--agent <kind>] [sid]
+                          （旧名 restart-claude も可）
+                          エージェントセッションを**会話を引き継いだまま**作り直して
+                          新しいバイナリを掴ませる（exec 済みプロセスは symlink
+                          張替えを追わないため。sid 省略でその PC のローカル
+                          セッション全部・--agent で種別を絞る）。起動 argv は
+                          herdr が持つ launch_argv をそのまま再利用し PATH 解決は
+                          しない。会話は agent_session の ref で resume 継続
+                          （形は種別ごとに違う: --resume / --session / --thread /
+                          --resume= / codex は位置引数）。herdr が会話 ref を出さない
+                          7 種は resume 原理的に不可＝素起動へ落として loud に報告。
                           agent_status=working は既定 skip（--force で強制）／
-                          同居 pane のある Tab は巻き添え回避で skip
-  herdr-drover update-claude [--force] [--dry-run] [sid]
-                          claude 本体を最新へ更新し、そのままセッションへ反映する
-                          （claude update → restart-claude の 1 コマンド版）。
+                          同居 pane のある Tab は巻き添え回避で skip／argv が本体の
+                          直接起動でない pane（wrapper 経由）も skip
+  herdr-drover update-agent-cli [--force] [--dry-run] [--agent <kind>] [sid]
+                          （旧名 update-claude も可）
+                          エージェント本体を最新へ更新し、そのままセッションへ
+                          反映する（更新 → restart-agent-session の 1 コマンド版）。
                           更新が無くても再起動する＝「ディスクは最新だがセッションは
-                          旧版」を直すのが目的。対象バイナリは稼働中 claude pane の
-                          argv[0] を権威に決め、根拠を出力する
+                          旧版」を直すのが目的。対象バイナリは稼働中 pane の argv[0]
+                          （絶対パスかつ本体の直接起動のみ）を権威に決め、根拠を
+                          出力する。--agent 省略時は更新口を持つ既定（claude）
   herdr-drover update-all [--force] [--model <alias>]
-                          claude 本体の更新＋セッション反映 → herdr-drover 自身の
+                          エージェント本体の更新＋セッション反映 → herdr-drover 自身の
                           更新、を逐次実行（Web のワンボタンと同じ）。⚠自身の
                           再起動は exit でしか反映できずハンドラが終わるため必ず
                           最後＝この順序は入れ替えられない

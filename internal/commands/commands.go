@@ -34,6 +34,7 @@ package commands
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/4noha/drover-cloud/state"
 )
@@ -67,10 +68,10 @@ type CommandRunner struct {
 	// DoRestartClaude は claude セッションの作り直し（restartclaude.go）。
 	// sid 空＝その PC のローカル claude pane 全部。戻り値の要約が Ack detail に
 	// 載る（何件やって何件 skip したかを監査に残す）。
-	DoRestartClaude func(ctx context.Context, sid string) (summary string, err error)
+	DoRestartClaude func(ctx context.Context, sid, agent string) (summary string, err error)
 	// DoUpdateClaude は claude 本体の更新＋セッション反映（updateclaude.go）。
 	// ダウンロードを含むので DoRestartClaude より長くかかる（agent 側で上限あり）。
-	DoUpdateClaude func(ctx context.Context, sid string) (summary string, err error)
+	DoUpdateClaude func(ctx context.Context, sid, agent string) (summary string, err error)
 	// DoUpdateAll は update-claude＋self-update を逐次実行する（update-all）。
 	// restart=true なら呼び手（handle）が Ack 後に DoExit する＝launchd が新
 	// バイナリで再起動。err 時は restart=false（原因調査のため生かす）。
@@ -96,8 +97,18 @@ func (cr *CommandRunner) handle(ctx context.Context, cm state.Command) {
 		return
 	}
 
-	switch cm.Cmd {
-	case "restart-agent":
+	// 旧命令名は新名へ写像する（Cloud 側の allowlist には旧名も残っているので、
+	// まだ更新していない Web/CLI から旧名が飛んでくる）。旧名は claude 専用
+	// だったので agent を "claude" に固定する＝推測ではなく事実。
+	cmd, agent, legacy := state.NormalizeCommand(cm.Cmd, cm.Agent)
+	legacyNote := ""
+	if legacy {
+		// どう解釈したかを必ず監査に残す（黙って読み替えない）。
+		legacyNote = fmt.Sprintf("（旧名 %s を %s/agent=%q として解釈）", cm.Cmd, cmd, agent)
+	}
+
+	switch cmd {
+	case "restart-daemon":
 		if cr.DoRestart == nil {
 			_ = cr.St.AckCommand(ctx, cm.ID, "error", "restart 未配線")
 			return
@@ -139,19 +150,19 @@ func (cr *CommandRunner) handle(ctx context.Context, cm state.Command) {
 		}
 		_ = cr.St.AckCommand(ctx, cm.ID, "done", "bridge respawn: "+cm.SID)
 
-	case "restart-claude":
+	case "restart-agent-session":
 		if cr.DoRestartClaude == nil {
-			_ = cr.St.AckCommand(ctx, cm.ID, "error", "restart-claude 未配線")
+			_ = cr.St.AckCommand(ctx, cm.ID, "error", "restart-agent-session 未配線")
 			return
 		}
 		// agent 自身は死なない＝Ack 先行にせず、実行結果の要約を detail に残す
 		// （何件再起動・何件 skip したかが監査で追える）。
-		summary, err := cr.DoRestartClaude(ctx, cm.SID)
+		summary, err := cr.DoRestartClaude(ctx, cm.SID, agent)
 		if err != nil {
-			_ = cr.St.AckCommand(ctx, cm.ID, "error", "claude 再起動 失敗: "+err.Error())
+			_ = cr.St.AckCommand(ctx, cm.ID, "error", "セッション再起動 失敗: "+err.Error()+legacyNote)
 			return
 		}
-		_ = cr.St.AckCommand(ctx, cm.ID, "done", summary)
+		_ = cr.St.AckCommand(ctx, cm.ID, "done", summary+legacyNote)
 
 	case "update-all":
 		if cr.DoUpdateAll == nil {
@@ -171,19 +182,19 @@ func (cr *CommandRunner) handle(ctx context.Context, cm state.Command) {
 			cr.DoExit()
 		}
 
-	case "update-claude":
+	case "update-agent-cli":
 		if cr.DoUpdateClaude == nil {
-			_ = cr.St.AckCommand(ctx, cm.ID, "error", "update-claude 未配線")
+			_ = cr.St.AckCommand(ctx, cm.ID, "error", "update-agent-cli 未配線")
 			return
 		}
 		// restart-claude と同じく agent 自身は死なない＝Ack は実行後。版の
 		// 前後と再起動結果の要約を detail に残す。
-		summary, err := cr.DoUpdateClaude(ctx, cm.SID)
+		summary, err := cr.DoUpdateClaude(ctx, cm.SID, agent)
 		if err != nil {
-			_ = cr.St.AckCommand(ctx, cm.ID, "error", "claude 更新 失敗: "+err.Error())
+			_ = cr.St.AckCommand(ctx, cm.ID, "error", "エージェント更新 失敗: "+err.Error()+legacyNote)
 			return
 		}
-		_ = cr.St.AckCommand(ctx, cm.ID, "done", summary)
+		_ = cr.St.AckCommand(ctx, cm.ID, "done", summary+legacyNote)
 
 	default:
 		// PushCommand 側 allowlist を通らない値がここへ来るのは

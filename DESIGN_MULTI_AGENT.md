@@ -1,5 +1,9 @@
 # マルチエージェント対応 設計（Claude 専用箇所の棚卸しと一般化仕様）
 
+> **状態: P0〜P7 すべて実装済み（herdr-drover v0.5.23 / drover-cloud v0.1.11）。**
+> 本ドキュメントは**設計の意図と根拠**の記録として残す。現行の仕様（実装が
+> どうなっているか）の正は [SPEC.md](SPEC.md) §4.2〜4.3・§7。
+
 herdr-drover は現状 **Claude Code 専用**に作られている部分がある。別のコーディング
 エージェント（codex / cursor / gemini 等）を導入するにあたり、
 
@@ -402,12 +406,12 @@ Firestore→Web まで中間層の改修ゼロ**で届く。影響は「初回 1
 |---|---|---|
 | ~~P0~~ | ~~herdrapi 型に `agent`/`agent_session`/`tokens` を追加、organize の二重 decode を廃止~~ **完了（v0.5.22）** | これ無しでは他の全部が命名規約に依存し続ける |
 | ~~P1~~ | ~~`resolveAgentKind` の一元化（shim / restart・update / organize を統合）~~ **完了（v0.5.23）** | identity の単一地点化。`isDirectAgentInvocation`（actionability）も分離して導入 |
-| P2 | producer に `agent` を載せる（空なら載せない） | Web 出し分け・per-agent 命令の入力 |
-| P3 | Cloud Run に新命令名を allowlist 追加（旧名残置）して**先行**デプロイ | 順序を誤ると命令が全滅 |
-| P4 | Spec テーブル（Resume/Updater/Install）導入 + CLI/遠隔命令の `--agent` | |
-| P5 | Web UI の出し分け・文言動的化 | |
-| P6 | シム入口の一般化（`herdr-drover shim <agent>` or argv[0] multi-call） | 表面契約なので最後 |
-| P7 | README/SETUP/DESIGN/**TODO.md** の同時更新 | TODO.md は「正」 |
+| ~~P2~~ | ~~producer に `agent` を載せる（空なら載せない）~~ **完了（v0.5.23）** | Web 出し分け・per-agent 命令の入力 |
+| ~~P3~~ | ~~Cloud Run に新命令名を allowlist 追加（旧名残置）して**先行**デプロイ~~ **完了（drover-cloud v0.1.11 / rev 00049）** | 順序を誤ると命令が全滅 |
+| ~~P4~~ | ~~Spec テーブル（Resume/Updater/Install）導入 + CLI/遠隔命令の `--agent`~~ **完了（v0.5.23）** | |
+| ~~P5~~ | ~~Web UI の出し分け・文言動的化~~ **完了（drover-cloud v0.1.11）** | |
+| ~~P6~~ | ~~シム入口の一般化~~ **完了（v0.5.23。`shim <agent>` と argv[0] multi-call の両方）** | 表面契約なので最後 |
+| ~~P7~~ | ~~README/SETUP/DESIGN/**TODO.md** の同時更新~~ **完了（v0.5.23）** | TODO.md は「正」 |
 
 ---
 

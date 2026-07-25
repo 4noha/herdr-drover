@@ -159,7 +159,7 @@ func TestResolveClaudeBin(t *testing.T) {
 	if _, err := renameClaudePaneTo(api, paneA, "claude"); err != nil {
 		t.Fatalf("agent.rename(a): %v", err)
 	}
-	got, source, err := resolveClaudeBin(api, io.Discard)
+	got, source, err := resolveClaudeBin(api, "claude", io.Discard)
 	if err != nil {
 		t.Fatalf("resolveClaudeBin: %v", err)
 	}
@@ -178,11 +178,11 @@ func TestResolveClaudeBin(t *testing.T) {
 	if _, err := renameClaudePaneTo(api, paneB, "claude-2"); err != nil {
 		t.Fatalf("agent.rename(b): %v", err)
 	}
-	bins, berr := claudeBinsFromPanes(api, io.Discard)
+	bins, berr := claudeBinsFromPanes(api, "claude", io.Discard)
 	if berr != nil || len(bins) != 2 {
 		t.Fatalf("前提が崩れている（2 種類が同時に稼働しているはず）: bins=%v err=%v", bins, berr)
 	}
-	if _, _, err = resolveClaudeBin(api, io.Discard); err == nil {
+	if _, _, err = resolveClaudeBin(api, "claude", io.Discard); err == nil {
 		t.Fatalf("2 種類のバイナリが混在しているのに error にならなかった")
 	} else if !strings.Contains(err.Error(), "一意に決められない") {
 		t.Fatalf("error 文面が曖昧さを説明していない: %v", err)
@@ -199,7 +199,7 @@ func TestRunClaudeUpdateReportsTimeoutReason(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
-	_, err := runClaudeUpdate(ctx, bin)
+	_, err := runClaudeUpdate(ctx, "claude", bin)
 	if err == nil {
 		t.Fatalf("上限超過が error にならなかった")
 	}
@@ -283,7 +283,7 @@ func TestClaudeBinsIgnoresRelativeAndWrapperArgv(t *testing.T) {
 	}
 
 	var log bytes.Buffer
-	bins, err := claudeBinsFromPanes(api, &log)
+	bins, err := claudeBinsFromPanes(api, "claude", &log)
 	if err != nil {
 		t.Fatalf("claudeBinsFromPanes: %v", err)
 	}
@@ -296,7 +296,7 @@ func TestClaudeBinsIgnoresRelativeAndWrapperArgv(t *testing.T) {
 	}
 
 	// bin が一意に決まる＝update が曖昧 error で止まらない。
-	got, source, err := resolveClaudeBin(api, io.Discard)
+	got, source, err := resolveClaudeBin(api, "claude", io.Discard)
 	if err != nil {
 		t.Fatalf("resolveClaudeBin: %v（identity 拡大で曖昧 error が恒常発火している）", err)
 	}

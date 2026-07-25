@@ -766,3 +766,59 @@ func TestShortDir(t *testing.T) {
 		}
 	}
 }
+
+// session doc に agent（canonical label）が載ること。Firestore→Web は完全
+// pass-through なので、ここで載せた 1 キーが中間層の改修ゼロで Web まで届く。
+//
+// **空なら載せない**のが後方互換の要（旧 Web / 旧 agent は追加キーを知らない）。
+func TestBuildSessionsCarriesAgentKind(t *testing.T) {
+	panes := []herdrapi.PaneInfo{
+		{PaneID: "w1:p1", Cwd: "/a/proj"},                  // シム命名で claude
+		{PaneID: "w1:p2", Cwd: "/a/x", Agent: "codex"},     // herdr 検出のみ
+		{PaneID: "w1:p3", Cwd: "/a/y"},                     // 素の shell
+		{PaneID: "w1:p4", Cwd: "/a/z", Agent: "totally-x"}, // canonical 外＝採用しない
+		{PaneID: "w1:p5", Cwd: "/a/w", Agent: "claude", // 矛盾（名 codex × 検出 claude）
+			Label: "codex"},
+	}
+	agents := []herdrapi.AgentInfo{
+		{PaneID: "w1:p1", Name: "claude-2", AgentStatus: "idle"},
+		{PaneID: "w1:p5", Name: "codex", AgentStatus: "idle"},
+	}
+	got := BuildSessions(panes, agents, nil, nil)
+	by := map[string]map[string]any{}
+	for _, s := range got {
+		by[s["key"].(string)] = s
+	}
+
+	if by["w1:p1"]["agent"] != "claude" {
+		t.Errorf("シム命名 claude-2 → agent=%v, want claude", by["w1:p1"]["agent"])
+	}
+	if by["w1:p2"]["agent"] != "codex" {
+		t.Errorf("herdr 検出のみ → agent=%v, want codex", by["w1:p2"]["agent"])
+	}
+	for _, k := range []string{"w1:p3", "w1:p4", "w1:p5"} {
+		if v, ok := by[k]["agent"]; ok {
+			t.Errorf("%s: agent キーを載せてはいけない（%v）— 空/canonical 外/矛盾は載せない", k, v)
+		}
+	}
+	// window_name: 検出のみの pane も pane_id ではなく意味のある名前になる。
+	if by["w1:p2"]["window_name"] != "codex" {
+		t.Errorf("検出のみ pane の window_name = %v, want codex（pane_id にしない）",
+			by["w1:p2"]["window_name"])
+	}
+	if by["w1:p3"]["window_name"] != "w1:p3" {
+		t.Errorf("素の shell は pane_id のまま: %v", by["w1:p3"]["window_name"])
+	}
+}
+
+// ↗窓 注入 pane は producer が push しない（cross-PC 無限増殖の防止）。
+// agent キー追加でこの不変条件が緩まないことを固定する。
+func TestBuildSessionsStillExcludesInjectedPanes(t *testing.T) {
+	panes := []herdrapi.PaneInfo{
+		{PaneID: "w1:p1", Cwd: "/a", Agent: "claude",
+			Tokens: map[string]string{herdrapi.InjTokenPC: "other-herdr"}},
+	}
+	if got := BuildSessions(panes, nil, nil, nil); len(got) != 0 {
+		t.Fatalf("注入 pane を push した: %+v", got)
+	}
+}

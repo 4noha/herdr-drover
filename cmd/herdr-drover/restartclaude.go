@@ -14,7 +14,7 @@ package main
 // argv」＝`layout.export` の launch_argv（実測で command として返る）。symlink 先の
 // 切替は再 exec だけで効くので、argv をそのまま使い回すのが最も正確かつ安全。
 //
-// 対象 identity は **resolveAgentKind（agentid.go）に一元化**（v0.5.23）。
+// 対象 identity は **agentid.Resolve（agentid.go）に一元化**（v0.5.23）。
 // shim / restart・update / organize が同じ規則を共有する＝以前あった
 // 「organize は拾うのに restart は拾わない」非対称を解消した。
 // 注入 pane 除外・矛盾判定もそちらに含まれる。
@@ -22,7 +22,7 @@ package main
 // ⚠identity（何のエージェントか）だけでは**作り直してよい根拠にならない**。
 // 検出値まで identity を広げた結果 `zsh -lc '… claude'` のような wrapper 起動も
 // kind=claude になるが、その argv に --resume を足しても claude には届かない。
-// よって **isDirectAgentInvocation で argv[0] が claude 本体か**を必ず確認し、
+// よって **agentid.IsDirectInvocation で argv[0] が claude 本体か**を必ず確認し、
 // そうでなければ loud に skip する（誤って作り直すと会話を失ったまま「done」と
 // 報告する＝最悪の失敗）。
 //
@@ -43,6 +43,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/4noha/herdr-drover/internal/agentid"
 	"io"
 	"path/filepath"
 	"strings"
@@ -51,40 +52,50 @@ import (
 	"github.com/4noha/herdr-drover/internal/herdrapi"
 )
 
-// injectTokenKeys は ↗窓 注入 pane に reconcile が付ける metadata token。
-// 1 つでも付いていれば注入 pane＝再起動対象から外す（実測 2026-07-25: 注入 11 枚は
-// 全て両方を持ち、ローカル claude 4 枚は tokens 空）。
-//
-// ⚠キーは **herdrapi の定数を参照する**（v0.5.22）。以前はここで literal を
-// 二重定義しており、キーを変えると片側が取り残される状態だった。
-var injectTokenKeys = []string{herdrapi.InjTokenPC, herdrapi.InjTokenSID}
-
-// hasInjectToken は identity token の有無で ↗窓 注入 pane を判定する純関数
-// （pane.list / agent.list どちらの tokens でも使える共通判定）。
-func hasInjectToken(tokens map[string]string) bool {
-	for _, k := range injectTokenKeys {
-		if _, ok := tokens[k]; ok {
-			return true
-		}
-	}
-	return false
-}
-
 // restartTarget は再起動対象 1 件（exact-match で選ばれたローカル claude pane）。
 type restartTarget struct {
 	PaneID      string
 	TabID       string
 	WorkspaceID string
-	AgentName   string // シム encode 形 "claude" / "claude-N"
+	AgentName   string // agent 名（未命名の herdr ネイティブ pane は ""）
+	AgentKind   string // canonical label（agentid.Resolve の結果）
 	AgentStatus string
 	Cwd         string
-	ResumeUUID  string // agent_session(kind=id) の会話 uuid。"" は未検出
+	// Session は herdr が持つ会話 ref。Kind は "id" / "path"（agent による）。
+	// **uuid 固定ではない** — pi / omp は path も取る。Value=="" は未検出。
+	Session herdrapi.AgentSession
+}
+
+// label は表示用の識別子。未命名 pane（herdr UI 直接起動）は agent 名が空なので
+// 種別＋pane_id で特定できるようにする（監査記録が空文字にならないように）。
+func (t restartTarget) label() string {
+	if t.AgentName != "" {
+		return t.AgentName
+	}
+	if t.AgentKind != "" {
+		return t.AgentKind + "@" + t.PaneID
+	}
+	return t.PaneID
+}
+
+// resumeDesc は会話引き継ぎの説明（ログ・Ack detail 用）。
+// resume 非対応エージェントは「原理的に不可能」であることを明示する
+// （未実装と誤解させない／黙って会話を失ったように見せない）。
+func (t restartTarget) resumeDesc() string {
+	if t.Session.Value == "" {
+		if k := t.AgentKind; k != "" && !agentid.Resume(k).Supported {
+			return fmt.Sprintf("なし（%s は herdr が会話 ref を出さない＝resume 原理的に不可）", k)
+		}
+		return "なし（会話 ref 未検出＝argv そのまま）"
+	}
+	return fmt.Sprintf("%v", agentid.BuildResume(t.AgentKind, []string{t.AgentKind}, t.Session.Value)[1:])
 }
 
 // restartOptions は restart-claude の実行オプション（引数の並びで取り違えないよう
 // 構造体で渡す）。
 type restartOptions struct {
-	SID    string // "" = その PC のローカル claude pane 全部
+	SID    string // "" = その PC のローカル agent pane 全部
+	Agent  string // "" = 全エージェント種別。canonical label で絞る
 	Force  bool   // agent_status=working の pane も対象にする
 	DryRun bool   // 対象と再起動後 argv を表示するだけ
 	Model  string // "" = 既存の --model 指定に触らない。指定時は張り替える
@@ -109,21 +120,25 @@ type restartOutcome struct {
 // フィールドで両者の値が完全一致、pane_id 集合も一致）。join は冗長なうえ、
 // herdr の ndjson は **1 接続=1 リクエスト**なので 2 回の往復の間に構成が
 // 変わりうる＝**join 自体が競合の窓**だった。1 リクエストに閉じて解消する。
-func selectRestartTargets(agents []herdrapi.AgentInfo, sid string) ([]restartTarget, []string, error) {
+func selectRestartTargets(agents []herdrapi.AgentInfo, sid, agentFilter string) ([]restartTarget, []string, error) {
 	var conflicts []string
 	var out []restartTarget
 	for _, a := range agents {
-		// identity は resolveAgentKind に一元化（v0.5.23）。注入 pane の除外も
+		// identity は agentid.Resolve に一元化（v0.5.23）。注入 pane の除外も
 		// 矛盾判定もここに含まれる。**シム命名だけでなく herdr の検出値も見る**
 		// ＝organize と規則が揃い、herdr UI から直接起動された claude セッションも
 		// 対象になる（従来は restart/update だけが取りこぼしていた）。
-		kind, conflict := resolveAgentKind(identityOfAgent(a))
+		kind, conflict := agentid.Resolve(agentid.OfAgent(a))
 		if conflict != "" {
 			// 機械確定不能は黙って落とさず報告する（silent skip 禁止）。
 			conflicts = append(conflicts, fmt.Sprintf("%s: %s", a.PaneID, conflict))
 			continue
 		}
-		if kind != "claude" {
+		if kind == "" {
+			continue
+		}
+		// --agent 指定があればその種別だけ。空は「全エージェント種別」。
+		if sid == "" && agentFilter != "" && kind != agentFilter {
 			continue
 		}
 		t := restartTarget{
@@ -131,11 +146,15 @@ func selectRestartTargets(agents []herdrapi.AgentInfo, sid string) ([]restartTar
 			TabID:       a.TabID,
 			WorkspaceID: a.WorkspaceID,
 			AgentName:   a.Name,
+			AgentKind:   kind,
 			AgentStatus: a.AgentStatus,
 			Cwd:         a.Cwd,
 		}
-		if a.AgentSession.Kind == "id" {
-			t.ResumeUUID = a.AgentSession.Value
+		// 会話 ref は herdr の agent_session をそのまま持つ。**その agent が
+		// その kind を扱えるか**は Spec が知っている（claude は id のみ、
+		// pi/omp は path も）。扱えない kind は resume に使わない。
+		if agentid.SupportsKind(kind, a.AgentSession.Kind) {
+			t.Session = a.AgentSession
 		}
 		out = append(out, t)
 	}
@@ -178,46 +197,14 @@ func stripModelArgv(argv []string) []string {
 
 // stripResumeArgv は argv から resume 指定だけを取り除く純関数
 // （argv[0] と resume 以外のフラグは順序ごとそのまま）。
-func stripResumeArgv(argv []string) []string {
-	if len(argv) == 0 {
-		return nil
-	}
-	out := make([]string, 0, len(argv))
-	out = append(out, argv[0])
-	for i := 1; i < len(argv); i++ {
-		a := argv[i]
-		if a == "--resume" || a == "-r" {
-			// 直後が uuid ならその値も一緒に落とす。値を持たない対話 picker 形
-			// （`claude --resume` 単独）はフラグだけ落とす。`-r report.md` の
-			// ような非 uuid 値は claude 側の別解釈なので値は残す（isUUID の
-			// exact 判定＝claudeshim.parseResumeUUID と同じ規律）。
-			if i+1 < len(argv) && isUUID(argv[i+1]) {
-				i++
-			}
-			continue
-		}
-		if strings.HasPrefix(a, "--resume=") {
-			continue
-		}
-		out = append(out, a)
-	}
-	return out
-}
-
-// rebuildResumeArgv は pane の実 argv から resume/model 指定を張り替えた新 argv を
-// 返す純関数。
+// rebuildResumeArgv は argv に会話 resume と --model を張り直す。
+// **resume の形はエージェントごとに違う**（--resume / --session / --thread /
+// --resume= / codex の位置引数サブコマンド）ので agentid.BuildResume に委ねる。
 //
-// argv[0]（実バイナリ絶対パス）とそれ以外のフラグはそのまま保つ＝PATH 解決も
-// フラグ推測もしない。
-//   - uuid=="" は「herdr がまだ会話 uuid を検出していない」＝resume には触らない
-//     （既存の --resume を落とすと会話を失う）。
-//   - model=="" は既存の --model 指定に**触らない**（会話が固定しているモデルを
-//     勝手に変えない）。model 指定時は既存を落として張り替える。
-//
-// ⚠`--resume` した会話は **settings.json の既定モデルを無視して会話固定のモデルで
-// 動く**（実測 2026-07-25: 既定 opus・sonnet で作った会話を resume → sonnet のまま）。
-// 既存会話のモデルを変えるには argv に `--model` を渡すしかない＝この引数が要る理由。
-func rebuildResumeArgv(argv []string, uuid, model string) []string {
+// ⚠旧実装は `--resume` の直後を isUUID で判定して落とすか決めていた。claude の
+// 会話 ref はたまたま uuid だが pi / omp は **path** も取るので、書式判定では
+// 二重指定や誤削除が起きる。「そのフラグが値を取るか」は Spec が知っている事実。
+func rebuildResumeArgv(kind string, argv []string, sess herdrapi.AgentSession, model string) []string {
 	if len(argv) == 0 {
 		return nil
 	}
@@ -225,8 +212,8 @@ func rebuildResumeArgv(argv []string, uuid, model string) []string {
 	if model != "" {
 		out = append(stripModelArgv(out), "--model", model)
 	}
-	if uuid != "" {
-		out = append(stripResumeArgv(out), "--resume", uuid)
+	if sess.Value != "" {
+		out = agentid.BuildResume(kind, out, sess.Value)
 	}
 	return out
 }
@@ -415,22 +402,22 @@ func settlePlacement(api *herdrapi.Client, newPaneID, newTabID, preferredName st
 	origIdx int, haveIdx bool, out io.Writer) string {
 	if haveIdx && newTabID != "" {
 		if err := moveTabTo(api, newTabID, origIdx); err != nil {
-			fmt.Fprintf(out, "restart-claude: warn: tab 位置復元 失敗 tab=%s idx=%d: %v\n",
+			fmt.Fprintf(out, "restart-agent-session: warn: tab 位置復元 失敗 tab=%s idx=%d: %v\n",
 				newTabID, origIdx, err)
 		}
 	}
 	// 元が未命名（herdr UI から直接起動され drover が命名していない pane）なら
 	// **命名しない**。ここで採番すると herdr ネイティブの pane を drover 管理下の
 	// 名前に変えてしまう＝ユーザーが頼んでいない identity の変更になる。
-	// 命名しなくても次回以降は herdr の検出値で拾える（resolveAgentKind の系統 3）。
+	// 命名しなくても次回以降は herdr の検出値で拾える（agentid.Resolve の系統 3）。
 	if preferredName == "" {
-		fmt.Fprintf(out, "restart-claude: note: 元 pane は未命名のため agent 名を付けない"+
+		fmt.Fprintf(out, "restart-agent-session: note: 元 pane は未命名のため agent 名を付けない"+
 			"（herdr の検出値のまま。次回も検出で拾える）\n")
 		return ""
 	}
 	name, err := renameClaudePaneTo(api, newPaneID, preferredName)
 	if err != nil {
-		fmt.Fprintf(out, "restart-claude: warn: agent 名 %q を戻せなかった pane=%s: %v\n",
+		fmt.Fprintf(out, "restart-agent-session: warn: agent 名 %q を戻せなかった pane=%s: %v\n",
 			preferredName, newPaneID, err)
 		return ""
 	}
@@ -468,9 +455,9 @@ func restartOneClaudePane(api *herdrapi.Client, t restartTarget, opt restartOpti
 	// identity が claude でも、argv が claude の**直接起動**でなければ触らない。
 	// 例: `zsh -lc '… claude'` は末尾に --resume を足しても claude に届かないので、
 	// 作り直すと会話を失ったまま「done」と報告してしまう（誤報告＝最悪の失敗）。
-	if !isDirectAgentInvocation("claude", leaf.Command) {
-		return "skip", fmt.Sprintf("launch argv が claude の直接起動でない（argv[0]=%q）"+
-			"＝--resume を付けても claude に届かないため作り直さない", leaf.Command[0])
+	if !agentid.IsDirectInvocation("claude", leaf.Command) {
+		return "skip", fmt.Sprintf("launch argv が %s の直接起動でない（argv[0]=%q）"+
+			"＝resume 引数を付けても本体に届かないため作り直さない", t.AgentKind, leaf.Command[0])
 	}
 	cwd := leaf.Cwd
 	if cwd == "" {
@@ -484,7 +471,7 @@ func restartOneClaudePane(api *herdrapi.Client, t restartTarget, opt restartOpti
 	}
 	origIdx, haveIdx := tabIndexInWorkspace(tabs, t.WorkspaceID, t.TabID)
 	if !haveIdx {
-		fmt.Fprintf(out, "restart-claude: warn: 旧 tab %s が tab.list に無く位置復元を skip\n", t.TabID)
+		fmt.Fprintf(out, "restart-agent-session: warn: 旧 tab %s が tab.list に無く位置復元を skip\n", t.TabID)
 	}
 	tabLabel := ""
 	for _, tb := range tabs {
@@ -495,17 +482,14 @@ func restartOneClaudePane(api *herdrapi.Client, t restartTarget, opt restartOpti
 	}
 
 	// 第 1 段: 会話を引き継ぐ argv で同 Tab を差し替え。
-	newArgv := rebuildResumeArgv(leaf.Command, t.ResumeUUID, opt.Model)
+	newArgv := rebuildResumeArgv(t.AgentKind, leaf.Command, t.Session, opt.Model)
 	newPaneID, newTabID, err := replaceTabWithCommand(api, t.TabID, cwd, newArgv)
 	if err != nil {
 		return "error", err.Error()
 	}
 	name := settlePlacement(api, newPaneID, newTabID, t.AgentName, origIdx, haveIdx, out)
 	if waitPaneSettled(api, newPaneID, restartGraceWindow) {
-		resume := "なし（会話 uuid 未検出＝argv そのまま）"
-		if t.ResumeUUID != "" {
-			resume = "--resume " + t.ResumeUUID
-		}
+		resume := t.resumeDesc()
 		return "done", fmt.Sprintf("pane %s→%s name=%s %s", t.PaneID, newPaneID, name, resume)
 	}
 
@@ -513,19 +497,19 @@ func restartOneClaudePane(api *herdrapi.Client, t restartTarget, opt restartOpti
 	// 指す uuid の jsonl が消えている等。実測 2026-07-25）。単独 pane の Tab は
 	// プロセス終了で Tab ごと閉じているので、resume 無しの元 argv で**新しい Tab**
 	// を作り直して pane を必ず残す。
-	fmt.Fprintf(out, "restart-claude: warn: %s は --resume %s で即終了（この会話は復元できない）"+
-		"＝resume 無しで作り直します\n", t.AgentName, t.ResumeUUID)
+	fmt.Fprintf(out, "restart-agent-session: warn: %s は %s で即終了（この会話は復元できない）"+
+		"＝resume 無しで作り直します\n", t.label(), t.resumeDesc())
 	if tabLabel == "" {
 		tabLabel = filepath.Base(cwd)
 	}
-	fbArgv := stripResumeArgv(leaf.Command)
+	fbArgv := agentid.StripResume(t.AgentKind, leaf.Command)
 	if opt.Model != "" {
 		fbArgv = append(stripModelArgv(fbArgv), "--model", opt.Model)
 	}
 	fbPaneID, err := applyClaudeTab(api, t.WorkspaceID, tabLabel, fbArgv, cwd)
 	if err != nil {
-		return "error", fmt.Sprintf("--resume %s で即終了し、resume 無しの作り直しにも失敗"+
-			"（pane が失われた）: %v", t.ResumeUUID, err)
+		return "error", fmt.Sprintf("%s で即終了し、resume 無しの作り直しにも失敗"+
+			"（pane が失われた）: %v", t.resumeDesc(), err)
 	}
 	fbTabID := ""
 	if p, gerr := api.PaneGet(fbPaneID); gerr == nil {
@@ -534,10 +518,10 @@ func restartOneClaudePane(api *herdrapi.Client, t restartTarget, opt restartOpti
 	name = settlePlacement(api, fbPaneID, fbTabID, t.AgentName, origIdx, haveIdx, out)
 	if !waitPaneSettled(api, fbPaneID, restartGraceWindow) {
 		return "error", fmt.Sprintf("resume 無しでも起動直後に終了した pane=%s argv=%v"+
-			"（claude 側の問題＝手動確認が要る）", fbPaneID, fbArgv)
+			"（%s 側の問題＝手動確認が要る）", fbPaneID, fbArgv, t.AgentKind)
 	}
 	return "done", fmt.Sprintf("pane %s→%s name=%s resume 復元不可のため新規会話で起動"+
-		"（会話 %s は jsonl 不在）", t.PaneID, fbPaneID, name, t.ResumeUUID)
+		"（会話 %q の実体が不在）", t.PaneID, fbPaneID, name, t.Session.Value)
 }
 
 // restartClaudePanes は対象を選んで順に差し替える。CLI と遠隔命令の**共通の芯**
@@ -547,17 +531,17 @@ func restartClaudePanes(api *herdrapi.Client, opt restartOptions, out io.Writer)
 	if err != nil {
 		return nil, fmt.Errorf("agent.list: %w", err)
 	}
-	targets, conflicts, err := selectRestartTargets(agents, opt.SID)
+	targets, conflicts, err := selectRestartTargets(agents, opt.SID, opt.Agent)
 	// 機械確定不能な pane は対象外にしたうえで**必ず報告**する（黙って落とすと
 	// 「対象に入らない理由が分からない」になる＝silent skip 禁止の鉄則⑤）。
 	for _, c := range conflicts {
-		fmt.Fprintf(out, "restart-claude: skip  %s\n", c)
+		fmt.Fprintf(out, "restart-agent-session: skip  %s\n", c)
 	}
 	if err != nil {
 		return nil, err
 	}
 	if len(targets) == 0 {
-		fmt.Fprintf(out, "restart-claude: 対象のローカル claude pane がありません\n")
+		fmt.Fprintf(out, "restart-agent-session: 対象のローカル claude pane がありません\n")
 		return nil, nil
 	}
 
@@ -568,18 +552,18 @@ func restartClaudePanes(api *herdrapi.Client, opt restartOptions, out io.Writer)
 			argv := "(layout.export 失敗)"
 			if err == nil {
 				if ls := root.leaves(); len(ls) == 1 && ls[0].PaneID == t.PaneID {
-					argv = fmt.Sprintf("%v", rebuildResumeArgv(ls[0].Command, t.ResumeUUID, opt.Model))
+					argv = fmt.Sprintf("%v", rebuildResumeArgv(t.AgentKind, ls[0].Command, t.Session, opt.Model))
 				} else {
 					argv = fmt.Sprintf("(tab に pane %d 枚＝skip 予定)", len(ls))
 				}
 			}
-			fmt.Fprintf(out, "restart-claude: [dry-run] %s pane=%s tab=%s status=%s argv=%s\n",
+			fmt.Fprintf(out, "restart-agent-session: [dry-run] %s pane=%s tab=%s status=%s argv=%s\n",
 				t.AgentName, t.PaneID, t.TabID, t.AgentStatus, argv)
 			results = append(results, restartOutcome{PaneID: t.PaneID, Name: t.AgentName, Status: "skip", Detail: "dry-run"})
 			continue
 		}
 		status, detail := restartOneClaudePane(api, t, opt, out)
-		fmt.Fprintf(out, "restart-claude: %-5s %s pane=%s %s\n", status, t.AgentName, t.PaneID, detail)
+		fmt.Fprintf(out, "restart-agent-session: %-5s %s pane=%s %s\n", status, t.AgentName, t.PaneID, detail)
 		results = append(results, restartOutcome{PaneID: t.PaneID, Name: t.AgentName, Status: status, Detail: detail})
 	}
 	return results, nil
@@ -588,7 +572,7 @@ func restartClaudePanes(api *herdrapi.Client, opt restartOptions, out io.Writer)
 // summarizeRestart は遠隔命令 Ack 用の 1 行要約（純関数）。
 func summarizeRestart(results []restartOutcome) string {
 	if len(results) == 0 {
-		return "対象のローカル claude pane なし"
+		return "対象のローカルセッションなし"
 	}
 	// 未命名 pane（herdr UI 直接起動）は Name が空になりうる。要約はそのまま
 	// 遠隔 Ack に載って Firestore に残る監査記録なので、**必ず pane を特定できる
@@ -630,8 +614,15 @@ func cmdRestartClaude(args []string, stdout, stderr io.Writer) error {
 	force := fs.Bool("force", false, "agent_status=working の pane も再起動する（実行中タスクは失われる）")
 	dryRun := fs.Bool("dry-run", false, "対象と再起動後 argv を表示するだけで何もしない")
 	model := fs.String("model", "", "再起動時に claude へ渡すモデル（例 opus）。空なら既存指定に触らない")
+	agent := fs.String("agent", "", "対象のエージェント種別（claude / codex 等）。空なら全種別")
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("%w: %v", errUsage, err)
+	}
+	// 未知の種別は「一致 0 件」に degrade せず loud に撥ねる（黙って何もしない
+	// のが一番わかりにくい失敗）。
+	if *agent != "" && !agentid.IsCanonical(*agent) {
+		return fmt.Errorf("%w: 未知のエージェント種別 %q（canonical label 21 種のいずれか）",
+			errUsage, *agent)
 	}
 	rest := fs.Args()
 	if len(rest) > 1 {
@@ -647,10 +638,10 @@ func cmdRestartClaude(args []string, stdout, stderr io.Writer) error {
 		return fmt.Errorf("herdr server に繋がらない（socket=%s）: %w", api.SocketPath, err)
 	}
 	results, err := restartClaudePanes(api,
-		restartOptions{SID: sid, Force: *force, DryRun: *dryRun, Model: *model}, stdout)
+		restartOptions{SID: sid, Agent: *agent, Force: *force, DryRun: *dryRun, Model: *model}, stdout)
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "restart-claude: %s\n", summarizeRestart(results))
+	fmt.Fprintf(stdout, "restart-agent-session: %s\n", summarizeRestart(results))
 	return nil
 }

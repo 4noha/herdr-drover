@@ -36,10 +36,14 @@ sh scripts/build.sh                    # → bin/herdr-drover
 > 開発中はローカルに両方を並べて（`../drover-cloud`）`go.mod` の
 > `replace github.com/4noha/drover-cloud => ../drover-cloud` で解決する。
 
-## 2. claude シムを有効化
+## 2. エージェントシムを有効化
 
 ```sh
 alias claude='~/.herdr-drover/bin/herdr-drover claude'   # .zshrc/.bashrc へ
+
+# 別エージェント（codex 等）を使うなら symlink か shim 形（alias は exec に効かない）
+#   ln -s ~/.herdr-drover/bin/herdr-drover ~/bin/codex
+#   herdr-drover shim codex
 ```
 
 以後 `claude` は「cwd 一致の既存セッションへ自動 attach／無ければ新しい Tab で

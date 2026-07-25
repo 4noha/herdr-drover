@@ -165,7 +165,7 @@ func TestE2ERestartProxyRespawnsBridge(t *testing.T) {
 	oldPID := observePID(t, kids1[0])
 
 	// --- 遠隔命令: restart-proxy（sid=pane_id）→ claim → respawn → Ack done ---
-	id1, err := st.PushCommand(ctx, cmdPCID, "restart-proxy", paneID, "owner@example.com")
+	id1, err := st.PushCommand(ctx, cmdPCID, "restart-proxy", paneID, "", "owner@example.com")
 	if err != nil {
 		t.Fatalf("PushCommand(restart-proxy): %v", err)
 	}
@@ -226,7 +226,7 @@ func TestE2ERestartProxyRespawnsBridge(t *testing.T) {
 
 	// --- 未知 sid: 稼働 bridge が無い sid は status=error で Ack（滞留させ
 	// ない）。稼働中 bridge には影響しない（bridge 開始ログは 2 回のまま）。
-	id2, err := st.PushCommand(ctx, cmdPCID, "restart-proxy", "w9:p9", "owner@example.com")
+	id2, err := st.PushCommand(ctx, cmdPCID, "restart-proxy", "w9:p9", "", "owner@example.com")
 	if err != nil {
 		t.Fatalf("PushCommand(未知 sid): %v", err)
 	}
