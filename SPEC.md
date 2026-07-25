@@ -70,7 +70,7 @@ Firestore サーバは Cloud Run に 1 回デプロイして全 PC で共有す�
 | `mv-tab-launch` | なし | plugin action の実体（新 Tab を開いて対話モードを走らせる） | [非依存] |
 | `restart-agent-session`<br>（旧名 `restart-claude` も可） | `--force` `--dry-run` `--model <alias>` `--agent <kind>` `[sid]` | エージェントセッションを会話ごと作り直す | [一般化済 v0.5.23] |
 | `update-agent-cli`<br>（旧名 `update-claude` も可） | 同上 | エージェント本体更新＋セッション反映 | [一般化済 v0.5.23] |
-| `update-all` | `--force` `--model <alias>` | 上記＋自己更新（Web のワンボタン相当） | [agent 非依存] |
+| `update-all` | `--force` `--model <alias>` | **導入済み × 更新口を持つ全エージェント**を順に更新＋セッション反映 → 自己更新 | [一般化済 v0.5.27] |
 | `shim <agent> [args...]`<br>（`claude` は別名） | — | エージェントシム。argv[0] multi-call でも起動可 | [一般化済 v0.5.23] |
 | `ssh-forward` | `<pc> [label]` | owner の ssh-agent を slave へ relay 越しに一時転送 | [非依存] |
 | `attach` | `<pc> <sid>` | ↗窓 の viewer client（reconcile が注入 pane 内で起動する内部コマンド） | [非依存] |
@@ -167,6 +167,18 @@ Tab ごと自動 close される**。よって差し替え後に生存を確認�
 上限 15 分。claude 本体は ~250MB あり、実測でノート PC の Wi-Fi が 5 分に
 収まらなかった。上限超過は「上限内に終わらず中断」と理由を明示する（生の
 `signal: killed` では回線問題か破損か判別できない）。
+
+**`update-all` の対象と失敗時の扱い**（v0.5.27 で確定）:
+
+- 対象は **UpdaterSpec を持つ**（更新方法を実 CLI で確認済み）かつ
+  **このマシンに導入されている**（InstallSpec でバイナリが解決できる）エージェント。
+  実行順は canonical 名の昇順で**決定的**。未導入は 1 行出して skip（silent skip 禁止）。
+- ⚠**1 つのエージェントの失敗で他や自己更新を止めない**。失敗は集約して Ack に残す。
+  理由: **自己更新は不具合修正の唯一の配布経路**で、例えば cursor の更新失敗で
+  herdr-drover 自身が更新できなくなるのが実運用で最も困る。
+  （v0.5.26 以前は claude 段の失敗で全体を止めていた＝**意図的に反転させた**）
+- ただし**エージェント単位**では従来どおり「更新に失敗したらそのセッションは
+  触らない」を維持する（古いまま作り直しても目的を達さず pane を無駄に作り直すだけ）。
 
 **`update-all` の順序は入れ替えられない**:
 

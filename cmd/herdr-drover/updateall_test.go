@@ -9,8 +9,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"github.com/4noha/herdr-drover/internal/agentid"
+	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -90,9 +93,16 @@ func TestUpdateAllRunsClaudeThenSelfInOrder(t *testing.T) {
 	}
 }
 
-// claude 段が失敗したら自己更新へ進まない（古い claude のまま daemon だけ
-// 新しくして再起動する、という原因の霞む状態を作らない）。
-func TestUpdateAllStopsWhenClaudeStepFails(t *testing.T) {
+// ⚠**設計を反転させた（v0.5.27）**。旧契約は「claude 段が失敗したら自己更新へ
+// 進まない」だったが、複数エージェント対応で**逆が正しい**と判断した:
+//
+//	自己更新は不具合修正の**唯一の配布経路**であり、例えば cursor の更新失敗で
+//	herdr-drover 自身が更新できなくなるのが実運用で最も困る。エージェント単位の
+//	失敗は集約して Ack に残し、他のエージェントと自己更新は続行する。
+//
+// エージェント**単位**では従来どおり「更新に失敗したらそのセッションは触らない」
+// を維持する（古いまま作り直しても目的を達さず pane を無駄に作り直すだけ）。
+func TestUpdateAllContinuesWhenOneAgentFails(t *testing.T) {
 	sock := startHerdrForTest(t)
 	api := herdrapi.New(sock)
 	work := t.TempDir()
@@ -119,16 +129,25 @@ func TestUpdateAllStopsWhenClaudeStepFails(t *testing.T) {
 
 	selfCalled := false
 	var log bytes.Buffer
-	_, restart, err := runUpdateAll(context.Background(), api, restartOptions{},
+	res, restart, err := runUpdateAll(context.Background(), api, restartOptions{},
 		func() (string, bool, error) { selfCalled = true; return "v9", true, nil }, &log)
-	if err == nil {
-		t.Fatalf("claude 段の失敗が error にならなかった")
+	if err != nil {
+		t.Fatalf("1 エージェントの失敗で全体が error になった: %v\nlog=%s", err, log.String())
 	}
-	if selfCalled {
-		t.Fatalf("claude 段が失敗したのに自己更新へ進んだ")
+	if !selfCalled {
+		t.Fatalf("エージェント段の失敗で自己更新へ進まなかった"+
+			"（自己更新は不具合修正の唯一の配布経路＝止めてはいけない）\nlog=%s", log.String())
 	}
-	if restart {
-		t.Fatalf("失敗時に restart=true（再起動すると原因が霞む）")
+	if !restart {
+		t.Fatalf("restart=false（自己更新に成功したら再起動を指示するはず）")
+	}
+	// 失敗は黙って捨てず**必ず監査に残す**。
+	if !strings.Contains(res.Claude, "失敗") || !strings.Contains(res.Claude, "claude") {
+		t.Fatalf("失敗が要約に残っていない: %q", res.Claude)
+	}
+	// 失敗したエージェントのセッションは触らない（エージェント単位の規律は維持）。
+	if strings.Contains(res.Claude, "再起動 1 件") {
+		t.Fatalf("更新に失敗したのにセッションを作り直した: %q", res.Claude)
 	}
 }
 
@@ -168,4 +187,74 @@ func TestUpdateAllRejectsConcurrentRun(t *testing.T) {
 	if firstErr != nil {
 		t.Fatalf("1 本目が失敗: %v（log=%s）", firstErr, log1.String())
 	}
+}
+
+// update-all は**導入済み × 更新口を持つ**エージェントだけを対象にする。
+// 未導入は黙って飛ばさず 1 行出す（silent skip 禁止）。
+func TestUpdatableAgentsSelection(t *testing.T) {
+	var log bytes.Buffer
+	got := updatableAgents(&log)
+
+	// このマシンに実際に導入されているものだけが返る。
+	for _, a := range got {
+		if _, ok := agentid.Updater(a); !ok {
+			t.Errorf("%s: UpdaterSpec が無いのに対象になった", a)
+		}
+		if _, err := lookupAgentBin(a); err != nil {
+			t.Errorf("%s: 未導入なのに対象になった: %v", a, err)
+		}
+	}
+	// 順序は決定的（ログ比較・再現性のため）。
+	if !sort.StringsAreSorted(got) {
+		t.Errorf("実行順が決定的でない: %v", got)
+	}
+	// UpdaterSpec を持つが未導入のものは skip 理由が出る。
+	for label := range agentid.CanonicalLabels {
+		if _, ok := agentid.Updater(label); !ok {
+			continue
+		}
+		if _, err := lookupAgentBin(label); err == nil {
+			continue
+		}
+		if !strings.Contains(log.String(), label+" は更新口を持つがこのマシンに未導入") {
+			t.Errorf("%s の skip 理由が出ていない:\n%s", label, log.String())
+		}
+	}
+	t.Logf("このマシンの更新対象: %v", got)
+}
+
+// 複数エージェントを順に処理し、要約に**種別ごとの結果**が残ること。
+// （失敗時の続行は TestUpdateAllContinuesWhenOneAgentFails が見る）
+func TestUpdateAllSummarizesPerAgent(t *testing.T) {
+	api, _ := setupUpdateAllPane(t, "2.1.214", "2.1.219")
+	selfRan := false
+	selfUpdate := func() (string, bool, error) { selfRan = true; return "v9.9.9", true, nil }
+
+	// claude の更新を失敗させる（バイナリ解決は通るが update が非 0 で終わる形は
+	// 作りにくいので、更新口を持つが未導入の状態を作れない。代わりに
+	// updatableAgents が返す集合の妥当性と、自己更新到達を確認する）。
+	var log bytes.Buffer
+	res, restart, err := runUpdateAll(context.Background(), api, restartOptions{}, selfUpdate, &log)
+	if err != nil {
+		t.Fatalf("runUpdateAll: %v\nlog=%s", err, log.String())
+	}
+	if !selfRan {
+		t.Fatal("自己更新に到達していない（エージェント段で止まっている）")
+	}
+	if !restart {
+		t.Fatal("restart=false（成功時は自身の再起動を指示するはず）")
+	}
+	if res.Self != "更新 v9.9.9" {
+		t.Fatalf("Self = %q", res.Self)
+	}
+	// 複数エージェント対応後も要約に種別名が入る（どれがどうなったか追える）。
+	if !strings.Contains(res.Claude, "claude:") {
+		t.Fatalf("要約に種別名が無い: %q", res.Claude)
+	}
+	for _, a := range updatableAgents(io.Discard) {
+		if !strings.Contains(res.Claude, a+":") {
+			t.Errorf("対象 %s の結果が要約に無い: %q", a, res.Claude)
+		}
+	}
+	t.Logf("要約: %s", summarizeUpdateAll(res))
 }

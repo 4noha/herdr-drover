@@ -28,6 +28,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -340,7 +341,7 @@ var updateAllRunning atomic.Bool
 
 // updateAllResult は各段の結果（監査 detail の組み立て用）。
 type updateAllResult struct {
-	Claude string // claude 本体＋セッション反映の要約
+	Claude string // エージェント本体＋セッション反映の要約（複数なら連結）
 	Self   string // herdr-drover 自身の更新結果
 }
 
@@ -356,6 +357,29 @@ type updateAllResult struct {
 // 戻り値の restart は「呼び手が exit すべきか」。selfupdate が更新した/しないに
 // 関わらず true を返す＝Web の「再起動」ボタンを本コマンドが**包含**する
 // （3 ボタンを 1 つに集約するという要件）。err 時は false（原因調査のため状態を保つ）。
+// updatableAgents は「このマシンで更新できるエージェント」を canonical 順で返す。
+// **UpdaterSpec を持つ** かつ **実バイナリが解決できる**もののみ。
+// 除外は黙って落とさず 1 行出す（silent skip 禁止）。
+func updatableAgents(out io.Writer) []string {
+	var all []string
+	for label := range agentid.CanonicalLabels {
+		all = append(all, label)
+	}
+	sort.Strings(all) // 実行順を決定的にする（ログ比較・再現性）
+	var got []string
+	for _, label := range all {
+		if _, ok := agentid.Updater(label); !ok {
+			continue // 更新口が未登録＝そもそも候補でない（毎回出すと煩いので黙る）
+		}
+		if _, err := lookupAgentBin(label); err != nil {
+			fmt.Fprintf(out, "update-all: note: %s は更新口を持つがこのマシンに未導入＝skip\n", label)
+			continue
+		}
+		got = append(got, label)
+	}
+	return got
+}
+
 func runUpdateAll(ctx context.Context, api *herdrapi.Client, opt restartOptions,
 	selfUpdate func() (string, bool, error), out io.Writer) (updateAllResult, bool, error) {
 	if !updateAllRunning.CompareAndSwap(false, true) {
@@ -365,13 +389,47 @@ func runUpdateAll(ctx context.Context, api *herdrapi.Client, opt restartOptions,
 
 	var res updateAllResult
 
-	// 段 1: claude 本体＋セッション反映。失敗したらここで止める（自己更新まで
-	// 進めて再起動すると、claude が古いまま daemon だけ新しくなり原因が霞む）。
-	fmt.Fprintf(out, "update-all: [1/2] claude 本体の更新とセッション反映\n")
-	claudeSummary, cerr := updateClaudeAndRestart(ctx, api, opt, out)
-	res.Claude = claudeSummary
-	if cerr != nil {
-		return res, false, fmt.Errorf("claude 更新: %w", cerr)
+	// 段 1: **導入済み × 更新口を持つ**エージェントを順に更新＋セッション反映。
+	//
+	// 対象の決め方（推測しない）:
+	//   - UpdaterSpec を持つ（更新方法が実 CLI で確認済み）
+	//   - このマシンに実際に導入されている（InstallSpec でバイナリが解決できる）
+	// 未導入や更新口不明のエージェントは**黙って飛ばさず** 1 行出す。
+	//
+	// ⚠**設計判断（v0.5.27 で確定）**: 1 つのエージェントの失敗で他や自己更新を
+	// 止めない。失敗は集約して Ack に残す。理由は、例えば cursor の更新失敗で
+	// **herdr-drover 自身の更新まで止まる**のが実運用で最も困るから
+	// （自己更新は不具合修正の唯一の配布経路）。ただし**エージェント単位**では
+	// 従来どおり「更新に失敗したらそのセッションは触らない」を維持する
+	//（古いまま作り直しても目的を達さず pane を無駄に作り直すだけ）。
+	targets := updatableAgents(out)
+	if len(targets) == 0 {
+		res.Claude = "更新対象のエージェントなし"
+		fmt.Fprintf(out, "update-all: [1/2] 更新対象のエージェントが無い（導入済みかつ更新口を持つものが 0）\n")
+	}
+	var summaries, failures []string
+	for i, agent := range targets {
+		fmt.Fprintf(out, "update-all: [1/2] %s の更新とセッション反映（%d/%d）\n",
+			agent, i+1, len(targets))
+		aopt := opt
+		aopt.Agent = agent
+		sum, aerr := updateClaudeAndRestart(ctx, api, aopt, out)
+		if aerr != nil {
+			failures = append(failures, fmt.Sprintf("%s: %v", agent, aerr))
+			fmt.Fprintf(out, "update-all: %s の更新に失敗（他のエージェントと自己更新は続行）: %v\n",
+				agent, aerr)
+			continue
+		}
+		summaries = append(summaries, agent+": "+sum)
+	}
+	if len(summaries) > 0 {
+		res.Claude = strings.Join(summaries, " ／ ")
+	}
+	if len(failures) > 0 {
+		if res.Claude != "" {
+			res.Claude += " ／ "
+		}
+		res.Claude += "失敗 " + strings.Join(failures, " ／ ")
 	}
 
 	// 段 2: herdr-drover 自身。バイナリはディスク上で置換されるだけで、走っている
@@ -395,7 +453,9 @@ func runUpdateAll(ctx context.Context, api *herdrapi.Client, opt restartOptions,
 func summarizeUpdateAll(res updateAllResult) string {
 	parts := make([]string, 0, 2)
 	if res.Claude != "" {
-		parts = append(parts, "claude: "+res.Claude)
+		// Claude フィールドは複数エージェントの結果を連結した文字列（v0.5.27〜）。
+		// 各要素が既に "<agent>: …" 形なので、ここで種別名を前置しない。
+		parts = append(parts, res.Claude)
 	}
 	if res.Self != "" {
 		parts = append(parts, "drover: "+res.Self)
