@@ -61,7 +61,7 @@ func TestUpdateClaudeUpdatesThenRestarts(t *testing.T) {
 	}
 
 	var log bytes.Buffer
-	summary, err := updateClaudeAndRestart(context.Background(), api, "", false, false, &log)
+	summary, err := updateClaudeAndRestart(context.Background(), api, restartOptions{}, &log)
 	if err != nil {
 		t.Fatalf("updateClaudeAndRestart: %v（log=%s）", err, log.String())
 	}
@@ -117,7 +117,7 @@ func TestUpdateClaudeRestartsEvenWhenAlreadyLatest(t *testing.T) {
 	}
 
 	var log bytes.Buffer
-	summary, err := updateClaudeAndRestart(context.Background(), api, "", false, false, &log)
+	summary, err := updateClaudeAndRestart(context.Background(), api, restartOptions{}, &log)
 	if err != nil {
 		t.Fatalf("updateClaudeAndRestart: %v（log=%s）", err, log.String())
 	}
@@ -238,7 +238,7 @@ func TestUpdateClaudeDoesNotRestartWhenUpdateFails(t *testing.T) {
 	}
 
 	var log bytes.Buffer
-	if _, err := updateClaudeAndRestart(context.Background(), api, "", false, false, &log); err == nil {
+	if _, err := updateClaudeAndRestart(context.Background(), api, restartOptions{}, &log); err == nil {
 		t.Fatalf("update 失敗が error にならなかった。log=%s", log.String())
 	}
 	// pane はそのまま（作り直していない）。

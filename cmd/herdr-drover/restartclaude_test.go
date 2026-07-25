@@ -83,9 +83,72 @@ func TestRebuildResumeArgv(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := rebuildResumeArgv(tc.argv, tc.uuid)
+			got := rebuildResumeArgv(tc.argv, tc.uuid, "")
 			if strings.Join(got, "\x00") != strings.Join(tc.want, "\x00") {
 				t.Fatalf("rebuildResumeArgv(%v, %q) = %v, want %v", tc.argv, tc.uuid, got, tc.want)
+			}
+		})
+	}
+}
+
+// モデル張り替え。**`--resume` した会話は settings.json の既定モデルを無視して
+// 会話固定のモデルで動く**（実測 2026-07-25: 既定 opus・sonnet で作った会話を
+// resume → sonnet のまま。`--model opus --resume` を渡すと opus-5 に切替わる）＝
+// 既存会話のモデルを変える唯一の手段が argv の --model なので、ここが本質。
+func TestRebuildResumeArgvModel(t *testing.T) {
+	const uuid = "ebdd35b1-f1b6-4e90-8395-c9ff09e00d32"
+	for _, tc := range []struct {
+		name  string
+		argv  []string
+		uuid  string
+		model string
+		want  []string
+	}{
+		{
+			name: "model 指定なしは既存 --model に触らない（会話の固定モデルを勝手に変えない）",
+			argv: []string{"/p/claude", "--model", "sonnet"}, uuid: uuid, model: "",
+			want: []string{"/p/claude", "--model", "sonnet", "--resume", uuid},
+		},
+		{
+			name: "model 指定で新規付与", argv: []string{"/p/claude"}, uuid: uuid, model: "opus",
+			want: []string{"/p/claude", "--resume", uuid, "--model", "opus"},
+		},
+		{
+			name: "既存 --model は張り替える", argv: []string{"/p/claude", "--model", "sonnet"},
+			uuid: uuid, model: "opus",
+			want: []string{"/p/claude", "--resume", uuid, "--model", "opus"},
+		},
+		{
+			name: "--model=値 形も張り替える", argv: []string{"/p/claude", "--model=fable"},
+			uuid: uuid, model: "opus",
+			want: []string{"/p/claude", "--resume", uuid, "--model", "opus"},
+		},
+		{
+			name: "model 以外のフラグは保つ",
+			argv: []string{"/p/claude", "--verbose", "--model", "sonnet"}, uuid: "", model: "opus",
+			want: []string{"/p/claude", "--verbose", "--model", "opus"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := rebuildResumeArgv(tc.argv, tc.uuid, tc.model)
+			// 順序は実装都合で変わり得るので集合＋隣接ペアで検証する。
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %v, want %v（要素数違い）", got, tc.want)
+			}
+			joined := strings.Join(got, " ")
+			for i := 0; i+1 < len(tc.want); i++ {
+				if tc.want[i] == "--model" || tc.want[i] == "--resume" {
+					pair := tc.want[i] + " " + tc.want[i+1]
+					if !strings.Contains(joined, pair) {
+						t.Fatalf("got %v に %q が無い", got, pair)
+					}
+				}
+			}
+			if strings.Contains(joined, "sonnet") && tc.model != "" {
+				t.Fatalf("張り替えたのに古い model が残っている: %v", got)
+			}
+			if got[0] != tc.argv[0] {
+				t.Fatalf("argv[0] が変わった: %v", got)
 			}
 		})
 	}
@@ -270,7 +333,7 @@ func TestRestartClaudeFallsBackWhenResumeDies(t *testing.T) {
 	}
 
 	var log bytes.Buffer
-	results, err := restartClaudePanes(api, target, false, false, &log)
+	results, err := restartClaudePanes(api, restartOptions{SID: target, Force: false, DryRun: false}, &log)
 	if err != nil {
 		t.Fatalf("restartClaudePanes: %v（log=%s）", err, log.String())
 	}
@@ -393,7 +456,7 @@ func TestRestartClaudeAgainstRealHerdr(t *testing.T) {
 	}
 
 	var log bytes.Buffer
-	results, err := restartClaudePanes(api, target, false, false, &log)
+	results, err := restartClaudePanes(api, restartOptions{SID: target, Force: false, DryRun: false}, &log)
 	if err != nil {
 		t.Fatalf("restartClaudePanes: %v（log=%s）", err, log.String())
 	}
@@ -466,7 +529,7 @@ func TestRestartClaudeSkipsWorkingUnlessForced(t *testing.T) {
 	}
 
 	var log bytes.Buffer
-	results, err := restartClaudePanes(api, pane, false, false, &log)
+	results, err := restartClaudePanes(api, restartOptions{SID: pane, Force: false, DryRun: false}, &log)
 	if err != nil {
 		t.Fatalf("restartClaudePanes: %v", err)
 	}
@@ -480,7 +543,7 @@ func TestRestartClaudeSkipsWorkingUnlessForced(t *testing.T) {
 		t.Fatalf("skip なのに pane が作り直された（pane.get: %v %+v）", err, p)
 	}
 
-	results, err = restartClaudePanes(api, pane, true, false, &log)
+	results, err = restartClaudePanes(api, restartOptions{SID: pane, Force: true, DryRun: false}, &log)
 	if err != nil {
 		t.Fatalf("restartClaudePanes --force: %v", err)
 	}
@@ -512,7 +575,7 @@ func TestRestartClaudeSkipsSharedTab(t *testing.T) {
 	}
 
 	var log bytes.Buffer
-	results, err := restartClaudePanes(api, pane, false, false, &log)
+	results, err := restartClaudePanes(api, restartOptions{SID: pane, Force: false, DryRun: false}, &log)
 	if err != nil {
 		t.Fatalf("restartClaudePanes: %v", err)
 	}
@@ -554,7 +617,7 @@ func TestRestartClaudeLeavesInjectedPane(t *testing.T) {
 	}
 
 	var log bytes.Buffer
-	results, err := restartClaudePanes(api, "", false, false, &log)
+	results, err := restartClaudePanes(api, restartOptions{SID: "", Force: false, DryRun: false}, &log)
 	if err != nil {
 		t.Fatalf("restartClaudePanes: %v", err)
 	}
@@ -567,7 +630,7 @@ func TestRestartClaudeLeavesInjectedPane(t *testing.T) {
 		t.Fatalf("注入 pane が作り直された: %v %+v", err, p)
 	}
 	// sid 直指定でも撥ねる（Web から誤って押しても壊れない）。
-	if _, err := restartClaudePanes(api, inj, false, false, &log); err == nil {
+	if _, err := restartClaudePanes(api, restartOptions{SID: inj, Force: false, DryRun: false}, &log); err == nil {
 		t.Fatalf("注入 pane を sid 指定したのに error にならなかった")
 	}
 }

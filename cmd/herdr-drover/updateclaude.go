@@ -135,8 +135,8 @@ func runClaudeUpdate(ctx context.Context, bin string) (string, error) {
 
 // updateClaudeAndRestart は「claude 更新 → セッションへ反映」の芯。CLI と遠隔命令が
 // 共有する（経路ごとに別ロジックを持たない）。戻り値は監査用の 1 行要約。
-func updateClaudeAndRestart(ctx context.Context, api *herdrapi.Client, sid string,
-	force, dryRun bool, out io.Writer) (string, error) {
+func updateClaudeAndRestart(ctx context.Context, api *herdrapi.Client, opt restartOptions,
+	out io.Writer) (string, error) {
 	bin, source, err := resolveClaudeBin(api)
 	if err != nil {
 		return "", err
@@ -148,10 +148,12 @@ func updateClaudeAndRestart(ctx context.Context, api *herdrapi.Client, sid strin
 		return "", err
 	}
 
-	if dryRun {
+	if opt.DryRun {
 		fmt.Fprintf(out, "update-claude: [dry-run] 現在 %s → `%s update` を実行し"+
 			"セッションを再起動します\n", before, bin)
-		if _, rerr := restartClaudePanes(api, sid, force, true, out); rerr != nil {
+		dry := opt
+		dry.DryRun = true
+		if _, rerr := restartClaudePanes(api, dry, out); rerr != nil {
 			return "", rerr
 		}
 		return fmt.Sprintf("[dry-run] %s（更新も再起動も未実行）", before), nil
@@ -181,7 +183,9 @@ func updateClaudeAndRestart(ctx context.Context, api *herdrapi.Client, sid strin
 
 	// 版が変わらなくても再起動する: ディスクが最新でもセッションが旧版のまま、
 	// というのがまさに直したい状態（本コマンドの存在理由）。
-	results, rerr := restartClaudePanes(api, sid, force, false, out)
+	run := opt
+	run.DryRun = false
+	results, rerr := restartClaudePanes(api, run, out)
 	if rerr != nil {
 		return "", fmt.Errorf("%s／セッション再起動 失敗: %w", verMsg, rerr)
 	}
@@ -194,6 +198,7 @@ func cmdUpdateClaude(args []string, stdout, stderr io.Writer) error {
 	fs.SetOutput(stderr)
 	force := fs.Bool("force", false, "agent_status=working の pane も再起動する（実行中タスクは失われる）")
 	dryRun := fs.Bool("dry-run", false, "対象バイナリと再起動予定を表示するだけで何もしない")
+	model := fs.String("model", "", "再起動時に claude へ渡すモデル（例 opus）。空なら既存指定に触らない")
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("%w: %v", errUsage, err)
 	}
@@ -212,7 +217,8 @@ func cmdUpdateClaude(args []string, stdout, stderr io.Writer) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), claudeUpdateTimeout)
 	defer cancel()
-	summary, err := updateClaudeAndRestart(ctx, api, sid, *force, *dryRun, stdout)
+	summary, err := updateClaudeAndRestart(ctx, api,
+		restartOptions{SID: sid, Force: *force, DryRun: *dryRun, Model: *model}, stdout)
 	if err != nil {
 		return err
 	}

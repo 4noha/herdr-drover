@@ -61,6 +61,15 @@ type restartTarget struct {
 	ResumeUUID  string // agent_session(kind=id) の会話 uuid。"" は未検出
 }
 
+// restartOptions は restart-claude の実行オプション（引数の並びで取り違えないよう
+// 構造体で渡す）。
+type restartOptions struct {
+	SID    string // "" = その PC のローカル claude pane 全部
+	Force  bool   // agent_status=working の pane も対象にする
+	DryRun bool   // 対象と再起動後 argv を表示するだけ
+	Model  string // "" = 既存の --model 指定に触らない。指定時は張り替える
+}
+
 // restartOutcome は 1 件の結果（CLI 表示・遠隔命令 Ack の監査に使う）。
 // Status は "done"（作り直した）/ "skip"（意図的に見送り）/ "error"（失敗）。
 type restartOutcome struct {
@@ -127,6 +136,31 @@ func selectRestartTargets(agents []herdrapi.AgentInfo, panes []herdrapi.PaneInfo
 		"（agent 名が claude/claude-N でない・↗窓 注入 pane・既に消滅、のいずれか）", sid)
 }
 
+// stripModelArgv は argv から `--model <値>` / `--model=<値>` を取り除く純関数。
+// claude の model 指定に短縮形は無い（実測 2.1.220 の --help）＝`-m` は扱わない
+// （勝手に別フラグを食べない）。
+func stripModelArgv(argv []string) []string {
+	if len(argv) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(argv))
+	out = append(out, argv[0])
+	for i := 1; i < len(argv); i++ {
+		a := argv[i]
+		if a == "--model" {
+			if i+1 < len(argv) {
+				i++ // 値も一緒に落とす
+			}
+			continue
+		}
+		if strings.HasPrefix(a, "--model=") {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
 // stripResumeArgv は argv から resume 指定だけを取り除く純関数
 // （argv[0] と resume 以外のフラグは順序ごとそのまま）。
 func stripResumeArgv(argv []string) []string {
@@ -155,20 +189,31 @@ func stripResumeArgv(argv []string) []string {
 	return out
 }
 
-// rebuildResumeArgv は pane の実 argv から既存の resume 指定を取り除き、uuid が
-// あれば `--resume <uuid>` を付け直した新 argv を返す純関数。
+// rebuildResumeArgv は pane の実 argv から resume/model 指定を張り替えた新 argv を
+// 返す純関数。
 //
-// argv[0]（実バイナリ絶対パス）と resume 以外のフラグはそのまま保つ＝PATH 解決も
-// フラグ推測もしない。uuid=="" は「herdr がまだ会話 uuid を検出していない」＝
-// argv を**一切いじらない**（既存の --resume を落とすと会話を失う）。
-func rebuildResumeArgv(argv []string, uuid string) []string {
+// argv[0]（実バイナリ絶対パス）とそれ以外のフラグはそのまま保つ＝PATH 解決も
+// フラグ推測もしない。
+//   - uuid=="" は「herdr がまだ会話 uuid を検出していない」＝resume には触らない
+//     （既存の --resume を落とすと会話を失う）。
+//   - model=="" は既存の --model 指定に**触らない**（会話が固定しているモデルを
+//     勝手に変えない）。model 指定時は既存を落として張り替える。
+//
+// ⚠`--resume` した会話は **settings.json の既定モデルを無視して会話固定のモデルで
+// 動く**（実測 2026-07-25: 既定 opus・sonnet で作った会話を resume → sonnet のまま）。
+// 既存会話のモデルを変えるには argv に `--model` を渡すしかない＝この引数が要る理由。
+func rebuildResumeArgv(argv []string, uuid, model string) []string {
 	if len(argv) == 0 {
 		return nil
 	}
-	if uuid == "" {
-		return append([]string(nil), argv...)
+	out := append([]string(nil), argv...)
+	if model != "" {
+		out = append(stripModelArgv(out), "--model", model)
 	}
-	return append(stripResumeArgv(argv), "--resume", uuid)
+	if uuid != "" {
+		out = append(stripResumeArgv(out), "--resume", uuid)
+	}
+	return out
 }
 
 // layoutNode は layout.export / layout.apply の LayoutNode（実採取の tagged union:
@@ -374,9 +419,9 @@ func settlePlacement(api *herdrapi.Client, newPaneID, newTabID, preferredName st
 // 二段構え: まず会話を引き継ぐ argv で差し替え、**起動直後に落ちたら**（＝その
 // 会話が復元できない）resume 無しで作り直す。pane を消したまま終わらせないことを
 // 最優先の不変条件にする。
-func restartOneClaudePane(api *herdrapi.Client, t restartTarget, force bool, out io.Writer) (string, string) {
+func restartOneClaudePane(api *herdrapi.Client, t restartTarget, opt restartOptions, out io.Writer) (string, string) {
 	// working は既定でスキップ＝実行中タスクを道連れにしない。
-	if !force && t.AgentStatus == "working" {
+	if !opt.Force && t.AgentStatus == "working" {
 		return "skip", "agent_status=working（作業中。--force で強制）"
 	}
 	root, err := exportTabLayout(api, t.TabID)
@@ -419,7 +464,7 @@ func restartOneClaudePane(api *herdrapi.Client, t restartTarget, force bool, out
 	}
 
 	// 第 1 段: 会話を引き継ぐ argv で同 Tab を差し替え。
-	newArgv := rebuildResumeArgv(leaf.Command, t.ResumeUUID)
+	newArgv := rebuildResumeArgv(leaf.Command, t.ResumeUUID, opt.Model)
 	newPaneID, newTabID, err := replaceTabWithCommand(api, t.TabID, cwd, newArgv)
 	if err != nil {
 		return "error", err.Error()
@@ -443,6 +488,9 @@ func restartOneClaudePane(api *herdrapi.Client, t restartTarget, force bool, out
 		tabLabel = filepath.Base(cwd)
 	}
 	fbArgv := stripResumeArgv(leaf.Command)
+	if opt.Model != "" {
+		fbArgv = append(stripModelArgv(fbArgv), "--model", opt.Model)
+	}
 	fbPaneID, err := applyClaudeTab(api, t.WorkspaceID, tabLabel, fbArgv, cwd)
 	if err != nil {
 		return "error", fmt.Sprintf("--resume %s で即終了し、resume 無しの作り直しにも失敗"+
@@ -463,7 +511,7 @@ func restartOneClaudePane(api *herdrapi.Client, t restartTarget, force bool, out
 
 // restartClaudePanes は対象を選んで順に差し替える。CLI と遠隔命令の**共通の芯**
 // （経路ごとに別ロジックを持たない）。
-func restartClaudePanes(api *herdrapi.Client, sid string, force, dryRun bool, out io.Writer) ([]restartOutcome, error) {
+func restartClaudePanes(api *herdrapi.Client, opt restartOptions, out io.Writer) ([]restartOutcome, error) {
 	agents, err := api.AgentList()
 	if err != nil {
 		return nil, fmt.Errorf("agent.list: %w", err)
@@ -472,7 +520,7 @@ func restartClaudePanes(api *herdrapi.Client, sid string, force, dryRun bool, ou
 	if err != nil {
 		return nil, fmt.Errorf("pane.list: %w", err)
 	}
-	targets, err := selectRestartTargets(agents, panes, sid)
+	targets, err := selectRestartTargets(agents, panes, opt.SID)
 	if err != nil {
 		return nil, err
 	}
@@ -483,12 +531,12 @@ func restartClaudePanes(api *herdrapi.Client, sid string, force, dryRun bool, ou
 
 	results := make([]restartOutcome, 0, len(targets))
 	for _, t := range targets {
-		if dryRun {
+		if opt.DryRun {
 			root, err := exportTabLayout(api, t.TabID)
 			argv := "(layout.export 失敗)"
 			if err == nil {
 				if ls := root.leaves(); len(ls) == 1 && ls[0].PaneID == t.PaneID {
-					argv = fmt.Sprintf("%v", rebuildResumeArgv(ls[0].Command, t.ResumeUUID))
+					argv = fmt.Sprintf("%v", rebuildResumeArgv(ls[0].Command, t.ResumeUUID, opt.Model))
 				} else {
 					argv = fmt.Sprintf("(tab に pane %d 枚＝skip 予定)", len(ls))
 				}
@@ -498,7 +546,7 @@ func restartClaudePanes(api *herdrapi.Client, sid string, force, dryRun bool, ou
 			results = append(results, restartOutcome{PaneID: t.PaneID, Name: t.AgentName, Status: "skip", Detail: "dry-run"})
 			continue
 		}
-		status, detail := restartOneClaudePane(api, t, force, out)
+		status, detail := restartOneClaudePane(api, t, opt, out)
 		fmt.Fprintf(out, "restart-claude: %-5s %s pane=%s %s\n", status, t.AgentName, t.PaneID, detail)
 		results = append(results, restartOutcome{PaneID: t.PaneID, Name: t.AgentName, Status: status, Detail: detail})
 	}
@@ -540,6 +588,7 @@ func cmdRestartClaude(args []string, stdout, stderr io.Writer) error {
 	fs.SetOutput(stderr)
 	force := fs.Bool("force", false, "agent_status=working の pane も再起動する（実行中タスクは失われる）")
 	dryRun := fs.Bool("dry-run", false, "対象と再起動後 argv を表示するだけで何もしない")
+	model := fs.String("model", "", "再起動時に claude へ渡すモデル（例 opus）。空なら既存指定に触らない")
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("%w: %v", errUsage, err)
 	}
@@ -556,7 +605,8 @@ func cmdRestartClaude(args []string, stdout, stderr io.Writer) error {
 	if _, err := api.Ping(); err != nil {
 		return fmt.Errorf("herdr server に繋がらない（socket=%s）: %w", api.SocketPath, err)
 	}
-	results, err := restartClaudePanes(api, sid, *force, *dryRun, stdout)
+	results, err := restartClaudePanes(api,
+		restartOptions{SID: sid, Force: *force, DryRun: *dryRun, Model: *model}, stdout)
 	if err != nil {
 		return err
 	}

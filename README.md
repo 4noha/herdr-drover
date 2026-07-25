@@ -224,7 +224,14 @@ herdr-drover restart-claude
 # 1 枚だけ／作業中でも強制
 herdr-drover restart-claude w1:pD
 herdr-drover restart-claude --force w1:pD
+
+# モデルを切り替える（例: 既存の会話も Opus へ）
+herdr-drover restart-claude --model opus
 ```
+
+⚠ **`--resume` した会話は settings.json の既定モデルを無視して、その会話に紐づいた
+モデルのまま動きます**（実測）。既存の会話のモデルを変えるには `--model` が要ります。
+`--model` は起動時の指定なので、セッション内で `/model` を使えば従来どおり変更できます。
 
 Web からは端末カードの「claude 再起動」（PC 一括）、セッション行とターミナル画面の
 「⟳claude」（1 枚）で同じことができる（遠隔命令 `restart-claude`）。他 PC・slave にも

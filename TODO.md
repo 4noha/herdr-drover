@@ -104,6 +104,26 @@ v0.5.18 と rebase 統合済＝2026-07-25）。稼働 launchd `com.4noha.herdr-d
   - テスト: fake now/tickCh/fpFn を DI seam から注入して実 sleep なしで検証（7 本、
     -race 緑）。
 
+### 2026-07-25 追加: モデル切替（restart-claude --model / update-claude --model）
+
+- ⚠**`--resume` した会話は settings.json の既定モデルを無視し、会話に紐づいたモデルで
+  動く**（実測: 既定 opus・sonnet で作った会話を resume → sonnet のまま。
+  `--model opus --resume` を渡すと opus-5 に切替わる）。既存会話のモデルを変える手段は
+  argv の `--model` **だけ**＝この flag が要る理由。`restartOptions{Model}` で芯に通す。
+- claude の model 指定に**短縮形は無い**（実測 2.1.220 の --help は `--model` のみ）＝
+  `-m` は扱わない。設定は `~/.claude/settings.json` の `"model"`、値は**エイリアス
+  （`opus` 等）が backend 非依存**で安全（サブスク/Bedrock で完全 ID が異なるため）。
+- ⚠**herdr の SessionStart フックは `$HERDR_PANE_ID` に会話 uuid を報告する**
+  （`~/.claude/hooks/herdr-agent-state.sh`・`seq=time.time_ns()`）。つまり claude pane の
+  中から `claude -p` 等を走らせると**その pane の agent_session が上書きされる**
+  （2026-07-25 に実際に踏んだ: 検証用の使い捨て会話が本セッション pane に紐づいた）。
+  pane 内での claude 実行検証は避けるか、別 pane / 隔離 herdr で行うこと。
+- ⚠**`pane.report_agent_session` は強制上書き API ではない**。herdr の
+  `set_agent_session_ref_for_session_start`（0.7.4 `src/terminal/state.rs:983`）は
+  seq ゲート＋`session_start_source` 許可制（startup/resume/clear/compact/new/fork）＋
+  同一 owner の別会話への差し替え拒否、の多段ガードで弾く。**`ok` が返るのに値が
+  変わらない**ので、成否は必ず `pane.get` で読み直して確認すること。
+
 ### 2026-07-25 追加: claude 本体の更新（update-claude・ワンコマンド）
 
 `claude update` は symlink 差し替えのみ＝走っているセッションに効かず、

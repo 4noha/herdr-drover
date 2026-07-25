@@ -291,7 +291,7 @@ func runOneCloud(ctx context.Context, cfg Config, cl Cloud, primary bool, hcli *
 		// 「この PC のローカル claude pane 全部」。進捗行は daemon ログへ流す
 		// （silent 実行にしない＝skip 理由まで残る）。
 		DoRestartClaude: func(_ context.Context, sid string) (string, error) {
-			results, err := restartClaudePanes(hcli, sid, false, false, lg.Writer())
+			results, err := restartClaudePanes(hcli, restartOptions{SID: sid}, lg.Writer())
 			if err != nil {
 				return "", err
 			}
@@ -303,7 +303,7 @@ func runOneCloud(ctx context.Context, cfg Config, cl Cloud, primary bool, hcli *
 		DoUpdateClaude: func(parent context.Context, sid string) (string, error) {
 			uctx, cancel := context.WithTimeout(parent, claudeUpdateTimeout)
 			defer cancel()
-			return updateClaudeAndRestart(uctx, hcli, sid, false, false, lg.Writer())
+			return updateClaudeAndRestart(uctx, hcli, restartOptions{SID: sid}, lg.Writer())
 		},
 	}
 	if wt != nil {
