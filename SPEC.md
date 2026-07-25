@@ -326,6 +326,24 @@ organize / producer が共有）。権威は強い順に:
   `agent_session` も付かない＝resume backstop も organize の検出系統も silent に
   無効化される。`ValidateSpecs()` が静的検証する。
 
+### エージェント固有の実測差（2026-07-25・実機検証）
+
+| 事項 | claude | codex | cursor |
+|---|---|---|---|
+| herdr の検出 | ✅ | ✅（0.6 秒） | ✅ |
+| `agent_session` の発火契機 | **起動時**（TUI 立ち上げ） | **初回の発話時**（起動だけでは付かない） | ❌ 付かない（未解明） |
+| resume argv | `--resume <uuid>` | `codex resume <uuid>` | 未検証 |
+| resume 後の再報告 | ✅ | ❌ **hook が再発火しない** | — |
+
+⚠ **`agent_session` は herdr が自力で見つけるのではなく、各エージェントの hook が
+報告する**（`herdr integration install <agent>` で設置）。**integration 未設置の
+エージェントは resume が原理的に不可能**（drover 側は正しく素起動へ落として報告する）。
+
+⚠ **codex は resume 後に hook が再発火しない**（実測: hook 呼び出しログで確認）。
+つまり「1 回目の restart は会話 ref を使えるが、その後 herdr は ref を再学習しない」
+＝**同じ pane の 2 回目の restart は素起動になる**。drover 側の不具合ではなく
+codex / herdr integration 側の挙動。
+
 ⚠ resume 引数の抽出は **Spec 駆動**（「そのフラグが値を取るか」で決める）。
 **値の書式で判定しない** — claude の会話 ref はたまたま uuid だが pi/omp は path も
 取るので、uuid 判定だと二重指定や誤削除、他エージェントでの backstop 不発が起きる。

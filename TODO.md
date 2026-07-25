@@ -335,6 +335,51 @@ DESIGN_MULTI_AGENT.md の着手順序を**全段完了**。**現行仕様の正�
 
 ---
 
+### 2026-07-25 追加: codex / cursor 実機検証（v0.5.24）
+
+このPCに codex（brew cask 0.145.0）と cursor-agent（2026.07.23）を導入し、
+**マルチエージェント対応を実エージェントで検証**した。`.zshrc` に alias を配線
+（`codex` → `shim codex`／`cursor-agent` → `shim cursor`。claude と同じ方式）。
+
+**最大の発見**: `agent_session` は herdr が自力で見つけるのではなく、
+**各エージェントの hook が報告する**（`herdr integration install <agent>`）。
+codex/cursor には未設置だったので、入れるまで resume は原理的に不可能だった。
+`herdr integration status` で確認できる（claude/copilot は導入済だった）。
+
+| | 検出 | agent_session | resume argv | 再起動 |
+|---|---|---|---|---|
+| claude | ✅ | ✅ 起動時 | `--resume <uuid>` | ✅ |
+| codex | ✅ | ✅ **初回発話時** | `codex resume <uuid>` | ✅ 実行できる |
+| cursor | ✅ | ❌ 付かない（未解明） | 未検証 | — |
+
+- **codex の restart は実地で成功**（`pane w1:p2→w1:p3 [resume <id>]`）。herdr の
+  `plan()` から写経した ResumeSpec（`FormSubcommand`）が実データで正しい argv を
+  組み立てた＝**Spec 抽象が claude 以外でも機能する**ことの実証。
+- ⚠**codex は resume 後に hook が再発火しない**（hook 呼び出しログで確認）。
+  同じ pane の 2 回目の restart は素起動になる。drover 側の問題ではない。
+- ⚠**cursor は `sessionStart` hook を登録済・認証済・検出 OK でも agent_session が
+  付かない**。プロンプト送信後も status=idle のままで入力が TUI に届いていない
+  可能性がある。**未解明＝要調査**。
+
+#### この検証で見つけた実バグ（v0.5.24 で修正）
+
+1. **argv ゲートの種別ハードコード**（最も危険だった）。条件が `"claude"` 固定で、
+   codex/cursor の pane は argv[0] が正しくても**必ず skip** されていた。しかも
+   **メッセージだけ `t.AgentKind` を出す**ので「codex の直接起動でない
+   （argv[0]=".../codex"）」という矛盾文言になり一見正しく見えた。単体テストも
+   dry-run も claude 経路しか通らず気づけなかった＝**種別を変えた経路を必ず 1 本通す**。
+2. **`IsDirectInvocation` の判定表が claude だけ**（同上の一段手前）。
+3. **argv[0] multi-call の無限自己 exec**。シム symlink を PATH 前方に置くと
+   LookPath がシム自身を返す。alias 方式では起きない＝**設定方法による非対称**。
+
+#### Windows 機（desktop-djb9pfr-herdr）は更新不能と確定
+
+`self-update` が `herdr-drover_windows_amd64.exe` を要求して 404。現行コードは
+**Windows ビルド自体が通らない**（`syscall.Flock`／`placeBinary` が unix 専用＝実測）。
+TODO の out-of-scope 宣言どおりで、対応するなら移植作業が要る。
+
+---
+
 ## 進行中 / 保留（再開ポイント）
 
 ### A. SSH エージェント転送 — Phase 3（実機 e2e）保留中

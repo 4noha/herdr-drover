@@ -452,10 +452,15 @@ func restartOneClaudePane(api *herdrapi.Client, t restartTarget, opt restartOpti
 	if len(leaf.Command) == 0 {
 		return "skip", "pane に launch argv が無い（shell pane＝claude を直接起動していない）"
 	}
-	// identity が claude でも、argv が claude の**直接起動**でなければ触らない。
-	// 例: `zsh -lc '… claude'` は末尾に --resume を足しても claude に届かないので、
-	// 作り直すと会話を失ったまま「done」と報告してしまう（誤報告＝最悪の失敗）。
-	if !agentid.IsDirectInvocation("claude", leaf.Command) {
+	// identity が決まっていても、argv が**そのエージェント本体の直接起動**で
+	// なければ触らない。例: `zsh -lc '… claude'` は末尾に --resume を足しても
+	// 本体に届かないので、作り直すと会話を失ったまま「done」と報告してしまう。
+	//
+	// ⚠**判定する種別は t.AgentKind**（固定文字列にしない）。ここを "claude" に
+	// 固定していたため、codex/cursor の pane が argv[0] は正しいのに常に skip され、
+	// **エラーメッセージだけ t.AgentKind を出す**ので一見正しく見えた（実 codex の
+	// e2e で発覚。単体テストも dry-run も claude 経路しか通らず気づけなかった）。
+	if !agentid.IsDirectInvocation(t.AgentKind, leaf.Command) {
 		return "skip", fmt.Sprintf("launch argv が %s の直接起動でない（argv[0]=%q）"+
 			"＝resume 引数を付けても本体に届かないため作り直さない", t.AgentKind, leaf.Command[0])
 	}

@@ -6,6 +6,9 @@ package main
 // 規則で判定するか」＝サブシステム間の非対称の再発防止。
 
 import (
+	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -117,5 +120,51 @@ func TestSummarizeRestartIdentifiesUnnamedPanes(t *testing.T) {
 	})
 	if strings.Contains(got, ": ,") || !strings.Contains(got, "w1:p4") || !strings.Contains(got, "w2:p1") {
 		t.Fatalf("未命名 pane を特定できない要約: %q", got)
+	}
+}
+
+// argv ゲートは **対象 pane の種別**で判定しなければならない。
+//
+// 実バグ（実 codex の e2e で発覚・v0.5.24 で修正）: 条件が `"claude"` に
+// ハードコードされていたため、codex / cursor の pane は argv[0] が正しくても
+// 必ず skip されていた。**エラーメッセージだけ t.AgentKind を出す**ので
+// 「codex の直接起動でない（argv[0]="/opt/homebrew/bin/codex"）」という
+// 矛盾した文言になり、一見正しく見えた。単体テストも dry-run も claude 経路
+// しか通らず気づけなかった＝**種別を変えた経路を必ず 1 本通す**。
+func TestArgvGateUsesTargetAgentKind(t *testing.T) {
+	sock := startHerdrForTest(t)
+	api := herdrapi.New(sock)
+	// 実体名が codex の stub（argv ゲートは basename を見る）。
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "codex")
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\nexec sleep 300\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	wsID, err := currentWorkspaceID(api)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pane, err := applyClaudeTab(api, wsID, "codex", []string{stub}, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := api.ReportAgent(pane, "test-native", "codex", "idle"); err != nil {
+		t.Fatal(err)
+	}
+
+	var log bytes.Buffer
+	results, err := restartClaudePanes(api, restartOptions{SID: pane, Agent: "codex"}, &log)
+	if err != nil {
+		t.Fatalf("restart: %v\n%s", err, log.String())
+	}
+	if len(results) != 1 {
+		t.Fatalf("results=%+v", results)
+	}
+	if results[0].Status == "skip" && strings.Contains(results[0].Detail, "直接起動でない") {
+		t.Fatalf("argv[0] が codex なのに argv ゲートで skip された"+
+			"（ゲートが種別を固定していないか確認せよ）: %s", results[0].Detail)
+	}
+	if results[0].Status != "done" {
+		t.Fatalf("再起動できていない: %+v\nlog=%s", results[0], log.String())
 	}
 }
