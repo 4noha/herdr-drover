@@ -3,3 +3,9 @@ bin/
 dist/
 *.log
 .DS_Store
+
+# Codex CLI がプロジェクト側に自動生成する設定・指示ファイル。
+# .codex/config.toml は sandbox_mode 等のセキュリティ設定を含むので追跡外。
+# AGENTS.md は Codex 用の指示だが絶対パスを含みうるので追跡外。
+.codex/
+AGENTS.md

@@ -130,6 +130,7 @@ type InstallSpec struct {
 // organize の検出系統も silent に無効化される。だから BinNames は必ず表の要素にする。
 var installSpecs = map[string]InstallSpec{
 	"claude": {BinNames: []string{"claude"}, WellKnownPaths: []string{"~/.local/bin/claude"}},
+	"codex":  {BinNames: []string{"codex"}},
 }
 
 // Install は agent の InstallSpec と、載っているかを返す。
