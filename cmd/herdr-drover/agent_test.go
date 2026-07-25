@@ -12,7 +12,6 @@ import (
 	"log"
 	"os"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 )
@@ -30,6 +29,12 @@ func startLoop(t *testing.T, tickFn func(context.Context) error, lg *log.Logger)
 	}()
 	return nudge, done, cancelCtx
 }
+
+// nudgeSig は nudge チャネルへ流す signal 値。runAgentLoop は **受信したこと**
+// だけを合図に使い値を見ない（agent.go の `case <-nudge:`）ので、OS 非依存の
+// os.Interrupt を使う。実運用の値は unix=SIGUSR1（platform_unix.go の
+// notifyNudge）／Windows は notifyNudge が発火しないチャネルを返す＝周期 tick。
+var nudgeSig os.Signal = os.Interrupt
 
 func waitTick(t *testing.T, calls <-chan struct{}, what string) {
 	t.Helper()
@@ -51,7 +56,7 @@ func TestRunAgentLoopNudgeTriggersImmediateRescan(t *testing.T) {
 	defer cancel()
 
 	waitTick(t, calls, "起動直後の初回 tick") // 周期 1h＝ticker では説明不能
-	nudge <- syscall.SIGUSR1
+	nudge <- nudgeSig
 	waitTick(t, calls, "nudge 後の即時 tick")
 
 	cancel()
@@ -83,9 +88,9 @@ func TestRunAgentLoopErrorTransitionLogging(t *testing.T) {
 	defer cancel()
 
 	waitTick(t, calls, "tick1(boom)")
-	nudge <- syscall.SIGUSR1
+	nudge <- nudgeSig
 	waitTick(t, calls, "tick2(boom 再発)")
-	nudge <- syscall.SIGUSR1
+	nudge <- nudgeSig
 	waitTick(t, calls, "tick3(復帰)")
 	cancel()
 	<-done // ループ終了後にのみ buf を読む（ログはループ goroutine が書く）

@@ -1,6 +1,12 @@
+//go:build unix
+
 package main
 
-// update の稼働バイナリ同期テスト。
+// update の稼働バイナリ同期テスト。launchd の Program 実体（~/.herdr-drover/
+// bin）への同期と **新 inode**（syscall.Stat_t＝macOS 署名キャッシュ罠）を
+// 見る＝POSIX/launchd 前提のため unix 限定。Windows の update は実行中 exe を
+// 退避 rename する別経路（drover-cloud selfupdate/place_windows.go）＝そちら
+// 用のテストは未整備（TODO.md）。
 //
 // 【指摘再現】手動 `herdr-drover update` は os.Executable（例:
 // ~/.local/bin/herdr-drover）しか置換しないのに「launchctl kickstart -k で
@@ -34,7 +40,7 @@ func setUpdateSeams(t *testing.T, exe string, doUpdate func(string) (string, boo
 func TestUpdateSyncsDaemonBinary(t *testing.T) {
 	clearDroverEnv(t)
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	p := resolveInstallPaths(home)
 
 	// 稼働バイナリ（旧版）＝launchd Program の実体。
@@ -97,7 +103,7 @@ func TestUpdateSyncsDaemonBinary(t *testing.T) {
 func TestUpdateWithoutDaemonBinary(t *testing.T) {
 	clearDroverEnv(t)
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	exe := filepath.Join(home, "local-bin", "herdr-drover")
 	if err := os.MkdirAll(filepath.Dir(exe), 0o755); err != nil {
 		t.Fatal(err)
@@ -122,7 +128,7 @@ func TestUpdateWithoutDaemonBinary(t *testing.T) {
 func TestUpdateFromDaemonBinaryItself(t *testing.T) {
 	clearDroverEnv(t)
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	p := resolveInstallPaths(home)
 	if err := os.MkdirAll(filepath.Dir(p.binDst), 0o755); err != nil {
 		t.Fatal(err)
@@ -158,7 +164,7 @@ func TestUpdateFromDaemonBinaryItself(t *testing.T) {
 func TestUpdateAlreadyLatest(t *testing.T) {
 	clearDroverEnv(t)
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	exe := filepath.Join(home, "local-bin", "herdr-drover")
 	if err := os.MkdirAll(filepath.Dir(exe), 0o755); err != nil {
 		t.Fatal(err)

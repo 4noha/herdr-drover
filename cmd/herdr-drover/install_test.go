@@ -1,6 +1,12 @@
+//go:build unix
+
 package main
 
-// install/uninstall のテスト。鉄則:
+// install/uninstall のテスト。launchd plist の配置と **inode**（syscall.Stat_t）
+// を見る＝POSIX 前提のため unix 限定。Windows の常駐化はタスクスケジューラで
+// 別実装（install.go 未移植）＝そちらを作るときに windows 版テストを足すこと。
+//
+// 鉄則:
 //   - HOME を一時 dir に向けて実 run() 経路（実バイナリと同じ dispatch→
 //     flag 解析→ファイル配置）で検証する。合成の別経路を作らない
 //   - **実 launchctl / 実 ~/Library/LaunchAgents には絶対に触れない**:
@@ -24,7 +30,7 @@ func setupInstallHome(t *testing.T) (home string) {
 	t.Helper()
 	clearDroverEnv(t)
 	home = t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	t.Setenv("GCP_PROJECT", "proj-install-test")
 	t.Setenv("CLOUD_RELAY_URL", "wss://relay.example/session?a=1&b=2") // & で XML escape も同時検証
 	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", "/tmp/sa-test.json")
@@ -169,7 +175,7 @@ func TestInstallDryRunChangesNothing(t *testing.T) {
 // GCP_PROJECT 不能は install 拒否（入れてしまうと KeepAlive の crash-loop）。
 func TestInstallRequiresProject(t *testing.T) {
 	clearDroverEnv(t)
-	t.Setenv("HOME", t.TempDir())
+	setTestHome(t, t.TempDir())
 	code, _, errb := runCapture(t, "install", "--no-launchctl")
 	if code != 1 {
 		t.Fatalf("exit=%d want 1", code)
@@ -183,7 +189,7 @@ func TestInstallRequiresProject(t *testing.T) {
 func TestInstallConfigFileFallbackAndPrecedence(t *testing.T) {
 	clearDroverEnv(t)
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	p := resolveInstallPaths(home)
 	if err := os.MkdirAll(p.baseDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -223,7 +229,7 @@ PC_ID=filebox-herdr
 // （以後 hostname が変わっても id 安定）。
 func TestInstallBakesDefaultPCID(t *testing.T) {
 	clearDroverEnv(t)
-	t.Setenv("HOME", t.TempDir())
+	setTestHome(t, t.TempDir())
 	t.Setenv("GCP_PROJECT", "proj-x")
 	home := os.Getenv("HOME")
 	code, _, errb := runCapture(t, "install", "--no-launchctl")
@@ -300,7 +306,7 @@ func TestInstallRejectsBadArgs(t *testing.T) {
 func TestInstallResolvesFromEnrollConfigJSON(t *testing.T) {
 	clearDroverEnv(t)
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	// sa_json は資格情報として無効な JSON＝enroll 末尾の ClearRevoked
 	// best-effort が即エラー skip し、テストが GCP へ出ない（enroll_test 同様）。
 	wsURL := fakeEnrollServer(t, "INST0001", "proj-enrolled", "wss://relay.enrolled.example", `{"fake":"sa"}`)
@@ -335,7 +341,7 @@ func TestInstallResolvesFromEnrollConfigJSON(t *testing.T) {
 func TestInstallRespectsConfigJSONPCID(t *testing.T) {
 	clearDroverEnv(t)
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	dir := filepath.Join(home, ".herdr-drover")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
@@ -364,7 +370,7 @@ func TestInstallRespectsConfigJSONPCID(t *testing.T) {
 func TestInstallPrecedenceKVOverJSON(t *testing.T) {
 	clearDroverEnv(t)
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	p := resolveInstallPaths(home)
 	if err := os.MkdirAll(p.baseDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -399,7 +405,7 @@ func TestInstallPrecedenceKVOverJSON(t *testing.T) {
 func TestInstallRejectsBrokenConfigJSON(t *testing.T) {
 	clearDroverEnv(t)
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	t.Setenv("GCP_PROJECT", "proj-env")
 	dir := filepath.Join(home, ".herdr-drover")
 	if err := os.MkdirAll(dir, 0o700); err != nil {

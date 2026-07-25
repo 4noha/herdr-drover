@@ -60,7 +60,7 @@ func fakeEnrollServer(t *testing.T, code, project, relayURL, saJSON string) (wsU
 func TestEnrollPlacesKeyAndConfig(t *testing.T) {
 	clearDroverEnv(t)
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	// sa_json は「資格情報として無効な JSON」を使う＝enroll 末尾の
 	// ClearRevoked best-effort が NewWithCredentials で即エラー→skip し、
 	// テストが GCP/エミュレータへ一切出ないことを保証する。
@@ -123,7 +123,7 @@ func TestEnrollPlacesKeyAndConfig(t *testing.T) {
 func TestEnrollFallbacksWithoutSAJSON(t *testing.T) {
 	clearDroverEnv(t)
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	wsURL := fakeEnrollServer(t, "ZZZZ9999", "proj-nosa", "", "")
 
 	code, out, errb := runCapture(t, "enroll", "ZZZZ9999", "--relay", wsURL)
@@ -150,7 +150,7 @@ func TestEnrollFallbacksWithoutSAJSON(t *testing.T) {
 func TestEnrollPreservesOtherFileKeys(t *testing.T) {
 	clearDroverEnv(t)
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	dir := filepath.Join(home, ".herdr-drover")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
@@ -180,7 +180,7 @@ func TestEnrollPreservesOtherFileKeys(t *testing.T) {
 func TestEnrollAppendsSecondCloud(t *testing.T) {
 	clearDroverEnv(t)
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	dir := filepath.Join(home, ".herdr-drover")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
@@ -228,7 +228,7 @@ func TestEnrollAppendsSecondCloud(t *testing.T) {
 func TestEnrollPreservesLearnMovesKey(t *testing.T) {
 	clearDroverEnv(t)
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	dir := filepath.Join(home, ".herdr-drover")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
@@ -265,7 +265,7 @@ func TestEnrollPreservesLearnMovesKey(t *testing.T) {
 func TestEnrollSeedsLearnMovesDefaultTrue(t *testing.T) {
 	clearDroverEnv(t)
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	// dir 作らず・config.json も置かない＝ enroll が初期作成する状態から始める。
 	wsURL := fakeEnrollServer(t, "SEED0001", "seed-proj", "wss://r.example", "")
 	if code, out, errb := runCapture(t, "enroll", "SEED0001", "--relay", wsURL); code != 0 {
@@ -286,7 +286,7 @@ func TestEnrollSeedsLearnMovesDefaultTrue(t *testing.T) {
 func TestEnrollDoesNotOverrideLearnMovesFalse(t *testing.T) {
 	clearDroverEnv(t)
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	dir := filepath.Join(home, ".herdr-drover")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)

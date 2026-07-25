@@ -24,7 +24,7 @@ func TestResolveConfigRoleDefaultEmpty(t *testing.T) {
 func TestResolveConfigRoleFromFile(t *testing.T) {
 	clearDroverEnv(t)
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	writeTestConfigFile(t, home, `{
   "gcp_project": "proj-slave",
   "cloud_relay_url": "wss://relay.example",
@@ -42,7 +42,7 @@ func TestResolveConfigRoleFromFile(t *testing.T) {
 func TestResolveConfigRoleEnvOverridesFile(t *testing.T) {
 	clearDroverEnv(t)
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	writeTestConfigFile(t, home, `{"role":"slave"}`)
 	t.Setenv("HERDR_ROLE", "master")
 	cfg, err := resolveConfig()
@@ -60,7 +60,7 @@ func TestResolveConfigRoleEnvOverridesFile(t *testing.T) {
 func TestResolveConfigRoleCoexistsWithOtherKeys(t *testing.T) {
 	clearDroverEnv(t)
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	dir := filepath.Join(home, ".herdr-drover")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatalf("mkdir: %v", err)

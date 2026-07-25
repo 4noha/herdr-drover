@@ -1,51 +1,18 @@
 package main
 
-// nudge の実キーパステスト: pidfile → 実 SIGUSR1 がカーネル経由で届くこと
-// （合成 stub ではなく自プロセス宛の実シグナルで検証）。
+// nudge の実キーパステスト（pidfile・二重起動 flock）。OS 非依存の部分だけを
+// ここに置き、合図そのもの（unix=実 SIGUSR1 往復／Windows=周期 tick 委譲の
+// 報告）は nudge_signal_unix_test.go / nudge_windows_test.go に分けた。
 
 import (
-	"bytes"
 	"io"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
-	"time"
 )
-
-func TestSendNudgeRealSignalRoundTrip(t *testing.T) {
-	// Notify を先に張ってから送る（Notify 前に届いた SIGUSR1 は Go runtime が
-	// 黙って捨てる＝受信できずテストが timeout する）。
-	// 旧コメントの「SIGUSR1 の既定動作はプロセス終了」は Go には当てはまら
-	// ない誤り（POSIX 既定と混同）: runtime は全 _SigNotify シグナルへ自前
-	// ハンドラを入れ、未登録の SIGUSR1 は no action（sigtable go1.20〜1.26 で
-	// 確認・実 agent への実 SIGUSR1 で生存を実測済み）。
-	got := make(chan os.Signal, 1)
-	signal.Notify(got, syscall.SIGUSR1)
-	defer signal.Stop(got)
-
-	path := filepath.Join(t.TempDir(), "agent.pid")
-	if err := writePidfile(path, os.Getpid()); err != nil {
-		t.Fatalf("writePidfile: %v", err)
-	}
-	var out bytes.Buffer
-	if err := sendNudge(path, &out); err != nil {
-		t.Fatalf("sendNudge: %v", err)
-	}
-	select {
-	case <-got:
-		// 実 SIGUSR1 到達＝agent.go の signal.Notify(nudge, SIGUSR1) と同経路
-	case <-time.After(5 * time.Second):
-		t.Fatalf("SIGUSR1 が届かない")
-	}
-	if !strings.Contains(out.String(), "nudged") {
-		t.Fatalf("成功メッセージが無い: %q", out.String())
-	}
-}
 
 func TestSendNudgeNoDaemon(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "agent.pid")
@@ -58,13 +25,16 @@ func TestSendNudgeNoDaemon(t *testing.T) {
 func TestSendNudgeStalePidfile(t *testing.T) {
 	// 実 dead pid: 実子プロセスを spawn→回収した直後の pid を使う（回収直後の
 	// pid 再利用は実質起きない。合成の「絶対使われない pid」定数は使わない）。
-	cmd := exec.Command("true")
+	// 子は **自テストバイナリを -test.run=^$（1 件も走らせない）で起動**する。
+	// 旧実装の `true` は Windows に無いため OS 非依存の実 spawn へ置き換えた
+	//（本パッケージに TestMain は無い＝副作用なしで即 exit 0）。
+	cmd := exec.Command(os.Args[0], "-test.run=^$")
 	if err := cmd.Start(); err != nil {
-		t.Fatalf("spawn true: %v", err)
+		t.Fatalf("spawn 子プロセス: %v", err)
 	}
 	pid := cmd.Process.Pid
 	if err := cmd.Wait(); err != nil {
-		t.Fatalf("wait true: %v", err)
+		t.Fatalf("wait 子プロセス: %v", err)
 	}
 	path := filepath.Join(t.TempDir(), "agent.pid")
 	if err := writePidfile(path, pid); err != nil {

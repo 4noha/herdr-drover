@@ -71,7 +71,7 @@ func recordingEnrollServer(t *testing.T, code, project, relayURL, saJSON, slaveS
 func TestEnrollSlavePlacesSaLessConfigAndSecret(t *testing.T) {
 	clearDroverEnv(t)
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	dir := filepath.Join(home, ".herdr-drover")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatalf("mkdir: %v", err)
@@ -156,7 +156,7 @@ func TestEnrollSlavePlacesSaLessConfigAndSecret(t *testing.T) {
 func TestEnrollMasterUnchangedNoSlaveArtifacts(t *testing.T) {
 	clearDroverEnv(t)
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	const saJSON = `{"fake":"sa"}`
 	wsURL, rec := recordingEnrollServer(t, "MASTERCODE", "proj-master", "wss://relay.example", saJSON, "unused")
 

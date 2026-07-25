@@ -27,7 +27,7 @@ func writeTestConfigFile(t *testing.T, home, body string) string {
 func TestResolveConfigReadsFile(t *testing.T) {
 	clearDroverEnv(t)
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	writeTestConfigFile(t, home, `{
   "gcp_project": "proj-file",
   "cloud_relay_url": "wss://file.example",
@@ -47,7 +47,7 @@ func TestResolveConfigReadsFile(t *testing.T) {
 func TestResolveConfigEnvBeatsFile(t *testing.T) {
 	clearDroverEnv(t)
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	writeTestConfigFile(t, home, `{"gcp_project":"proj-file","cloud_relay_url":"wss://file.example"}`)
 	t.Setenv("GCP_PROJECT", "proj-env")
 	cfg, err := resolveConfig()
@@ -65,7 +65,7 @@ func TestResolveConfigEnvBeatsFile(t *testing.T) {
 
 func TestResolveConfigFileAbsentIsDefault(t *testing.T) {
 	clearDroverEnv(t)
-	t.Setenv("HOME", t.TempDir()) // file 無し
+	setTestHome(t, t.TempDir()) // file 無し
 	cfg, err := resolveConfig()
 	if err != nil {
 		t.Fatalf("resolveConfig: %v", err)
@@ -78,7 +78,7 @@ func TestResolveConfigFileAbsentIsDefault(t *testing.T) {
 func TestResolveConfigFileMalformed(t *testing.T) {
 	clearDroverEnv(t)
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	writeTestConfigFile(t, home, `{broken json`)
 	t.Setenv("GCP_PROJECT", "proj-env")
 	cfg, err := resolveConfig()

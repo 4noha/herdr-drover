@@ -19,7 +19,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -113,7 +112,7 @@ func waitClaudeAgents(t *testing.T, api *herdrapi.Client, cwd string, n int) []h
 func TestClaudeShimRealHerdrLifecycle(t *testing.T) {
 	sock := startHerdrForTest(t)
 	t.Setenv("HERDR_SOCKET_PATH", sock)
-	t.Setenv("HOME", t.TempDir()) // 着地ルール（~/.herdr-drover/workspaces.json）隔離
+	setTestHome(t, t.TempDir()) // 着地ルール（~/.herdr-drover/workspaces.json）隔離
 	installStubClaude(t)
 	work := chdirPhysical(t)
 	swapSeams(t, false, nil) // 非 TTY（CI/pipe 経路）
@@ -283,7 +282,7 @@ func TestClaudeShimAutoStartsServer(t *testing.T) {
 	sock := filepath.Join(dir, "h.sock")
 	t.Setenv("HERDR_SOCKET_PATH", sock)
 	t.Setenv("XDG_CONFIG_HOME", xdg)
-	t.Setenv("HOME", t.TempDir()) // 着地ルール（~/.herdr-drover/workspaces.json）隔離
+	setTestHome(t, t.TempDir()) // 着地ルール（~/.herdr-drover/workspaces.json）隔離
 	installStubClaude(t)
 	swapSeams(t, false, nil)
 	chdirPhysical(t)
@@ -298,12 +297,17 @@ func TestClaudeShimAutoStartsServer(t *testing.T) {
 		stop.Env = env
 		_ = stop.Run()
 		if pid := lastSpawnedServerPID; pid > 0 {
+			// 生存判定/強制終了は OS 非依存の seam で行う（pidAlive＝
+			// platform_{unix,windows}.go／Process.Kill＝unix では SIGKILL）。
+			// 対象は自分が spawn した PID のみ（裸の pkill herdr は恒久禁止）。
 			deadline := time.Now().Add(5 * time.Second)
-			for time.Now().Before(deadline) && syscall.Kill(pid, 0) == nil {
+			for time.Now().Before(deadline) && pidAlive(pid) {
 				time.Sleep(100 * time.Millisecond)
 			}
-			if syscall.Kill(pid, 0) == nil {
-				_ = syscall.Kill(pid, syscall.SIGKILL)
+			if pidAlive(pid) {
+				if p, err := os.FindProcess(pid); err == nil {
+					_ = p.Kill()
+				}
 			}
 		}
 		os.RemoveAll(dir)
@@ -413,7 +417,7 @@ func TestStdinIsTTYRealDevices(t *testing.T) {
 func TestClaudeShimSymlinkCwdNoDup(t *testing.T) {
 	sock := startHerdrForTest(t)
 	t.Setenv("HERDR_SOCKET_PATH", sock)
-	t.Setenv("HOME", t.TempDir()) // 着地ルール（~/.herdr-drover/workspaces.json）隔離
+	setTestHome(t, t.TempDir()) // 着地ルール（~/.herdr-drover/workspaces.json）隔離
 	installStubClaude(t)
 	swapSeams(t, false, nil)
 

@@ -79,7 +79,7 @@ func startHerdrForTest(t *testing.T) string {
 func TestStatusAgainstRealHerdr(t *testing.T) {
 	sock := startHerdrForTest(t)
 	t.Setenv("HERDR_SOCKET_PATH", sock)
-	t.Setenv("HOME", t.TempDir()) // pidfile 隔離＝実稼働 daemon の状態に依存しない
+	setTestHome(t, t.TempDir()) // pidfile 隔離＝実稼働 daemon の状態に依存しない
 
 	var out bytes.Buffer
 	code := run([]string{"status"}, &out, &out)
@@ -102,7 +102,7 @@ func TestStatusAgainstRealHerdr(t *testing.T) {
 // probe ではない設計）。dial 失敗は実 unix socket 不在で起こす。
 func TestStatusHerdrUnreachable(t *testing.T) {
 	t.Setenv("HERDR_SOCKET_PATH", filepath.Join(t.TempDir(), "none.sock"))
-	t.Setenv("HOME", t.TempDir())
+	setTestHome(t, t.TempDir())
 
 	var out bytes.Buffer
 	code := run([]string{"status"}, &out, &out)
