@@ -455,18 +455,26 @@ main（v0.5.23 相当 e3314d3）へ rebase 済みの 2 commit が branch `window
 実際に dir を返すことをその場で検証＝破れたら書き込む前に落ちる）。既存 55 箇所を置換。
 **他 OS の隔離テストを新 OS で走らせる前に、隔離が実際に効くかを確かめること。**
 
-- ⏳ **この PC の `~/.herdr-drover` は fixture のまま**（`config.json` が
-  `role=slave`/`relay.example`、`slave.json`・`sa-proj-*.json` はゴミ、`sa.json` は
-  **消失**、`workspaces.json` は fixture）。バックアップ:
-  `~/.herdr-drover.bak-2026-07-25`（被害後の状態）。稼働中 daemon（pid 12124・
-  14:25 起動）は**旧設定をメモリに保持**して正常動作中＝再起動するまで顕在化しない。
-  復旧に要る値は daemon ログ（`agent.err.log` 冒頭）に残っている:
-  `pc=desktop-djb9pfr-herdr` / `project=claude-master-4noha` /
-  `relay=wss://claude-master-relay-nkzxa3hxma-an.a.run.app` / `learn_moves=true` /
-  clouds=1。**`sa.json` だけは再 enroll でしか戻らない**。
-  ⚠ タスクスケジューラ `herdr-drover-agent`（State: Ready）＝**次回ログオン/再起動で
-  fixture 設定の daemon が起動する**。⚠ この PC 宛に `update-all` が **pending 投入
-  済**（最新状態の表）＝受信すると daemon 再起動＝同じ穴を踏む。復旧を先に。
+- ✅ **この PC の `~/.herdr-drover` は復旧済み**（2026-07-25 23:25）。被害後の状態は
+  `~/.herdr-drover.bak-2026-07-25` に保全。復旧内容:
+  - `config.json` を daemon ログ（`agent.err.log` 冒頭）由来の実値へ書き戻し
+    （`gcp_project=claude-master-4noha` / `cloud_relay_url=wss://claude-master-relay-
+    nkzxa3hxma-an.a.run.app` / `learn_moves=true`。role なし＝master。
+    `pc_id` は hostname 由来で `desktop-djb9pfr-herdr` に一致するので書かない）。
+  - `clouds.json` は**置かない**（`LoadClouds` は不在なら config.json から単一
+    クラウドを導出＝ログの `clouds=1` と一致。SAKeyPath は既定 `~/.herdr-drover/sa.json`）。
+  - fixture ゴミ（`slave.json`・`sa-proj-*.json`・fixture `workspaces.json`）を削除。
+    workspaces.json は**実内容が失われた**＝不在＝「ルール無し」から再学習
+    （`learn_moves=true`／`organize --capture`）。
+  - `sa.json` は同一 GCP プロジェクトの既存鍵 `~/.claude-master/sa.json`
+    （`cm-agent@claude-master-4noha`）から復元し、ACL を本人のみへ制限（600 相当）。
+  - `herdr-drover status` で project/relay/pc_id/tick が被害前ログと**一致**を確認。
+  - ⚠ **未検証**: SA 鍵が実際に Firestore 認証を通るかは**次回 daemon 再起動まで
+    未確認**（`status` はクラウド接続を見ない・gcloud 不在・使い捨て検証バイナリは
+    SAC にブロックされる）。稼働中 daemon（pid 12124・14:25 起動）は旧設定を
+    メモリに保持して正常動作中（tick エラー 0）。⚠ タスクスケジューラ
+    `herdr-drover-agent`（Ready）と**この PC 宛 pending `update-all`** のどちらでも
+    再起動が起きる＝**その時が実質の検証**。失敗したら `enroll` からやり直す。
 - ⏳ **残る Windows テスト赤**（実害なし・いずれも移植の未了）:
   - `internal/wsmap`: fixture が POSIX パス（`/w/proj` は Windows で非絶対）＝
     Parse/Resolve が落ちる。**実運用キーは `C:\...` で絶対＝production は通る**が、
@@ -476,10 +484,21 @@ main（v0.5.23 相当 e3314d3）へ rebase 済みの 2 commit が branch `window
     なった（`%APPDATA%\herdr\herdr.sock`）＝期待値を OS 分割すること。
   - `internal/injectindex`: `perm=0600` 判定（Windows に POSIX perm 無し）。
   - `internal/agentfwd`: unix socket＋`/tmp`（SSH 転送＝Windows out-of-scope）。
-  - `cmd/herdr-drover`: **Smart App Control**（`VerifiedAndReputablePolicyState=1`）が
-    未署名の `*.test.exe` を**間欠的に**ブロックする（`An Application Control policy
-    has blocked this file`）。再実行で通ることが多い。SAC は一度切ると Windows
-    再インストールでしか戻せない＝切らない。`GOTMPDIR` 変更では回避不可（実測）。
+  - `cmd/herdr-drover`（実行できた回の内訳・**製品バグは 0・全て harness**）:
+    ①`startHerdrForTest` が `/tmp` 前提（macOS の `sun_path` 104B 対策）＝
+    Windows に `/tmp` が無く**実 herdr テスト約 15 本が setup で落ちる**。
+    Windows 用 temp dir＋named pipe パスへ要移植（ここを直すと一番効く）。
+    ②`TestStdinIsTTYRealDevices` は POSIX pty 前提（Windows は ConPTY）。
+    ③`TestLookupAgentBinSkipsShimItself` は `os.Symlink` に開発者モード/管理者
+    権限が要る（`A required privilege is not held by the client`）＝skip 条件が要る。
+  - ⚠ **Smart App Control**（`VerifiedAndReputablePolicyState=1`）が**新しく
+    ビルドした未署名 exe** をブロックする（`An Application Control policy has
+    blocked this file`／bash 越しは `Permission denied`）。`*.test.exe` は
+    間欠的にブロックされ、`go run`/`go build` した使い捨てバイナリは実測で
+    毎回ブロックされた（古い `~/.herdr-drover/bin/herdr-drover.exe` は動く＝
+    レピュテーションで枯れた実行体は通る）。`GOTMPDIR` 変更では回避不可。
+    **SAC は一度切ると Windows 再インストールでしか戻せない＝切らない**。
+    テストが赤/緑どちらとも言えない回はこれを疑い、まず再実行する。
   - `install`/`update` は launchd/inode 前提＝`//go:build unix` にした。**Windows の
     常駐化（タスクスケジューラ）と update の Windows 経路はテスト未整備**。
 
