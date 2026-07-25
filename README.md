@@ -181,6 +181,38 @@ mkdir -p ~/.claude/skills
 ln -s "$PWD/skills/mv-tab" ~/.claude/skills/mv-tab
 ```
 
+### restart-claude（claude バイナリ更新をセッションへ反映）
+
+claude 本体を更新しても、**すでに起動しているセッションは古いバイナリのまま**動く
+（`~/.local/bin/claude` は `versions/<ver>` への symlink＝プロセスは exec した時点の
+実体に貼り付く）。`restart-claude` は claude pane を**会話を引き継いだまま**作り直し、
+新しいバイナリを掴ませる。
+
+```sh
+# 何が対象になるか確認（実行しない）
+herdr-drover restart-claude --dry-run
+
+# この PC のローカル claude セッションを全部（作業中は自動 skip）
+herdr-drover restart-claude
+
+# 1 枚だけ／作業中でも強制
+herdr-drover restart-claude w1:pD
+herdr-drover restart-claude --force w1:pD
+```
+
+Web からは端末カードの「claude 再起動」（PC 一括）、セッション行とターミナル画面の
+「⟳claude」（1 枚）で同じことができる（遠隔命令 `restart-claude`）。他 PC・slave にも
+届く。
+
+- **会話は失われない**: herdr が持つ会話 uuid を `--resume <uuid>` として渡し直す。
+  Tab の位置・ラベル・agent 名もそのまま保つ。
+- **作業中（agent_status=working）は既定でスキップ**。実行中タスクを巻き込まない
+  （`--force` で強制。skip した理由は必ず出力／遠隔命令なら履歴の detail に残る）。
+- **↗窓 の注入 pane は対象外**（リモートの鏡なので pane token で構造的に除外）。
+  同居 pane のある Tab も巻き添えを避けて skip する。
+- 起動コマンドは herdr が保持する実 argv をそのまま再利用する（PATH を引き直さない）
+  ＝daemon 経由でも手元の CLI と同じバイナリが起動する。
+
 ### ssh-forward（slave へ owner の SSH エージェントを一時転送）
 
 共用 slave 上で **owner の SSH 秘密鍵をディスクに置かず**、一時的に git/gh の

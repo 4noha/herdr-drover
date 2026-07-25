@@ -46,6 +46,29 @@ build 緑・テスト緑**。稼働 launchd `com.4noha.herdr-drover`（pc=`mac-s
   herdr 再起動は session 復元で空にしない＝作成経路固有。⚠ organize/claudeshim も同 create
   経路で同種ゴミ（稀）＝下記 follow-up。
 
+### 2026-07-25 追加: claude セッション再起動（restart-claude）
+
+claude 本体を更新しても **exec 済みプロセスは旧 inode のまま**（`~/.local/bin/claude`
+は `versions/<ver>` への symlink＝再 exec して初めて新版。実測: 7/18 起動の 3 本が
+2.1.214 に貼り付き、当日起動だけ 2.1.219）。pane を**会話ごと作り直す**手段を追加。
+
+- CLI `herdr-drover restart-claude [--force] [--dry-run] [sid]`／遠隔命令
+  `restart-claude`（Web の端末カード「claude 再起動」＝PC 一括、セッション行と
+  ターミナル画面の「⟳claude」＝1 枚）。sid 空＝その PC のローカル claude pane 全部。
+- 実装は `cmd/herdr-drover/restartclaude.go`。設計根拠は DESIGN.md
+  「restart-claude の設計」。**PATH 非依存**（argv は `layout.export` の launch_argv
+  が権威）・会話は `agent_session` uuid の `--resume` で継続・↗窓 注入 pane は
+  token で構造的に除外・working と同居 pane Tab は skip。
+- テスト: 純関数テーブル＋**実 herdr 隔離 e2e 4 本**（会話 uuid 継承／位置・label・
+  agent 名の保存／working skip と --force／同居 Tab skip／注入 pane 不可触）＋
+  実 Firestore エミュレータの遠隔命令 dispatch。
+- ⚠herdr trap（実測で判明）: `agent_session` は `(source,agent)=("herdr:claude",
+  "claude")` の **exact 許可制**で、非公式 source の report は **error にならず
+  黙って捨てられる**（0.7.4 `src/agent_resume.rs:is_official_agent_source`）。
+  テストで source を変えると偽陰性になる。
+- ⚠`TabInfo.number` は**位置ではない**（実測: w1 は tab 3 枚で number=5/21/23）。
+  tab 位置は `tab.list` の並び順が権威＝`number-1` を index に使うと壊れる。
+
 ---
 
 ## 進行中 / 保留（再開ポイント）

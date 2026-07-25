@@ -9,10 +9,14 @@
 //
 // drover での写像（DESIGN「遠隔命令」）:
 //
-//	restart-agent → launchctl kickstart -k（自己。DoRestart seam）
-//	self-update   → selfupdate.Update → DoExit（os.Exit(0)。launchd
-//	                KeepAlive が新バイナリで再起動）
-//	restart-proxy → 当該 sid の bridge respawn（webterm。DoProxy seam）
+//	restart-agent  → launchctl kickstart -k（自己。DoRestart seam）
+//	self-update    → selfupdate.Update → DoExit（os.Exit(0)。launchd
+//	                 KeepAlive が新バイナリで再起動）
+//	restart-proxy  → 当該 sid の bridge respawn（webterm。DoProxy seam）
+//	restart-claude → claude セッションを会話ごと作り直して新バイナリを掴ませる
+//	                 （DoRestartClaude seam。sid 空＝その PC のローカル claude
+//	                 pane 全部）。破壊的だが**対象プロセスのみ**＝agent 自身は
+//	                 死なないので Ack は実行**後**（結果の要約を detail に残す）
 //
 // 破壊的命令（restart-agent / self-update 成功時）は **Ack を先行**して
 // から実行する（cm 規律: kickstart -k / exit で agent が死んでも監査が
@@ -52,6 +56,10 @@ type CommandRunner struct {
 	// DoProxy は当該 sid の bridge respawn（webterm。Web ターミナル無効=
 	// CLOUD_RELAY_URL 未設定なら nil のまま＝未配線 error で Ack）。
 	DoProxy func(ctx context.Context, sid string) error
+	// DoRestartClaude は claude セッションの作り直し（restartclaude.go）。
+	// sid 空＝その PC のローカル claude pane 全部。戻り値の要約が Ack detail に
+	// 載る（何件やって何件 skip したかを監査に残す）。
+	DoRestartClaude func(ctx context.Context, sid string) (summary string, err error)
 }
 
 // Run は命令制御線（WatchCommands）を回す。claim 済命令のみ handle
@@ -115,6 +123,20 @@ func (cr *CommandRunner) handle(ctx context.Context, cm state.Command) {
 			return
 		}
 		_ = cr.St.AckCommand(ctx, cm.ID, "done", "bridge respawn: "+cm.SID)
+
+	case "restart-claude":
+		if cr.DoRestartClaude == nil {
+			_ = cr.St.AckCommand(ctx, cm.ID, "error", "restart-claude 未配線")
+			return
+		}
+		// agent 自身は死なない＝Ack 先行にせず、実行結果の要約を detail に残す
+		// （何件再起動・何件 skip したかが監査で追える）。
+		summary, err := cr.DoRestartClaude(ctx, cm.SID)
+		if err != nil {
+			_ = cr.St.AckCommand(ctx, cm.ID, "error", "claude 再起動 失敗: "+err.Error())
+			return
+		}
+		_ = cr.St.AckCommand(ctx, cm.ID, "done", summary)
 
 	default:
 		// PushCommand 側 allowlist を通らない値がここへ来るのは

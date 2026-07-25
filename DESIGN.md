@@ -82,11 +82,37 @@ attach client: Wake→Grant→relay viewer（派生 sid <pane_id>#inj）
 M8f2 教訓: desired/cur トレース・**定常 CREATE=0 を機械確認**・list 失敗を
 「pane ゼロ」と誤認しない。
 
-### 遠隔命令（既存 3 種に写像・ValidCommands は焼込みで追加不可）
+### 遠隔命令（`drover-cloud/state.ValidCommands` の allowlist に exact-match で写像）
 - restart-agent → `launchctl kickstart -k`（自身）
 - self-update → selfupdate.Update → 再起動
 - restart-proxy → 当該 sid の bridge respawn（不能なら status=error で Ack＝滞留させない）
-破壊的命令は Ack 先行（cm 規律）。
+- restart-claude → claude セッションを**会話ごと作り直す**（`restartclaude.go`）。
+  sid 指定＝その 1 枚／sid 空＝その PC のローカル claude pane 全部
+破壊的命令は Ack 先行（cm 規律）。ただし restart-claude は agent 自身が死なない
+＝Ack は実行**後**（何件再起動・何件 skip したかの要約を detail に残す）。
+
+#### restart-claude の設計（claude バイナリ更新の反映）
+claude を更新しても **exec 済みプロセスは旧 inode に貼り付いたまま**
+（`~/.local/bin/claude` は `versions/<ver>` への symlink＝再 exec して初めて新版）。
+pane を作り直して新版を掴ませる。
+
+- **claude バイナリを PATH から解決しない**。daemon（launchd）の PATH には
+  `~/.local/bin` も `~/.herdr-drover/bin` も入らず、遠隔命令経路と CLI 経路で
+  別物を起動してしまう。権威は **その pane が今走らせている argv**
+  （`layout.export` の `command`＝herdr が保持する launch_argv）。
+- 対象 identity は exact-match 2 条件（ヒューリスティック分類禁止）:
+  (a) agent 名がシム encode 形 `claude`/`claude-N`、(b) pane token に
+  `drover_inj_pc`/`drover_inj_sid` が**無い**＝↗窓 注入 pane を構造的に除外。
+- 会話は `agent_session`(kind=id) の uuid を `--resume <uuid>` として argv に
+  張り直して継続（resume 以外のフラグと argv[0] は保つ）。uuid 未検出なら
+  argv を一切いじらない（既存 --resume を落として会話を失わない）。
+- 差し替えは `layout.apply{tab_id}`。herdr 0.7.4 実測: **新 tab を末尾に作って
+  から旧 tab を close**（tab label=custom_name は継承／位置は末尾へ移る）＝
+  `tab.move` で元 index に戻す。`tab_id` と `workspace_id` の同時指定は
+  `invalid_target` で撥ねられる。
+- 安全弁（いずれも silent skip 禁止＝理由を必ず出す）: `agent_status=working`
+  は既定 skip（CLI `--force` で強制）／`layout.apply{tab_id}` は tab の全 pane を
+  作り直すため、同居 pane のある Tab は巻き添え回避で skip。
 
 ## リポジトリ構成
 

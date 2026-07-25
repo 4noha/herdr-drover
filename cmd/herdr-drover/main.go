@@ -135,6 +135,17 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		return 0
+	case "restart-claude":
+		// claude セッションを会話ごと作り直して新バイナリを掴ませる
+		// （restartclaude.go）。--force/--dry-run と任意の sid を取る。
+		if err := cmdRestartClaude(rest, stdout, stderr); err != nil {
+			fmt.Fprintf(stderr, "herdr-drover restart-claude: %v\n", err)
+			if errors.Is(err, errUsage) {
+				return 2
+			}
+			return 1
+		}
+		return 0
 	case "mv-tab-launch":
 		// plugin action `mv-tab` の実体。drawer から非 TTY spawn で呼ばれ、layout.apply で
 		// 新 Tab を作り、その中で `herdr-drover mv-tab` を対話モードで走らせる（TTY 内へ迂回）。
@@ -197,6 +208,15 @@ func usage(w io.Writer) {
                           実行。表示された ~/.herdr-drover/agent-fwd/*.sock を slave で
                           SSH_AUTH_SOCK に指定して git。Ctrl-C で撤去（推奨: 専用
                           deploy key を ssh-add -c で confirm 付き登録）
+  herdr-drover restart-claude [--force] [--dry-run] [sid]
+                          claude セッションを**会話を引き継いだまま**作り直して
+                          新しい claude バイナリを掴ませる（exec 済みプロセスは
+                          symlink 張替えを追わないため。sid 省略でその PC の
+                          ローカル claude pane 全部）。起動 argv は herdr が持つ
+                          launch_argv をそのまま再利用し PATH 解決はしない。
+                          会話は agent_session の uuid で --resume 継続。
+                          agent_status=working は既定 skip（--force で強制）／
+                          同居 pane のある Tab は巻き添え回避で skip
   herdr-drover update     selfupdate（GitHub Releases・sha256 検証・原子置換）
   herdr-drover version    バージョン表示
   herdr-drover help       このヘルプ

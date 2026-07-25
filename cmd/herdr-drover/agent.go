@@ -286,6 +286,17 @@ func runOneCloud(ctx context.Context, cfg Config, cl Cloud, primary bool, hcli *
 			return selfupdate.Update(version)
 		},
 		DoExit: func() { os.Exit(0) },
+		// DoRestartClaude は herdr 直叩き（クラウド非依存）＝どのクラウドの
+		// コマンドでも同じローカル herdr の claude pane を作り直す。sid 空は
+		// 「この PC のローカル claude pane 全部」。進捗行は daemon ログへ流す
+		// （silent 実行にしない＝skip 理由まで残る）。
+		DoRestartClaude: func(_ context.Context, sid string) (string, error) {
+			results, err := restartClaudePanes(hcli, sid, false, false, lg.Writer())
+			if err != nil {
+				return "", err
+			}
+			return summarizeRestart(results), nil
+		},
 	}
 	if wt != nil {
 		cr.DoProxy = func(_ context.Context, sid string) error {

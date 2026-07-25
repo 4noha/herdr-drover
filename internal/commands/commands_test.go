@@ -134,6 +134,9 @@ func TestCommandRunnerDispatchAndRevocation(t *testing.T) {
 	st := newState(t, pc)
 
 	var restarts, updates, exits, respawns atomic.Int32
+	var claudeRestarts atomic.Int32
+	var claudeSid atomic.Value // 最後に渡された sid（"" 込みで検証したいので Value）
+	claudeSid.Store("")
 	var revoked atomic.Bool
 	// Ack 先行順序の機械検証: 破壊的 seam（DoRestart / self-update の DoExit）の
 	// **実行時点**で当該命令の監査 status が既に done であることを、実エミュ
@@ -182,6 +185,16 @@ func TestCommandRunnerDispatchAndRevocation(t *testing.T) {
 				return nil
 			}
 			return fmt.Errorf("sid %q の稼働 bridge が無い", sid)
+		},
+		// restart-claude 写像: agent 自身は死なない＝Ack は実行**後**で、
+		// 実行結果の要約が detail に載る（何件やって何件 skip したかを監査で追う）。
+		DoRestartClaude: func(_ context.Context, sid string) (string, error) {
+			claudeSid.Store(sid)
+			if sid == "w9:p9" {
+				return "", fmt.Errorf("sid %q は再起動対象のローカル claude pane ではない", sid)
+			}
+			claudeRestarts.Add(1)
+			return "再起動 2 件: claude,claude-2 / skip claude-3(working)", nil
 		},
 	}
 	go func() { _ = cr.Run(ctx) }()
@@ -234,6 +247,36 @@ func TestCommandRunnerDispatchAndRevocation(t *testing.T) {
 		t.Fatalf("未知 sid で respawn が発火: %d", respawns.Load())
 	}
 
+	// restart-claude: sid 空＝その PC のローカル claude pane 全部。要約が
+	// そのまま監査 detail に載る（skip 理由まで残す＝silent skip 禁止）。
+	c = waitCmdStatus(t, st, pc, push("restart-claude", ""), 8*time.Second)
+	if c.Status != "done" || claudeRestarts.Load() != 1 ||
+		!strings.Contains(c.Detail, "再起動 2 件") ||
+		!strings.Contains(c.Detail, "skip claude-3(working)") {
+		t.Fatalf("restart-claude(sid 空): %+v claudeRestarts=%d", c, claudeRestarts.Load())
+	}
+	if got := claudeSid.Load().(string); got != "" {
+		t.Fatalf("sid 空の命令で seam に %q が渡った（全件指定が壊れている）", got)
+	}
+
+	// restart-claude: sid 指定はその sid が seam へ exact で渡る
+	c = waitCmdStatus(t, st, pc, push("restart-claude", "w1:p1"), 8*time.Second)
+	if c.Status != "done" || claudeRestarts.Load() != 2 {
+		t.Fatalf("restart-claude(sid 指定): %+v claudeRestarts=%d", c, claudeRestarts.Load())
+	}
+	if got := claudeSid.Load().(string); got != "w1:p1" {
+		t.Fatalf("seam へ渡った sid = %q（w1:p1 のはず）", got)
+	}
+
+	// restart-claude: 対象外 sid → status=error で Ack（pending 滞留させない）
+	c = waitCmdStatus(t, st, pc, push("restart-claude", "w9:p9"), 8*time.Second)
+	if c.Status != "error" || !strings.Contains(c.Detail, "ローカル claude pane ではない") {
+		t.Fatalf("restart-claude(対象外 sid) が error にならない: %+v", c)
+	}
+	if claudeRestarts.Load() != 2 {
+		t.Fatalf("対象外 sid で再起動が発火: %d", claudeRestarts.Load())
+	}
+
 	// revocation: 失効中は実行拒否（DoRestart 増えない・error revoked）
 	revoked.Store(true)
 	c = waitCmdStatus(t, st, pc, push("restart-agent", ""), 8*time.Second)
@@ -261,9 +304,10 @@ func TestCommandRunnerUnwiredAcksError(t *testing.T) {
 	time.Sleep(1500 * time.Millisecond)
 
 	for cmd, wantDetail := range map[string]string{
-		"restart-agent": "restart 未配線",
-		"self-update":   "update 未配線",
-		"restart-proxy": "restart-proxy 未配線",
+		"restart-agent":  "restart 未配線",
+		"self-update":    "update 未配線",
+		"restart-proxy":  "restart-proxy 未配線",
+		"restart-claude": "restart-claude 未配線",
 	} {
 		id, err := st.PushCommand(ctx, pc, cmd, "w1:p1", "owner@example.com")
 		if err != nil {
