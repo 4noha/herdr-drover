@@ -534,12 +534,23 @@ TODO の out-of-scope 宣言どおりで、対応するなら移植作業が要�
     （dev 版数のままだと「最新でない」と判定され update-all が再発＝再度落ちる）。
     SAC に弾かれた配布バイナリは `bin/herdr-drover.exe.sac-blocked-v0.5.26-release`
     に証拠として残してある。
-  - **恒久対策の候補**（未着手・要判断）:
-    1. **置換前に新バイナリの実行可否を検査する**（`<tmp> version` を 1 回実行して
-       成功したときだけ place する）。今回手でやった手順そのもの＝最小で確実。
-    2. 配布バイナリに Authenticode 署名（SAC の本筋の解）。
-    3. タスクに再起動トリガ/リカバリを追加（KeepAlive 相当）。
-    4. SAC 有効機では `update` を明示的に拒否する（silent に壊さない）。
+  - **恒久対策**:
+    1. ✅ **置換前の実行可否チェック**（drover-cloud **v0.1.15** `selfupdate`）:
+       tmp を 1 回起動して exit 0 のときだけ place する。失敗したら中止＝
+       稼働中バイナリは無傷。⚠ tmp 名に Windows だけ `.exe` が要る
+       （os/exec の lookExtensions。無いとチェック自体が偽陽性）。
+    2. ✅ **自己修復**（`scripts/windows/{start-agent.ps1,install-task.ps1}`）:
+       タスクへ **ログオン時＋5 分ごと**のトリガを登録し、起動側で多重起動を弾く。
+       Task Scheduler の「失敗時に再起動」は**無力**（Start-Process で投げて即
+       exit 0＝常に成功扱い）＝周期トリガが Windows の KeepAlive 相当。
+       実測: kill から **37 秒で自動復帰**。
+    3. ⏳ 配布バイナリに Authenticode 署名（SAC の本筋の解・未着手）。
+    4. ⏳ SAC 有効機では `update` を最初から拒否して案内する（今は「置換直前に
+       気づいて中止」＝毎回ダウンロードは走る・未着手）。
+  - ⚠ **この機の稼働バイナリは "ローカルビルドの v0.5.26"**（配布物は SAC に
+    弾かれる）。今後 update が走っても 1. により**中止されるだけ**で daemon は
+    生き続けるが、**版は上がらない**＝新版が要るときは手動でローカルビルドを
+    配置すること（手順は上の反映レシピ）。
 - ⏳ **残る Windows テスト赤**（実害なし・いずれも移植の未了）:
   - `internal/wsmap`: fixture が POSIX パス（`/w/proj` は Windows で非絶対）＝
     Parse/Resolve が落ちる。**実運用キーは `C:\...` で絶対＝production は通る**が、
@@ -565,7 +576,8 @@ TODO の out-of-scope 宣言どおりで、対応するなら移植作業が要�
     **SAC は一度切ると Windows 再インストールでしか戻せない＝切らない**。
     テストが赤/緑どちらとも言えない回はこれを疑い、まず再実行する。
   - `install`/`update` は launchd/inode 前提＝`//go:build unix` にした。**Windows の
-    常駐化（タスクスケジューラ）と update の Windows 経路はテスト未整備**。
+    update の Windows 経路はテスト未整備**。常駐化は `scripts/windows/install-task.ps1`
+    へ移した（install.go の Windows 移植は未了＝当面この PowerShell が正）。
 
 ### A. SSH エージェント転送 — Phase 3（実機 e2e）保留中
 
