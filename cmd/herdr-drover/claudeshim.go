@@ -413,32 +413,105 @@ func ensureHerdrServer(api *herdrapi.Client, stderr io.Writer) error {
 // cm シム alias でも実バイナリ ~/.local/bin/claude が解決される）。
 func lookupClaude() (string, error) { return lookupAgentBin("claude") }
 
+// selfExecutable はテスト用 seam（既定は os.Executable）。
+var selfExecutable = os.Executable
+
+// selfRealPath は自分自身（実行中の herdr-drover）の実体パス。
+// 取得できなければ ""（＝自己参照検査を諦める。誤って候補を捨てない）。
+func selfRealPath() string {
+	p, err := selfExecutable()
+	if err != nil {
+		return ""
+	}
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		return r
+	}
+	return p
+}
+
+// sameFile は 2 パスが同一実体か（symlink・hardlink を透過して比較）。
+func sameFile(a, b string) bool {
+	fa, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	fb, err := os.Stat(b)
+	if err != nil {
+		return false
+	}
+	return os.SameFile(fa, fb)
+}
+
+// pathCandidates は $PATH 中の実行可能な name を**出現順に全て**返す。
+// exec.LookPath は先頭 1 件しか返さないので自前で走査する（先頭がシム自身
+// だったときに探索を続けられるようにするため）。
+func pathCandidates(name string) []string {
+	var out []string
+	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
+		if dir == "" {
+			dir = "."
+		}
+		p := filepath.Join(dir, name)
+		fi, err := os.Stat(p)
+		if err != nil || fi.IsDir() || fi.Mode().Perm()&0o111 == 0 {
+			continue
+		}
+		if abs, err := filepath.Abs(p); err == nil {
+			out = append(out, abs)
+		}
+	}
+	return out
+}
+
 // lookupAgentBin はエージェント本体の絶対パスを返す（InstallSpec 駆動）。
 //
 // ⚠**BinNames は herdr の lookup_agent 表の要素でなければならない**
 // （ValidateSpecs が静的検証済み）。表に無い basename で起動すると herdr の
 // 検出（前景プロセス名基準）に一切載らず、pane.agent も agent_session も
 // 付かない＝resume backstop も organize の検出系統も silent に無効化される。
+//
+// ⚠**自分自身（シム）は候補から外す**。argv[0] multi-call のために `<agent>`
+// という名前で symlink を PATH の前方へ置くと、素朴な LookPath は**シム自身**を
+// 返す。それを argv[0] にすると herdr がシムを起動し、シムがまた本体を探して
+// 自分を見つけ…と **無限に自己 exec** する（実測で確認・回帰テストあり）。
+// alias 方式（`alias claude='… herdr-drover claude'`）では alias が exec に
+// 効かないので起きないが、symlink 方式では必ず起きる。
 func lookupAgentBin(agent string) (string, error) {
 	sp, ok := agentid.Install(agent)
 	if !ok {
 		return "", fmt.Errorf("%s の導入情報（InstallSpec）が無い＝実バイナリの名前を推測しない", agent)
 	}
+	self := selfRealPath()
+	skippedSelf := false
 	for _, name := range sp.BinNames {
-		if p, err := exec.LookPath(name); err == nil {
-			return filepath.Abs(p)
+		for _, cand := range pathCandidates(name) {
+			if self != "" && sameFile(cand, self) {
+				skippedSelf = true
+				continue // シム自身＝無限自己 exec になるので飛ばす
+			}
+			return cand, nil
 		}
 	}
 	if home, err := os.UserHomeDir(); err == nil {
 		for _, wk := range sp.WellKnownPaths {
 			p := filepath.Join(home, strings.TrimPrefix(wk, "~/"))
 			if fi, serr := os.Stat(p); serr == nil && !fi.IsDir() {
+				if self != "" && sameFile(p, self) {
+					skippedSelf = true
+					continue
+				}
 				return p, nil
 			}
 		}
 	}
+	hint := ""
+	if skippedSelf {
+		// 黙って「見つからない」にすると原因が分からない（silent skip 禁止）。
+		hint = "（PATH 上の同名はシム自身だったので除外した＝**実バイナリ**を" +
+			"PATH に置くか、シムの symlink を実体より後ろへ）"
+	}
 	return "", fmt.Errorf("%s が PATH %v にも既定の導入先 %v にも見つからない"+
-		"（alias は exec に効かない＝実バイナリを PATH へ）", agent, sp.BinNames, sp.WellKnownPaths)
+		"（alias は exec に効かない＝実バイナリを PATH へ）%s", agent, sp.BinNames, sp.WellKnownPaths, hint)
 }
 
 // claudeCandidates は cwd 一致の claude セッションを返す（シムの attach 候補）。

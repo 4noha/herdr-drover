@@ -745,3 +745,58 @@ func TestParseResumeRefIsSpecDriven(t *testing.T) {
 		}
 	}
 }
+
+// argv[0] multi-call（`<agent>` 名の symlink）を PATH の前方へ置いたとき、
+// バイナリ解決が**シム自身**を返してはいけない。
+//
+// 返すと agent.start の argv[0] がシムになり、herdr がシムを起動 → シムが本体を
+// 探して再び自分を見つける → …と **無限に自己 exec** する（syscall.Exec は
+// プロセスを置換するので fork bomb にはならないが 1 コアを 100% 占有し続ける）。
+// alias 方式では alias が exec に効かないので起きないが、symlink 方式では必ず起きる。
+func TestLookupAgentBinSkipsShimItself(t *testing.T) {
+	// 実体（本物の codex 相当）と、シム symlink を別ディレクトリに用意する。
+	realDir, shimDir := t.TempDir(), t.TempDir()
+	realBin := filepath.Join(realDir, "codex")
+	if err := os.WriteFile(realBin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("実体作成: %v", err)
+	}
+	// シム本体（= herdr-drover のつもり）と、それを指す <agent> 名の symlink。
+	selfBin := filepath.Join(shimDir, "herdr-drover")
+	if err := os.WriteFile(selfBin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("シム作成: %v", err)
+	}
+	shimLink := filepath.Join(shimDir, "codex")
+	if err := os.Symlink(selfBin, shimLink); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	// 自分自身をシム本体に見せかける。
+	orig := selfExecutable
+	selfExecutable = func() (string, error) { return selfBin, nil }
+	t.Cleanup(func() { selfExecutable = orig })
+
+	oldPath := os.Getenv("PATH")
+	t.Cleanup(func() { os.Setenv("PATH", oldPath) })
+
+	// シムが実体より**前**に居る配置＝素朴な LookPath ならシムを返す。
+	os.Setenv("PATH", shimDir+string(os.PathListSeparator)+realDir)
+	got, err := lookupAgentBin("codex")
+	if err != nil {
+		t.Fatalf("lookupAgentBin: %v", err)
+	}
+	if got == shimLink || sameFile(got, selfBin) {
+		t.Fatalf("シム自身を返した（%s）＝無限自己 exec になる", got)
+	}
+	if got != realBin {
+		t.Fatalf("解決先 = %q, want %q（実体を飛ばしてはいけない）", got, realBin)
+	}
+
+	// 実体が無くシムだけの場合は「見つからない」＋**理由を明示**して落とす
+	// （黙って見つからないにすると原因が分からない）。
+	os.Setenv("PATH", shimDir)
+	if _, err := lookupAgentBin("codex"); err == nil {
+		t.Fatal("シムしか無いのに解決に成功した")
+	} else if !strings.Contains(err.Error(), "シム自身") {
+		t.Fatalf("除外理由が報告されていない: %v", err)
+	}
+}
