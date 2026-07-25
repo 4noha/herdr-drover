@@ -361,11 +361,46 @@ organize / producer が共有）。権威は強い順に:
   観測駆動にすると**そのPCに無いエージェントの設定を書いてしまう**。
   ⇒ **注入 pane に integration は不要**（そのエージェントが実際に走る PC 側で要る）。
 
-⚠ **初回起動時の同意ダイアログに注意**。cursor-agent は新しい cwd で
-`Workspace Trust Required` を出して**入力を全て吸う**。通過するまで会話が始まらず、
-`agent_session` も付かない（＝resume 不可）。自動化から見ると「検出はされるのに
-永久に idle」という分かりにくい状態になる。**画面を読む手段（`herdr pane read`）
-を持っておくこと** — これが無いと原因に辿り着けない（実際に辿り着けなかった）。
+⚠ **初回起動時の同意ダイアログに注意**（claude / cursor の**両方**で確認）。
+新しい cwd では「このフォルダを信頼しますか」ダイアログが出て**入力を全て吸う**。
+通過するまで会話が始まらず、`agent_session` も付かない（＝resume 不可）。
+自動化から見ると「検出はされるのに永久に idle」という分かりにくい状態になる。
+
+- claude: `Quick safety check: Is this a project you created or one you trust?`
+  → Enter（既定は「Yes, I trust this folder」）
+- cursor: `⚠ Workspace Trust Required` → `[a]`
+
+**画面を読む手段（`herdr pane read <pane> --source visible`）を持っておくこと** —
+これが無いと原因に辿り着けない（実際、両方ともこれで初めて判明した。それまでは
+hook や integration の不具合を疑って空振りしていた）。
+
+### ⚠ `CLAUDE_CODE_CHILD_SESSION` による transcript 抑止（未解決）
+
+herdr server が `CLAUDE_CODE_CHILD_SESSION` を持っていると（**Claude Code の中から
+herdr server を起動すると起きる**）、herdr が生やす全 pane がそれを継承する。
+その claude は「サブセッション」とみなされ **transcript を保存しない**。
+`--resume` が読むのはその transcript なので、**そのマシンの claude セッションは
+どれも復元できない**。
+
+実測（2026-07-25・A/B で確定）:
+
+| 条件 | 会話成立 | transcript |
+|---|---|---|
+| 素の herdr 経路 | ✅ | **保存されない** |
+| pane に `CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1` を注入 | ✅ | **保存されない** |
+| pane に `CLAUDE_CODE_CHILD_SESSION=""`（空値）を注入 | ✅ | **保存されない** |
+| `claude -p`（print mode・マーカーあり） | — | **保存される** |
+
+⇒ **drover 側の env 注入では直せない**（試して駄目だったので実装は取り下げた。
+同じ空振りを繰り返さないこと）。`layout.apply` の leaf は `env` を受け取り、
+それが pane のプロセスまで届くことは実測済みなので、**注入の仕組みの問題ではない**。
+
+**唯一分かっている対処は herdr server をクリーンな環境で起動し直すこと**
+（⚠全 pane が失われるので慎重に。`herdr integration` や設定の再導入は不要）。
+
+**drover 側の挙動は正しい**: `--resume` で即終了 → 二段構えフォールバックが
+resume 無しで作り直して **pane は必ず残す**＋`resume 復元不可のため新規会話で起動`
+と正直に報告する。会話は失われるが、黙って失うことはない。
 
 ⚠ **codex は resume 後に hook が再発火しない**（hook 呼び出しログで実測）。
 「1 回目の restart は会話 ref を使えるが、herdr は ref を再学習しない」＝

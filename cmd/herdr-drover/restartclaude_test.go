@@ -539,9 +539,11 @@ func TestRestartClaudeSkipsWorkingUnlessForced(t *testing.T) {
 	if _, err := renameClaudePaneTo(api, pane, "claude"); err != nil {
 		t.Fatalf("agent.rename: %v", err)
 	}
+	// ⚠**状態 → session の順**でなければならない（実測 2026-07-25・下記ヘルパの表）。
 	if err := api.ReportAgent(pane, "test", "claude", "working"); err != nil {
 		t.Fatalf("report_agent: %v", err)
 	}
+	reportTestSession(t, api, pane, "claude", "aaaaaaaa-1111-4111-8111-148929305667")
 
 	var log bytes.Buffer
 	results, err := restartClaudePanes(api, restartOptions{SID: pane, Force: false, DryRun: false}, &log)
@@ -585,8 +587,15 @@ func TestRestartClaudeSkipsSharedTab(t *testing.T) {
 	if _, err := renameClaudePaneTo(api, pane, "claude"); err != nil {
 		t.Fatalf("agent.rename: %v", err)
 	}
+	reportTestSession(t, api, pane, "claude", "aaaaaaaa-1111-4111-8111-148929305667")
 	if err := api.PaneSplit(pane, "right"); err != nil {
 		t.Fatalf("pane.split: %v", err)
+	}
+	// 実運用の pane は会話 ref を持つ。ref が無いと別の安全網が先に発火して
+	// 「巻き添え回避」の検証にならない。
+	if err := api.ReportAgentSession(pane, "herdr:claude", "claude",
+		"22222222-3333-4444-8555-666666666666"); err != nil {
+		t.Fatalf("report_agent_session: %v", err)
 	}
 
 	var log bytes.Buffer
@@ -625,6 +634,7 @@ func TestRestartClaudeLeavesInjectedPane(t *testing.T) {
 	if _, err := renameClaudePaneTo(api, inj, "claude"); err != nil {
 		t.Fatalf("agent.rename: %v", err)
 	}
+	reportTestSession(t, api, inj, "claude", "aaaaaaaa-1111-4111-8111-128469743827")
 	if err := api.PaneReportMetadata(inj, "drover", herdrapi.ReportMetadata{
 		Tokens: map[string]string{"drover_inj_pc": "other-herdr", "drover_inj_sid": "w1:p9"},
 	}); err != nil {
@@ -747,6 +757,12 @@ func TestRestartClaudeKeepsUnnamedPaneUnnamed(t *testing.T) {
 	if err := api.ReportAgent(pane, "test-native", "claude", "idle"); err != nil {
 		t.Fatalf("report_agent: %v", err)
 	}
+	// 実運用の pane は integration hook が会話 ref を報告している。安全網
+	// （ref が取れない pane は既定で触らない）に引っかからないよう実態に合わせる。
+	if err := api.ReportAgentSession(pane, "herdr:claude", "claude",
+		"11111111-2222-4333-8444-555555555555"); err != nil {
+		t.Fatalf("report_agent_session: %v", err)
+	}
 
 	agents, err := api.AgentList()
 	if err != nil {
@@ -784,5 +800,36 @@ func TestRestartClaudeKeepsUnnamedPaneUnnamed(t *testing.T) {
 	}
 	if !strings.Contains(log.String(), "未命名のため agent 名を付けない") {
 		t.Fatalf("命名しなかったことが報告されていない: %s", log.String())
+	}
+}
+
+// reportTestSession はテスト pane に会話 ref を立てる。
+//
+// ⚠**実運用の agent pane は必ず会話 ref を持つ**（integration hook が SessionStart で
+// 報告する）。ref が無い pane は restart の安全網が既定で skip するので、ref を
+// 立てないテスト pane は「再起動されるはず」の検証が成立しない。合成状態で緑に
+// しないため、実 API（report_agent_session）で本番と同じ状態を作る。
+//
+// ⚠**herdr 0.7.4 の実測契約（source と順序が効く・どちらも silent に落ちる）**:
+//
+//	状態 report_agent      … **非公式 source**（"test" 等）でないと反映されない
+//	                          （"herdr:claude" で送ると status は unknown のまま）
+//	会話 report_agent_session … **公式 source**（"herdr:<agent>"）でないと捨てられる
+//	順序                    … **状態 → session**。逆にすると状態報告が拒否される
+//
+//	| 組み合わせ                         | status  | session |
+//	|-----------------------------------|---------|---------|
+//	| status(test) のみ                  | working | —       |
+//	| session(herdr:claude) → status(test)| unknown | set     |
+//	| status(test) → session(herdr:claude)| working | set     | ← これだけが両立
+//	| 両方 test                          | working | 捨てられる |
+//	| 両方 herdr:claude                  | unknown | set     |
+//
+// エラーは返らず黙って落ちるので、順序を間違えるとテストが**偽陰性**になる
+// （実際に踏んだ: working を報告したのに skip されず「working は skip のはず」で FAIL）。
+func reportTestSession(t *testing.T, api *herdrapi.Client, pane, agent, ref string) {
+	t.Helper()
+	if err := api.ReportAgentSession(pane, "herdr:"+agent, agent, ref); err != nil {
+		t.Fatalf("report_agent_session(%s): %v", pane, err)
 	}
 }

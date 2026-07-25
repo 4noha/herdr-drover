@@ -299,7 +299,7 @@ func updateClaudeAndRestart(ctx context.Context, api *herdrapi.Client, opt resta
 func cmdUpdateClaude(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("update-claude", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	force := fs.Bool("force", false, "agent_status=working の pane も再起動する（実行中タスクは失われる）")
+	force := fs.Bool("force", false, "既定の安全網を外す（作業中 pane・会話 ref が取れない pane も再起動する）")
 	dryRun := fs.Bool("dry-run", false, "対象バイナリと再起動予定を表示するだけで何もしない")
 	model := fs.String("model", "", "再起動時に claude へ渡すモデル（例 opus）。空なら既存指定に触らない")
 	agentFlag := fs.String("agent", "", "更新するエージェント種別（空なら更新口を持つ既定＝claude）")
@@ -411,7 +411,7 @@ func summarizeUpdateAll(res updateAllResult) string {
 func cmdUpdateAll(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("update-all", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	force := fs.Bool("force", false, "agent_status=working の pane も再起動する")
+	force := fs.Bool("force", false, "既定の安全網を外す（作業中 pane・会話 ref が取れない pane も再起動する）")
 	model := fs.String("model", "", "再起動時に claude へ渡すモデル（例 opus）")
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("%w: %v", errUsage, err)

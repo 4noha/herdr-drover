@@ -151,6 +151,12 @@ func TestArgvGateUsesTargetAgentKind(t *testing.T) {
 	if err := api.ReportAgent(pane, "test-native", "codex", "idle"); err != nil {
 		t.Fatal(err)
 	}
+	// 実運用の pane は integration hook が会話 ref を報告している。安全網
+	// （ref が取れない pane は既定で触らない）に引っかからないよう実態に合わせる。
+	if err := api.ReportAgentSession(pane, "herdr:codex", "codex",
+		"019f9964-f4af-7a72-a999-7dc3f64c521e"); err != nil {
+		t.Fatal(err)
+	}
 
 	var log bytes.Buffer
 	results, err := restartClaudePanes(api, restartOptions{SID: pane, Agent: "codex"}, &log)
@@ -166,5 +172,90 @@ func TestArgvGateUsesTargetAgentKind(t *testing.T) {
 	}
 	if results[0].Status != "done" {
 		t.Fatalf("再起動できていない: %+v\nlog=%s", results[0], log.String())
+	}
+}
+
+// **会話 ref が取れない pane は既定で触らない**（安全網）。
+//
+// 作り直せば新バイナリは掴むが resume 引数を付けられず、**会話が失われたまま
+// status=done で成功に見える**。wrapper 起動 pane で潰したのと同じ型の失敗。
+// 「ref が無い」は「まだ発話していない」と「integration 未設置」を区別できない
+// ので安全側に倒す。--force で明示的に上書きできる。
+func TestRestartSkipsPanesWithoutResumeRef(t *testing.T) {
+	sock := startHerdrForTest(t)
+	api := herdrapi.New(sock)
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "codex")
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\nexec sleep 300\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	wsID, err := currentWorkspaceID(api)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pane, err := applyClaudeTab(api, wsID, "codex", []string{stub}, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 検出はされるが agent_session は無い状態（＝integration 未設置 or 未発話）。
+	if err := api.ReportAgent(pane, "test-native", "codex", "idle"); err != nil {
+		t.Fatal(err)
+	}
+
+	var log bytes.Buffer
+	results, err := restartClaudePanes(api, restartOptions{SID: pane, Agent: "codex"}, &log)
+	if err != nil {
+		t.Fatalf("restart: %v", err)
+	}
+	if len(results) != 1 || results[0].Status != "skip" {
+		t.Fatalf("既定で skip されない（会話を失う）: %+v\nlog=%s", results, log.String())
+	}
+	if !strings.Contains(results[0].Detail, "会話 ref") {
+		t.Fatalf("理由が不明瞭: %q", results[0].Detail)
+	}
+	if paneGone(api, pane) {
+		t.Fatal("skip のはずが pane が作り直された")
+	}
+
+	// --force なら明示的に上書きできる。
+	var log2 bytes.Buffer
+	results, err = restartClaudePanes(api, restartOptions{SID: pane, Agent: "codex", Force: true}, &log2)
+	if err != nil {
+		t.Fatalf("restart --force: %v\n%s", err, log2.String())
+	}
+	if len(results) != 1 || results[0].Status != "done" {
+		t.Fatalf("--force でも再起動されない: %+v\nlog=%s", results, log2.String())
+	}
+}
+
+// resume 非対応の 7 種は ref が無いのが恒常状態なので、この安全網の対象外。
+// 弾くと永久に再起動できなくなる。
+func TestRestartAllowsResumeIncapableAgents(t *testing.T) {
+	sock := startHerdrForTest(t)
+	api := herdrapi.New(sock)
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "gemini")
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\nexec sleep 300\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	wsID, err := currentWorkspaceID(api)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pane, err := applyClaudeTab(api, wsID, "gemini", []string{stub}, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := api.ReportAgent(pane, "test-native", "gemini", "idle"); err != nil {
+		t.Fatal(err)
+	}
+	var log bytes.Buffer
+	results, err := restartClaudePanes(api, restartOptions{SID: pane, Agent: "gemini"}, &log)
+	if err != nil {
+		t.Fatalf("restart: %v", err)
+	}
+	if len(results) != 1 || results[0].Status != "done" {
+		t.Fatalf("resume 非対応が再起動できない（恒常的に ref が無いだけ）: %+v\nlog=%s",
+			results, log.String())
 	}
 }

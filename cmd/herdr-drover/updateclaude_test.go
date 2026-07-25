@@ -60,6 +60,7 @@ func TestUpdateClaudeUpdatesThenRestarts(t *testing.T) {
 	if _, err := renameClaudePaneTo(api, pane, "claude"); err != nil {
 		t.Fatalf("agent.rename: %v", err)
 	}
+	reportTestSession(t, api, pane, "claude", "aaaaaaaa-1111-4111-8111-241642338141")
 
 	var log bytes.Buffer
 	summary, err := updateClaudeAndRestart(context.Background(), api, restartOptions{}, &log)
@@ -116,6 +117,7 @@ func TestUpdateClaudeRestartsEvenWhenAlreadyLatest(t *testing.T) {
 	if _, err := renameClaudePaneTo(api, pane, "claude"); err != nil {
 		t.Fatalf("agent.rename: %v", err)
 	}
+	reportTestSession(t, api, pane, "claude", "aaaaaaaa-1111-4111-8111-241642338141")
 
 	var log bytes.Buffer
 	summary, err := updateClaudeAndRestart(context.Background(), api, restartOptions{}, &log)
@@ -159,6 +161,7 @@ func TestResolveClaudeBin(t *testing.T) {
 	if _, err := renameClaudePaneTo(api, paneA, "claude"); err != nil {
 		t.Fatalf("agent.rename(a): %v", err)
 	}
+	reportTestSession(t, api, paneA, "claude", "aaaaaaaa-1111-4111-8111-018571274860")
 	got, source, err := resolveClaudeBin(api, "claude", io.Discard)
 	if err != nil {
 		t.Fatalf("resolveClaudeBin: %v", err)
@@ -178,6 +181,7 @@ func TestResolveClaudeBin(t *testing.T) {
 	if _, err := renameClaudePaneTo(api, paneB, "claude-2"); err != nil {
 		t.Fatalf("agent.rename(b): %v", err)
 	}
+	reportTestSession(t, api, paneB, "claude", "aaaaaaaa-1111-4111-8111-276163998548")
 	bins, berr := claudeBinsFromPanes(api, "claude", io.Discard)
 	if berr != nil || len(bins) != 2 {
 		t.Fatalf("前提が崩れている（2 種類が同時に稼働しているはず）: bins=%v err=%v", bins, berr)
@@ -237,6 +241,7 @@ func TestUpdateClaudeDoesNotRestartWhenUpdateFails(t *testing.T) {
 	if _, err := renameClaudePaneTo(api, pane, "claude"); err != nil {
 		t.Fatalf("agent.rename: %v", err)
 	}
+	reportTestSession(t, api, pane, "claude", "aaaaaaaa-1111-4111-8111-241642338141")
 
 	var log bytes.Buffer
 	if _, err := updateClaudeAndRestart(context.Background(), api, restartOptions{}, &log); err == nil {
@@ -273,6 +278,7 @@ func TestClaudeBinsIgnoresRelativeAndWrapperArgv(t *testing.T) {
 	if _, err := renameClaudePaneTo(api, paneAbs, "claude"); err != nil {
 		t.Fatalf("agent.rename: %v", err)
 	}
+	reportTestSession(t, api, paneAbs, "claude", "aaaaaaaa-1111-4111-8111-751635459137")
 	// (b) herdr 側で wrapper 起動された pane（argv[0] が claude ではない）
 	paneWrap, err := applyClaudeTab(api, wsID, "wrap", []string{"/bin/sh", "-c", stub}, cwd)
 	if err != nil {
@@ -281,6 +287,7 @@ func TestClaudeBinsIgnoresRelativeAndWrapperArgv(t *testing.T) {
 	if err := api.ReportAgent(paneWrap, "test-native", "claude", "idle"); err != nil {
 		t.Fatalf("report_agent: %v", err)
 	}
+	reportTestSession(t, api, paneWrap, "claude", "bbbbbbbb-2222-4222-8222-222222222222")
 
 	var log bytes.Buffer
 	bins, err := claudeBinsFromPanes(api, "claude", &log)
@@ -325,6 +332,7 @@ func TestRestartSkipsWrapperInvocation(t *testing.T) {
 	if err := api.ReportAgent(pane, "test-native", "claude", "idle"); err != nil {
 		t.Fatalf("report_agent: %v", err)
 	}
+	reportTestSession(t, api, pane, "claude", "cccccccc-3333-4333-8333-333333333333")
 
 	var log bytes.Buffer
 	results, err := restartClaudePanes(api, restartOptions{SID: pane}, &log)

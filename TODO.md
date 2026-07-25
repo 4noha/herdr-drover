@@ -368,6 +368,44 @@ argv を組み立てた＝**Spec 抽象が claude 以外でも機能する**こ�
 - ⚠**codex は resume 後に hook が再発火しない**（hook 呼び出しログで実測）。
   同じ pane の 2 回目の restart は素起動になる。drover 側の問題ではない。
 
+#### ⚠ 未解決: CLAUDE_CODE_CHILD_SESSION による transcript 抑止
+
+herdr server が `CLAUDE_CODE_CHILD_SESSION` を持つと（**Claude Code の中から herdr
+server を起動すると起きる**）、herdr が生やす全 pane が継承し、その claude は
+transcript を保存しない。`--resume` が読むのはそれなので、**そのマシンの claude
+セッションはどれも復元できない**（mac-studio が現にこの状態）。
+
+**drover の env 注入では直せないことを A/B で確定**（実測 2026-07-25。実装は
+取り下げた。**同じ空振りを繰り返さないこと**）:
+
+| 条件 | 会話成立 | transcript |
+|---|---|---|
+| 素の herdr 経路 | ✅ | 保存されない |
+| `CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1` を pane に注入 | ✅ | 保存されない |
+| `CLAUDE_CODE_CHILD_SESSION=""`（空値）を注入 | ✅ | 保存されない |
+| `claude -p`（print mode・マーカーあり） | — | **保存される** |
+
+`layout.apply` の leaf `env` は pane のプロセスまで実際に届く（実測済）ので
+**注入の仕組みの問題ではない**。唯一分かっている対処は **herdr server を
+クリーンな環境で起動し直すこと**（⚠全 pane が失われる）。
+
+drover 側の挙動は正しい: `--resume` 即終了 → 二段構えフォールバックが pane を
+必ず残し「resume 復元不可のため新規会話で起動」と正直に報告する。
+
+⚠ fleet の他 3 台は正常（`update-all` 履歴を全確認・「復元不可」ゼロ＝8 セッション
+すべて resume で引き継げている）。この問題は mac-studio 固有。
+
+#### ⚠ 自動化を止める「フォルダ信頼ダイアログ」（claude / cursor 両方）
+
+新しい cwd では両方とも信頼ダイアログを出して**入力を全部吸う**。通過するまで
+会話が始まらず `agent_session` も付かないので、自動化からは「検出されるのに永久に
+idle」に見える。**`herdr pane read <pane> --source visible` で画面を読むこと** —
+これが無いと辿り着けない（両方ともこれで初めて判明。それまで hook や integration の
+不具合を疑って空振りした）。
+
+- claude: `Quick safety check: …` → Enter
+- cursor: `⚠ Workspace Trust Required` → `[a]`
+
 #### この検証で見つけた実バグ（v0.5.24 で修正）
 
 1. **argv ゲートの種別ハードコード**（最も危険だった）。条件が `"claude"` 固定で、

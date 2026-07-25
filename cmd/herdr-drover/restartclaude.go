@@ -94,9 +94,11 @@ func (t restartTarget) resumeDesc() string {
 // restartOptions は restart-claude の実行オプション（引数の並びで取り違えないよう
 // 構造体で渡す）。
 type restartOptions struct {
-	SID    string // "" = その PC のローカル agent pane 全部
-	Agent  string // "" = 全エージェント種別。canonical label で絞る
-	Force  bool   // agent_status=working の pane も対象にする
+	SID   string // "" = その PC のローカル agent pane 全部
+	Agent string // "" = 全エージェント種別。canonical label で絞る
+	// Force は既定の安全網（作業中 pane／会話 ref が取れない pane を触らない）を外す。
+	// ⚠遠隔命令は flag を運べないので**常に安全側**で動く。
+	Force  bool
 	DryRun bool   // 対象と再起動後 argv を表示するだけ
 	Model  string // "" = 既存の --model 指定に触らない。指定時は張り替える
 }
@@ -435,6 +437,25 @@ func restartOneClaudePane(api *herdrapi.Client, t restartTarget, opt restartOpti
 	if !opt.Force && t.AgentStatus == "working" {
 		return "skip", "agent_status=working（作業中。--force で強制）"
 	}
+	// **resume できるはずなのに会話 ref が取れない pane は既定で触らない**。
+	//
+	// 作り直せば新バイナリは掴むが、resume 引数を付けられないので**会話は失われる**。
+	// しかも pane は生き残るので status=done で成功に見える＝最悪の失敗（wrapper 起動
+	// pane で同じ型を潰したのと同種）。
+	//
+	// 「ref が無い」は 2 つの状態を区別できない:
+	//   (a) まだ発話していない  … 失うものが無い（codex/cursor は初回発話まで ref 無し）
+	//   (b) integration 未設置  … 会話はあるのに ref が取れない＝**再起動で失う**
+	// 区別できない以上、安全側に倒す。claude は起動時に ref が付くので実質影響なく、
+	// codex/cursor は (a) が skip されるだけで失うものが無い。
+	//
+	// ⚠**resume 非対応の 7 種は対象外**（ref が無いのが恒常状態なので、ここで
+	// 弾くと永久に再起動できなくなる）。
+	if !opt.Force && t.Session.Value == "" && agentid.Resume(t.AgentKind).Supported {
+		return "skip", fmt.Sprintf("会話 ref（agent_session）が取れない"+
+			"＝作り直すと %s の会話が失われる（まだ発話していないか、`herdr integration "+
+			"install %s` が未設置。承知のうえなら --force）", t.AgentKind, t.AgentKind)
+	}
 	root, err := exportTabLayout(api, t.TabID)
 	if err != nil {
 		return "error", err.Error()
@@ -616,7 +637,7 @@ func summarizeRestart(results []restartOutcome) string {
 func cmdRestartClaude(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("restart-claude", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	force := fs.Bool("force", false, "agent_status=working の pane も再起動する（実行中タスクは失われる）")
+	force := fs.Bool("force", false, "既定の安全網を外す（作業中 pane・会話 ref が取れない pane も再起動する＝実行中タスクや会話が失われる）")
 	dryRun := fs.Bool("dry-run", false, "対象と再起動後 argv を表示するだけで何もしない")
 	model := fs.String("model", "", "再起動時に claude へ渡すモデル（例 opus）。空なら既存指定に触らない")
 	agent := fs.String("agent", "", "対象のエージェント種別（claude / codex 等）。空なら全種別")

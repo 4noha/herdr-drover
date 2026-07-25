@@ -36,6 +36,12 @@ func setupUpdateAllPane(t *testing.T, from, to string) (*herdrapi.Client, string
 	if _, err := renameClaudePaneTo(api, pane, "claude"); err != nil {
 		t.Fatalf("agent.rename: %v", err)
 	}
+	// 実運用の pane は integration hook が会話 ref を報告している。安全網
+	// （ref が取れない pane は既定で触らない）に引っかからないよう実態に合わせる。
+	if err := api.ReportAgentSession(pane, "herdr:claude", "claude",
+		"33333333-4444-4555-8666-777777777777"); err != nil {
+		t.Fatalf("report_agent_session: %v", err)
+	}
 	return api, pane
 }
 
@@ -109,6 +115,7 @@ func TestUpdateAllStopsWhenClaudeStepFails(t *testing.T) {
 	if _, err := renameClaudePaneTo(api, pane, "claude"); err != nil {
 		t.Fatalf("agent.rename: %v", err)
 	}
+	reportTestSession(t, api, pane, "claude", "aaaaaaaa-1111-4111-8111-293692086369")
 
 	selfCalled := false
 	var log bytes.Buffer
