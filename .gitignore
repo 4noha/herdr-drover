@@ -13,3 +13,7 @@ AGENTS.md
 
 # direnv (.envrc) は AWS_PROFILE 等のマシン/アカウント固有 env を持つので追跡外。
 .envrc
+
+# go.work はローカル drover-cloud 解決用（PC 固有・リリースは GOWORK=off）。
+go.work
+go.work.sum
