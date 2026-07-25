@@ -427,24 +427,32 @@ TODO の out-of-scope 宣言どおりで、対応するなら移植作業が要�
 
 ## 進行中 / 保留（再開ポイント）
 
-### 0. Windows 移植（in-flight・branch `windows-port`・2026-07-25）
+### 0. Windows 移植（**コード本体は main 済**・2026-07-26）
 
 作業機は **`desktop-djb9pfr-herdr`（Windows 11・herdr 0.7.4-preview）**。
-main（v0.5.23 相当 e3314d3）へ rebase 済みの 2 commit が branch `windows-port`
-に載っている（**main へは未 merge・未 push**）。
 
-- ✅ `c731f7f feat(windows)`: OS 依存部を build-tag 分割（`platform_{unix,windows}.go`
-  ／`herdrapi/dial_{unix,windows}.go`＝named pipe／`wsmap/flock_{unix,windows}.go`）。
-  対話系（attach/ssh-forward/localview）は Windows 非対応スタブ。リモート pane 注入は
-  Windows で常に無効（ログに明示）。**windows/darwin/linux とも build・vet 緑**。
-- ✅ `98d4a8f fix(test)`: 下記の実害を塞ぎ、Windows でテストが**コンパイルすら
-  できない**状態を解消。
-- 依存: drover-cloud のローカル fork に `selfupdate/place_windows.go`（実行中 exe を
-  退避 rename で差し替え）。**未 commit・未 upstream**＝`go.work`（.gitignore 済）で
-  ローカル解決する。⚠ go.mod に replace を書かないこと（`GOWORK=off make dist` の
-  規律が壊れる。実際に一度 replace が入っていたので go.work へ戻した）。
-  → **drover-cloud へ place_windows.go を入れて v0.1.12 を切るまで、windows-port を
-  main へ merge しない**のが安全（merge すると Windows ビルドが公開タグで壊れる）。
+**ブランチ構造（重要）**:
+- **`main`**: Windows 移植のコード本体が入っている（`019d051 feat(windows)` /
+  `8f831c6 fix(test)` / docs 3 本 / `41ce39e build(windows)`）。**未 push**。
+- **`windows-port`**: main ＋ **`herdr-plugin.toml` の 1 commit だけ**。
+  main へ merge しないこと（理由は当該 commit メッセージ＝events 削除は
+  macOS/Linux の即時 re-scan を殺す・platforms への windows 追加はできない約束）。
+- `windows-port-backup-2026-07-26`: 分割前の旧ブランチ（不要になったら削除可）。
+
+なぜ共通ソースに入れてよいと判断したか:
+- 移植は **build-tag 分割＋seam 化**で unix 側はバイト等価。対話系
+  （attach/ssh-forward/localview）は Windows 非対応スタブ。
+- 唯一の実コストは **スタブのドリフト**（unix 側シグネチャ変更に追従できず
+  Windows でだけ壊れる。実例: pull で `runRemoteInject` に引数が増えた）。
+  → **`make check-windows`（`GOOS=windows` の build＋vet）を常設**して検出する。
+  Windows 実機不要（cgo 不使用）。`cmdSSHForward` のスタブ引数を削ると
+  `too many arguments in call to cmdSSHForward` で落ちることを**実証済**。
+- 前提だった「公開タグだけで Windows がビルドできる」は解決:
+  **drover-cloud v0.1.13**（`selfupdate/place_windows.go`）を発行し go.mod を更新。
+  `go.work` は不要になったので削除。⚠ **go.mod に replace を書かないこと**
+  （`GOWORK=off make dist` の規律が壊れる）。
+  ⚠ 発行時に上流で **v0.1.12 が別マシンから先に出ていた**ため本件は v0.1.13。
+  タグを切る前に必ず `git fetch --tags` すること。
 
 🔴 **実害（2026-07-25・恒久教訓）**: Windows で `go test ./...` を走らせると
 **実ユーザーの `~/.herdr-drover` が test fixture で上書きされ、`enroll(slave)` の
