@@ -432,12 +432,19 @@ TODO の out-of-scope 宣言どおりで、対応するなら移植作業が要�
 作業機は **`desktop-djb9pfr-herdr`（Windows 11・herdr 0.7.4-preview）**。
 
 **ブランチ構造（重要）**:
-- **`main`**: Windows 移植のコード本体が入っている（`019d051 feat(windows)` /
-  `8f831c6 fix(test)` / docs 3 本 / `41ce39e build(windows)`）。**未 push**。
-- **`windows-port`**: main ＋ **`herdr-plugin.toml` の 1 commit だけ**。
-  main へ merge しないこと（理由は当該 commit メッセージ＝events 削除は
-  macOS/Linux の即時 re-scan を殺す・platforms への windows 追加はできない約束）。
-- `windows-port-backup-2026-07-26`: 分割前の旧ブランチ（不要になったら削除可）。
+- **`main`**: Windows 移植のコード本体は **PR #1 でマージ済＝`v0.5.26` として
+  リリース済**（`6037981`）。
+- **`windows-port`**: main ＋ **`herdr-plugin.toml` の 1 commit だけ**（この
+  Windows 機の作業ブランチ）。main へ merge しないこと（理由は当該 commit
+  メッセージ＝events 削除は macOS/Linux の即時 re-scan を殺す・platforms への
+  windows 追加はできない約束）。main が進んだら作り直して cherry-pick する。
+
+⚠ **検証の教訓（PR #1 で実際にやらかした）**: `setTestHome` を導入した一括 sed が
+**関数自身の中の `t.Setenv("HOME", dir)` まで書き換えて自己呼び出しにし**、全
+呼び出しが stack overflow していた（`8e6fb09` で修正）。`go vet` は再帰を検出せず、
+こちらは**パッケージ単位の FAIL 一致だけを見て「回帰なし」と判断**して見逃した。
+**FAIL の集合ではなく、失敗の中身を読むこと**。しかもこの関数は SA 鍵消失事故の
+再発防止そのもの＝動いていなければ守りが無い。
 
 なぜ共通ソースに入れてよいと判断したか:
 - 移植は **build-tag 分割＋seam 化**で unix 側はバイト等価。対話系
@@ -508,12 +515,31 @@ TODO の out-of-scope 宣言どおりで、対応するなら移植作業が要�
     ＝再起動前に必要なら退避する（今回の復旧根拠はこのログだった。被害前ログは
     `~/.herdr-drover.bak-2026-07-25/agent.err.log.pre-restart` に保全）。
   - ロールバック: 4 の `.old-2026-07-25` を戻して 5 を再実行。
-- 🔴 **Windows は self-update できない**（follow-up）: `make dist` の対象は
-  linux/{amd64,arm64}・darwin/{amd64,arm64} のみで **windows を作っていない**のに、
-  `selfupdate` は `herdr-drover_windows_amd64.exe` を探す（`selfupdate.go`）＝
-  release に asset が無く必ず失敗する。**この PC 宛の pending `update-all` は
-  受信しても update 部分が失敗する**（23:58 時点で未受信）。Windows PC を
-  正式運用するなら `make dist` に windows/amd64 を足すのが先。
+- 🔴🔴 **self-update は Windows で daemon を落とす（実際に落ちた・2026-07-26 00:52）**。
+  `make dist` の windows 追加（`e9bab96`）で v0.5.26 は
+  `herdr-drover_windows_amd64.exe` を配布するようになり、**pending だった
+  `update-all` がこの PC に届いて実行された**。結果:
+  - ✅ ダウンロード・sha256 検証・**`place_windows.go` の退避 rename（実行中 exe の
+    差し替え）まで成功**した。`.old` が残っていることで確認＝ユニットテストでは
+    踏めない「実行中 exe」ケースが**実機で初めて検証できた**。
+  - 🔴 しかし **Smart App Control が配布バイナリの実行をブロック**するため、
+    差し替わった新 exe が起動できず daemon が消えた。**MOTW ではない**
+    （`Zone.Identifier` 無し・`Unblock-File` も無効＝SAC 本体の判断）。
+    ローカルビルドは通るのに、**同じコードの配布ビルドは通らない**。
+  - 🔴 さらに タスクスケジューラは **logon トリガのみ・`RestartCount=0`** ＝
+    launchd の KeepAlive 相当が無く、**誰も復帰させない**（次回ログオンまで停止）。
+  - **復旧手順（実施済）**: `go build -ldflags "-X main.version=<配布と同じタグ>"`
+    でローカルビルド → `version` で SAC を通ることを確認 → 退避 rename で差し替え
+    → `Start-ScheduledTask`。⚠ version を配布タグと同じに stamp すること
+    （dev 版数のままだと「最新でない」と判定され update-all が再発＝再度落ちる）。
+    SAC に弾かれた配布バイナリは `bin/herdr-drover.exe.sac-blocked-v0.5.26-release`
+    に証拠として残してある。
+  - **恒久対策の候補**（未着手・要判断）:
+    1. **置換前に新バイナリの実行可否を検査する**（`<tmp> version` を 1 回実行して
+       成功したときだけ place する）。今回手でやった手順そのもの＝最小で確実。
+    2. 配布バイナリに Authenticode 署名（SAC の本筋の解）。
+    3. タスクに再起動トリガ/リカバリを追加（KeepAlive 相当）。
+    4. SAC 有効機では `update` を明示的に拒否する（silent に壊さない）。
 - ⏳ **残る Windows テスト赤**（実害なし・いずれも移植の未了）:
   - `internal/wsmap`: fixture が POSIX パス（`/w/proj` は Windows で非絶対）＝
     Parse/Resolve が落ちる。**実運用キーは `C:\...` で絶対＝production は通る**が、
