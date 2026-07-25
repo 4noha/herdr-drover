@@ -33,7 +33,7 @@ func runCapture(t *testing.T, args ...string) (code int, stdout, stderr string) 
 // 検証する＝隔離が破れたら書き込む前に必ず落ちる（silent に実 HOME を汚さない）。
 func setTestHome(t *testing.T, dir string) {
 	t.Helper()
-	setTestHome(t, dir)
+	t.Setenv("HOME", dir)        // unix の os.UserHomeDir 実ソース
 	t.Setenv("USERPROFILE", dir) // Windows の os.UserHomeDir 実ソース
 	got, err := os.UserHomeDir()
 	if err != nil || got != dir {
