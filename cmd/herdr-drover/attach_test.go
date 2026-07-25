@@ -578,3 +578,63 @@ func TestDialWithTimeoutClosesLateSuccess(t *testing.T) {
 		t.Fatal("timeout 後に成功した conn が close されなかった（リーク）")
 	}
 }
+
+// wall clock が**後退**しても以後の検知が止まらないこと。
+//
+// cooldownUntil は旧時計基準の絶対時刻なので、NTP の大幅補正や VM スナップショット
+// 復元で時計が戻ると未来に取り残され、その差が消えるまで（最悪 cooldown 幅ぶん）
+// スリープ復帰も NIC 変化も検知できなくなる。後退を見たら基準を捨てる実装で塞ぐ。
+// 後退補正が無い旧コードでは 2 回目の NIC 変化が発火せず FAIL する。
+func TestWatchLifecycleRecoversFromBackwardClockJump(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	h := &connHolder{}
+	h.set(&closableConn{})
+	wake := make(chan struct{}, 2)
+	tick := make(chan time.Time, 1)
+	ready := make(chan struct{})
+
+	base := time.Unix(1_700_000_000, 0)
+	var nowVal atomic.Int64
+	nowVal.Store(base.UnixNano())
+	nowFn := func() time.Time { return time.Unix(0, nowVal.Load()) }
+	var fp atomic.Value
+	fp.Store("a")
+	fpFn := func() string { return fp.Load().(string) }
+
+	done := make(chan struct{})
+	go func() {
+		watchLifecycle(ctx, h, wake, nowFn, fpFn, tick, nil, ready)
+		close(done)
+	}()
+	<-ready
+
+	// 1) NIC 変化で発火 → cooldownUntil = base+3s+30s に入る
+	fp.Store("b")
+	nowVal.Store(base.Add(3 * time.Second).UnixNano())
+	tick <- base.Add(3 * time.Second)
+	if !drainOne(wake, 500*time.Millisecond) {
+		t.Fatal("1 回目の NIC 変化で発火しなかった")
+	}
+
+	// 2) wall clock が 1 時間**後退**（NTP 大幅補正相当）。この時点で
+	//    cooldownUntil は新しい now から見て遥か未来に取り残されている。
+	back := base.Add(-1 * time.Hour)
+	nowVal.Store(back.UnixNano())
+	tick <- back
+	drainOne(wake, 50*time.Millisecond) // 後退自体では発火しない想定（するなら吸収）
+
+	// 3) 後退後に本物の NIC 変化。cooldown を捨てていれば発火する。
+	//    捨てていない旧コードでは now(=back+3s) < cooldownUntil(=base+33s) のため
+	//    抑止され、発火しない＝FAIL。
+	fp.Store("c")
+	nowVal.Store(back.Add(3 * time.Second).UnixNano())
+	tick <- back.Add(3 * time.Second)
+	if !drainOne(wake, 500*time.Millisecond) {
+		t.Fatal("wall clock 後退のあと NIC 変化を検知できていない（cooldown が未来に取り残されている）")
+	}
+
+	cancel()
+	<-done
+}

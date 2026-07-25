@@ -123,14 +123,11 @@ func watchLifecycle(
 	if fingerprintFn == nil {
 		fingerprintFn = nicFingerprint
 	}
-	var stopTicker func()
 	if tickCh == nil {
 		t := time.NewTicker(watchLifecycleTick)
 		defer t.Stop()
 		tickCh = t.C
-		stopTicker = t.Stop
 	}
-	_ = stopTicker // defer で処理済み。lint 抑制
 
 	// baseline を初回 tick 前に取る（起動直後の誤発火を防ぐ＝初回 tick で「変化した」
 	// 判定になるのを避けるため）。
@@ -161,6 +158,13 @@ func watchLifecycle(
 		case <-tickCh:
 			now := nowFn()
 			fp := fingerprintFn()
+			// wall clock の**後退**（NTP の大幅補正・VM スナップショット復元）。
+			// cooldownUntil は旧時計基準の絶対時刻なので、後退すると未来に取り
+			// 残されて以後の検知を長時間塞ぐ。基準を捨てて即時発火可能へ戻す
+			// （後退そのものは環境変化ではないので kick はしない）。
+			if now.Before(last) {
+				cooldownUntil = time.Time{}
+			}
 			jumped := now.Sub(last) > watchLifecycleClockJump
 			// changed 判定は「非空同士の差分」に限定。fp=="" (net.InterfaceAddrs
 			// 一時失敗) は lastFP を書き換えず保持＝次に非空が戻った時に本来の
