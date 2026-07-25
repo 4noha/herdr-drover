@@ -6,13 +6,37 @@ FAIL 確認・exact-match・AGPL 衛生・silent 変更禁止・対外操作は�
 
 ---
 
-## 最新状態（2026-07-18〜25・最新タグ v0.5.18／HEAD は未タグ 2 commit ahead）
+## 最新状態（2026-07-25・最新タグ v0.5.23 / drover-cloud v0.1.11）
 
-直近で以下を実装・リリース済み（詳細は各 DESIGN doc）。**全て darwin/linux
-build 緑・テスト緑**。origin/main = v0.5.18（`5bb956d`）、HEAD は `f539700`
-（MagicDNS 名）＋`1088c2e`（watchLifecycle）の未タグ 2 commit（別 PC の v0.5.15〜
-v0.5.18 と rebase 統合済＝2026-07-25）。稼働 launchd `com.4noha.herdr-drover`
-（pc=`mac-studio-herdr`）は **v0.5.18**。
+**マルチエージェント対応 P0〜P7 完了・配信済み**。全て build/vet/test 緑
+（実 herdr・実 Firestore エミュレータ）。
+
+| PC | 版数 | 状態 |
+|---|---|---|
+| `mac-studio-herdr`（owner/本作業機） | **v0.5.23** | 配信済（手動 rm→cp＋kickstart） |
+| `d24wt27c3j-herdr`（master） | **v0.5.23** | 配信済（遠隔 `update-all`・5 セッション再起動） |
+| `lph77xyyc7-herdr`（slave） | v0.5.22 | **未配信**（14:32 以降オフライン） |
+| `n9htqcr6g0-herdr`（slave） | v0.5.22 | **未配信**（14:32 以降オフライン） |
+| `desktop-djb9pfr-herdr`（Windows） | dev | **未配信**（7/20 以降オフライン・selfupdate は unix-only） |
+
+Cloud Run `claude-master-relay` = **rev 00049**（drover-cloud v0.1.11・環境変数 7 個
+の生存を確認済み）。
+
+**配信後の実機確認**（2026-07-25 20:35〜）:
+- v0.5.23 の PC は session doc に `agent` を発行（`claude` / **`codex`**）。
+  v0.5.22 の PC は `agent` キー無し＝**後方互換が実データで確認できた**。
+- d24wt27c3j に**実際の codex セッションが稼働中**（`w1:pN`）。P2 の window_name
+  改善で `pane_id` ではなく `codex` と表示されるようになった。
+- 遠隔命令 e2e（存在しない sid で非破壊確認）:
+  - 新名 `restart-agent-session` + `agent=claude` → Cloud→agent まで貫通。
+  - 旧名 `restart-claude` → `restart-agent-session`/`agent="claude"` へ写像され、
+    **その旨が Ack detail に残る**（未更新 PC からの投入が生きている証拠）。
+  - 未知の agent（`nosuch`）は **投入時点で拒否**（受け手が広く degrade しない）。
+
+⚠ **relay の 502**（`webterm: relay dial 失敗 … got 502`）は **7/22 から継続する
+既存事象**で今回のデプロイ起因ではない（7/22:1 → 7/23:3 → 7/24:166 → 7/25:549 と
+増加傾向）。bridge は自動復帰しており reconcile も 12/12 で健全だが、**増加傾向は
+別途調査に値する**（Cloud Run のコールドスタート/スケール由来と推定・未確認）。
 
 - ✅ **Tab 単位着地ルール**（`organize`/`--capture`/live 学習・`internal/wsmap`）。
 - ✅ **自動 min ローカルビューア**（`localview.go`・observe/control 自動切替）。
