@@ -134,7 +134,7 @@ func TestCommandRunnerDispatchAndRevocation(t *testing.T) {
 	st := newState(t, pc)
 
 	var restarts, updates, exits, respawns atomic.Int32
-	var claudeRestarts atomic.Int32
+	var claudeRestarts, claudeUpdates atomic.Int32
 	var claudeSid atomic.Value // 最後に渡された sid（"" 込みで検証したいので Value）
 	claudeSid.Store("")
 	var revoked atomic.Bool
@@ -195,6 +195,12 @@ func TestCommandRunnerDispatchAndRevocation(t *testing.T) {
 			}
 			claudeRestarts.Add(1)
 			return "再起動 2 件: claude,claude-2 / skip claude-3(working)", nil
+		},
+		// update-claude 写像: claude 本体更新＋再起動の要約が detail に載る。
+		DoUpdateClaude: func(_ context.Context, sid string) (string, error) {
+			claudeSid.Store(sid)
+			claudeUpdates.Add(1)
+			return "更新 2.1.214 → 2.1.219 / 再起動 2 件: claude,claude-2", nil
 		},
 	}
 	go func() { _ = cr.Run(ctx) }()
@@ -277,6 +283,21 @@ func TestCommandRunnerDispatchAndRevocation(t *testing.T) {
 		t.Fatalf("対象外 sid で再起動が発火: %d", claudeRestarts.Load())
 	}
 
+	// update-claude: claude 本体更新＋再起動。版の前後と再起動結果が監査に残る。
+	c = waitCmdStatus(t, st, pc, push("update-claude", ""), 8*time.Second)
+	if c.Status != "done" || claudeUpdates.Load() != 1 ||
+		!strings.Contains(c.Detail, "更新 2.1.214 → 2.1.219") ||
+		!strings.Contains(c.Detail, "再起動 2 件") {
+		t.Fatalf("update-claude: %+v claudeUpdates=%d", c, claudeUpdates.Load())
+	}
+	// self-update（herdr-drover 自身）とは別経路＝互いに発火しないこと。
+	if updates.Load() != 1 {
+		t.Fatalf("update-claude が self-update を巻き込んだ: %d", updates.Load())
+	}
+	if claudeRestarts.Load() != 2 {
+		t.Fatalf("update-claude が restart-claude seam を二重に呼んだ: %d", claudeRestarts.Load())
+	}
+
 	// revocation: 失効中は実行拒否（DoRestart 増えない・error revoked）
 	revoked.Store(true)
 	c = waitCmdStatus(t, st, pc, push("restart-agent", ""), 8*time.Second)
@@ -308,6 +329,7 @@ func TestCommandRunnerUnwiredAcksError(t *testing.T) {
 		"self-update":    "update 未配線",
 		"restart-proxy":  "restart-proxy 未配線",
 		"restart-claude": "restart-claude 未配線",
+		"update-claude":  "update-claude 未配線",
 	} {
 		id, err := st.PushCommand(ctx, pc, cmd, "w1:p1", "owner@example.com")
 		if err != nil {

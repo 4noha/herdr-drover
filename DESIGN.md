@@ -88,6 +88,8 @@ M8f2 教訓: desired/cur トレース・**定常 CREATE=0 を機械確認**・li
 - restart-proxy → 当該 sid の bridge respawn（不能なら status=error で Ack＝滞留させない）
 - restart-claude → claude セッションを**会話ごと作り直す**（`restartclaude.go`）。
   sid 指定＝その 1 枚／sid 空＝その PC のローカル claude pane 全部
+- update-claude → **claude 本体**を更新して続けて上記の再起動まで行う 1 コマンド
+  （`updateclaude.go`）。⚠self-update は **herdr-drover 自身**の更新＝別物
 破壊的命令は Ack 先行（cm 規律）。ただし restart-claude は agent 自身が死なない
 ＝Ack は実行**後**（何件再起動・何件 skip したかの要約を detail に残す）。
 
@@ -122,6 +124,25 @@ pane を作り直して新版を掴ませる。
   元 argv で新しい Tab を作り直し、位置・label・agent 名を復元する。生存判定は
   `pane.get` の **`pane_not_found` exact** のみを「死」と見る（socket 一時障害で
   作り直しを誘発して二重に壊さない）。
+
+#### update-claude の設計（更新とセッション反映を 1 コマンドに閉じる）
+`claude update` は symlink を差し替えるだけで**走っているセッションには効かず**、
+restart-claude だけでは**ディスクが古いままなら何も新しくならない**。実運用で
+欲しいのは常に「更新して、セッションへ反映」なので 2 段を 1 コマンドに閉じる。
+
+- 対象バイナリの権威は restart-claude と同じ **稼働中 claude pane の argv[0]**
+  （＝更新すべき実体そのもの）。**食い違う複数種類が動いていたら loud に error**
+  （どれを更新すべきか推測しない）。pane が 1 つも無ければ PATH →
+  `~/.local/bin/claude`（native installer の既定配置）の順に落とし、**どの経路で
+  決めたかを必ず出力**する。
+- 「更新された/されていない」は **exit code では判定できない**（実測 2.1.219:
+  最新でも exit 0 で "Claude Code is up to date (x.y.z)"）＝`--version` の
+  前後比較を権威にする。
+- **更新が無くても再起動する**: 「ディスクは最新だがセッションは旧版」がまさに
+  直したい状態（実測 2026-07-25: disk 2.1.219 / セッション 2.1.214）。
+  「更新が無かったから何もしない」では目的を達しない。
+- **更新に失敗したら再起動へ進まない**（古いまま作り直しても目的を達さず pane を
+  無駄に壊すだけ）。ダウンロードを含むので agent 側で上限（5 分）を切る。
 
 ## リポジトリ構成
 

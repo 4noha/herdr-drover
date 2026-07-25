@@ -1,0 +1,208 @@
+package main
+
+// claude 本体の更新＋セッション反映を **1 コマンド**で行う
+// （ローカル CLI `update-claude` ／遠隔命令 update-claude）。
+//
+// `claude update` はバイナリ（symlink `~/.local/bin/claude` → `versions/<ver>`）を
+// 差し替えるだけで、**すでに走っているセッションには効かない**（exec 済みプロセスは
+// 旧 inode に貼り付く）。逆に restart-claude だけではディスク上が古いままなら
+// 何も新しくならない。実運用で欲しいのは常に「更新して、セッションへ反映」なので
+// この 2 段を 1 コマンドに閉じる。
+//
+// ⚠**claude バイナリを PATH 頼みで決めない**（daemon の PATH には ~/.local/bin が
+// 無い）。権威は restart-claude と同じ「稼働中のローカル claude pane が実際に
+// 起動している argv[0]」＝更新すべき実体そのもの。どの経路で決めたかは必ず出力する
+// （silent な選択をしない・鉄則⑤）。
+//
+// 更新の有無に関わらず**再起動まで行う**: 「ディスクは最新だがセッションは旧版」が
+// まさに直したい状態（実測 2026-07-25: disk 2.1.219 / セッション 2.1.214）。
+// 「更新が無かったから何もしない」は目的を達成しない。作業中 pane の skip 等の
+// 安全弁は restart-claude の芯（restartClaudePanes）をそのまま共有する。
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"flag"
+
+	"github.com/4noha/herdr-drover/internal/herdrapi"
+)
+
+// claudeUpdateTimeout は `claude update`（ダウンロード込み）の上限。遠隔命令は
+// この呼び出しの間ブロックするので無限には待たない。
+const claudeUpdateTimeout = 5 * time.Minute
+
+// claudeBinsFromPanes は稼働中のローカル claude pane が実際に起動している argv[0]
+// を重複なく集める（restart-claude と同じ exact な権威＝PATH を引かない）。
+func claudeBinsFromPanes(api *herdrapi.Client) ([]string, error) {
+	agents, err := api.AgentList()
+	if err != nil {
+		return nil, fmt.Errorf("agent.list: %w", err)
+	}
+	panes, err := api.PaneList()
+	if err != nil {
+		return nil, fmt.Errorf("pane.list: %w", err)
+	}
+	targets, err := selectRestartTargets(agents, panes, "")
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]bool)
+	var out []string
+	for _, t := range targets {
+		root, err := exportTabLayout(api, t.TabID)
+		if err != nil {
+			continue // 1 枚読めなくても他から決まる（決まらなければ下で loud に error）
+		}
+		for _, l := range root.leaves() {
+			if l.PaneID != t.PaneID || len(l.Command) == 0 {
+				continue
+			}
+			if bin := l.Command[0]; !seen[bin] {
+				seen[bin] = true
+				out = append(out, bin)
+			}
+		}
+	}
+	return out, nil
+}
+
+// resolveClaudeBin は更新対象の claude 実バイナリを決め、根拠（source）も返す。
+// 優先順:
+//  1. 稼働中のローカル claude pane の argv[0]（exact。**食い違う複数は曖昧＝error**
+//     ＝どれを更新すべきか推測しない）
+//  2. PATH（CLI 実行時に有効。daemon では通常引けない）
+//  3. `~/.local/bin/claude`（native installer の既定配置＝推測ではなく既知の規約）
+func resolveClaudeBin(api *herdrapi.Client) (bin, source string, err error) {
+	bins, berr := claudeBinsFromPanes(api)
+	if berr == nil && len(bins) == 1 {
+		return bins[0], "稼働中の claude pane の argv[0]", nil
+	}
+	if berr == nil && len(bins) > 1 {
+		return "", "", fmt.Errorf("稼働中の claude pane が %d 種類のバイナリを使っていて"+
+			"更新対象を一意に決められない（推測しない）: %s", len(bins), strings.Join(bins, " / "))
+	}
+	if p, lerr := exec.LookPath("claude"); lerr == nil {
+		if abs, aerr := filepath.Abs(p); aerr == nil {
+			return abs, "PATH の claude", nil
+		}
+	}
+	if home, herr := os.UserHomeDir(); herr == nil {
+		wellKnown := filepath.Join(home, ".local", "bin", "claude")
+		if fi, serr := os.Stat(wellKnown); serr == nil && !fi.IsDir() {
+			return wellKnown, "native installer 既定の ~/.local/bin/claude", nil
+		}
+	}
+	return "", "", fmt.Errorf("claude 実バイナリを特定できない" +
+		"（claude セッションが 1 つも無く、PATH にも ~/.local/bin/claude にも見つからない）")
+}
+
+// claudeVersion は `<bin> --version` の 1 行（例 "2.1.219 (Claude Code)"）。
+func claudeVersion(ctx context.Context, bin string) (string, error) {
+	out, err := exec.CommandContext(ctx, bin, "--version").Output()
+	if err != nil {
+		return "", fmt.Errorf("%s --version: %w", bin, err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// runClaudeUpdate は `<bin> update` を実行して結合出力を返す。実測 2.1.219: 最新でも
+// exit 0 で "Claude Code is up to date (x.y.z)" を出す＝exit code だけでは
+// 「更新された/されていない」は判定できないので、版の前後比較を権威にする。
+func runClaudeUpdate(ctx context.Context, bin string) (string, error) {
+	out, err := exec.CommandContext(ctx, bin, "update").CombinedOutput()
+	return strings.TrimSpace(string(out)), err
+}
+
+// updateClaudeAndRestart は「claude 更新 → セッションへ反映」の芯。CLI と遠隔命令が
+// 共有する（経路ごとに別ロジックを持たない）。戻り値は監査用の 1 行要約。
+func updateClaudeAndRestart(ctx context.Context, api *herdrapi.Client, sid string,
+	force, dryRun bool, out io.Writer) (string, error) {
+	bin, source, err := resolveClaudeBin(api)
+	if err != nil {
+		return "", err
+	}
+	fmt.Fprintf(out, "update-claude: 対象バイナリ %s（根拠: %s）\n", bin, source)
+
+	before, err := claudeVersion(ctx, bin)
+	if err != nil {
+		return "", err
+	}
+
+	if dryRun {
+		fmt.Fprintf(out, "update-claude: [dry-run] 現在 %s → `%s update` を実行し"+
+			"セッションを再起動します\n", before, bin)
+		if _, rerr := restartClaudePanes(api, sid, force, true, out); rerr != nil {
+			return "", rerr
+		}
+		return fmt.Sprintf("[dry-run] %s（更新も再起動も未実行）", before), nil
+	}
+
+	updOut, uerr := runClaudeUpdate(ctx, bin)
+	if updOut != "" {
+		for _, line := range strings.Split(updOut, "\n") {
+			fmt.Fprintf(out, "update-claude: claude> %s\n", line)
+		}
+	}
+	if uerr != nil {
+		// 更新に失敗しても**セッション再起動へは進まない**（古いままで作り直しても
+		// 目的を達さず、pane を無駄に作り直すだけ）。
+		return "", fmt.Errorf("`%s update` 失敗: %w", bin, uerr)
+	}
+
+	after, err := claudeVersion(ctx, bin)
+	if err != nil {
+		return "", err
+	}
+	verMsg := "既に最新 " + after
+	if before != after {
+		verMsg = fmt.Sprintf("更新 %s → %s", before, after)
+	}
+	fmt.Fprintf(out, "update-claude: %s\n", verMsg)
+
+	// 版が変わらなくても再起動する: ディスクが最新でもセッションが旧版のまま、
+	// というのがまさに直したい状態（本コマンドの存在理由）。
+	results, rerr := restartClaudePanes(api, sid, force, false, out)
+	if rerr != nil {
+		return "", fmt.Errorf("%s／セッション再起動 失敗: %w", verMsg, rerr)
+	}
+	return verMsg + " / " + summarizeRestart(results), nil
+}
+
+// cmdUpdateClaude は CLI 入口。
+func cmdUpdateClaude(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("update-claude", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	force := fs.Bool("force", false, "agent_status=working の pane も再起動する（実行中タスクは失われる）")
+	dryRun := fs.Bool("dry-run", false, "対象バイナリと再起動予定を表示するだけで何もしない")
+	if err := fs.Parse(args); err != nil {
+		return fmt.Errorf("%w: %v", errUsage, err)
+	}
+	rest := fs.Args()
+	if len(rest) > 1 {
+		return fmt.Errorf("%w: 余分な引数 %v（sid は 1 つまで）", errUsage, rest[1:])
+	}
+	sid := ""
+	if len(rest) == 1 {
+		sid = rest[0]
+	}
+
+	api := herdrapi.New("")
+	if _, err := api.Ping(); err != nil {
+		return fmt.Errorf("herdr server に繋がらない（socket=%s）: %w", api.SocketPath, err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), claudeUpdateTimeout)
+	defer cancel()
+	summary, err := updateClaudeAndRestart(ctx, api, sid, *force, *dryRun, stdout)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "update-claude: %s\n", summary)
+	return nil
+}

@@ -297,6 +297,14 @@ func runOneCloud(ctx context.Context, cfg Config, cl Cloud, primary bool, hcli *
 			}
 			return summarizeRestart(results), nil
 		},
+		// DoUpdateClaude は claude 本体の更新まで含む＝ダウンロード時間の上限を
+		// 自前で切る（親 ctx はプロセス寿命なので、ここで縛らないと命令制御線が
+		// 長時間ブロックし得る）。
+		DoUpdateClaude: func(parent context.Context, sid string) (string, error) {
+			uctx, cancel := context.WithTimeout(parent, claudeUpdateTimeout)
+			defer cancel()
+			return updateClaudeAndRestart(uctx, hcli, sid, false, false, lg.Writer())
+		},
 	}
 	if wt != nil {
 		cr.DoProxy = func(_ context.Context, sid string) error {

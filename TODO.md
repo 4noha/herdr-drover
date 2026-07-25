@@ -46,6 +46,26 @@ build 緑・テスト緑**。稼働 launchd `com.4noha.herdr-drover`（pc=`mac-s
   herdr 再起動は session 復元で空にしない＝作成経路固有。⚠ organize/claudeshim も同 create
   経路で同種ゴミ（稀）＝下記 follow-up。
 
+### 2026-07-25 追加: claude 本体の更新（update-claude・ワンコマンド）
+
+`claude update` は symlink 差し替えのみ＝走っているセッションに効かず、
+restart-claude だけではディスクが古いままなら意味がない。2 段を 1 コマンドに閉じた。
+
+- CLI `herdr-drover update-claude [--force] [--dry-run] [sid]`／遠隔命令
+  `update-claude`（Web 端末カードの「claude 更新」）。実装 `updateclaude.go`。
+- 対象バイナリは restart-claude と同じ「稼働中 pane の argv[0]」が権威。**食い違う
+  複数種類は loud に error**（推測しない）。pane 皆無なら PATH →
+  `~/.local/bin/claude`。根拠を必ず出力。
+- ⚠**`claude update` は最新でも exit 0**（実測 2.1.219: "Claude Code is up to
+  date"）＝更新有無は `--version` の前後比較が権威。
+- **更新が無くても再起動する**（「ディスクは最新／セッションは旧版」を直すのが目的）。
+  更新失敗時は再起動へ進まない。
+- ⚠`self-update`（herdr-drover 自身）と `update-claude`（claude 本体）は**別物**。
+  Web も「更新」/「claude 更新」でラベル分離。
+- ⚠テストの寿命バグで踏んだ罠: subtest 内の `t.TempDir()` は subtest 終了で消え、
+  そこに置いた stub の pane が死ぬ。複数 pane を並存させる検証は stub を**外側
+  スコープ**で作ること（曖昧検出テストが偽陰性になっていた）。
+
 ### 2026-07-25 追加: claude セッション再起動（restart-claude）
 
 claude 本体を更新しても **exec 済みプロセスは旧 inode のまま**（`~/.local/bin/claude`

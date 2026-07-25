@@ -146,6 +146,16 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		return 0
+	case "update-claude":
+		// claude 本体の更新＋セッション反映を 1 コマンドで（updateclaude.go）。
+		if err := cmdUpdateClaude(rest, stdout, stderr); err != nil {
+			fmt.Fprintf(stderr, "herdr-drover update-claude: %v\n", err)
+			if errors.Is(err, errUsage) {
+				return 2
+			}
+			return 1
+		}
+		return 0
 	case "mv-tab-launch":
 		// plugin action `mv-tab` の実体。drawer から非 TTY spawn で呼ばれ、layout.apply で
 		// 新 Tab を作り、その中で `herdr-drover mv-tab` を対話モードで走らせる（TTY 内へ迂回）。
@@ -217,7 +227,15 @@ func usage(w io.Writer) {
                           会話は agent_session の uuid で --resume 継続。
                           agent_status=working は既定 skip（--force で強制）／
                           同居 pane のある Tab は巻き添え回避で skip
+  herdr-drover update-claude [--force] [--dry-run] [sid]
+                          claude 本体を最新へ更新し、そのままセッションへ反映する
+                          （claude update → restart-claude の 1 コマンド版）。
+                          更新が無くても再起動する＝「ディスクは最新だがセッションは
+                          旧版」を直すのが目的。対象バイナリは稼働中 claude pane の
+                          argv[0] を権威に決め、根拠を出力する
   herdr-drover update     selfupdate（GitHub Releases・sha256 検証・原子置換）
+                          ⚠これは **herdr-drover 自身**の更新（claude 本体は
+                          update-claude）
   herdr-drover version    バージョン表示
   herdr-drover help       このヘルプ
 

@@ -17,6 +17,9 @@
 //	                 （DoRestartClaude seam。sid 空＝その PC のローカル claude
 //	                 pane 全部）。破壊的だが**対象プロセスのみ**＝agent 自身は
 //	                 死なないので Ack は実行**後**（結果の要約を detail に残す）
+//	update-claude  → `claude update`＋上記の再起動を 1 コマンドで
+//	                 （DoUpdateClaude seam）。self-update が **herdr-drover 自身**
+//	                 の更新なのに対し、こちらは **claude 本体**の更新＝別物
 //
 // 破壊的命令（restart-agent / self-update 成功時）は **Ack を先行**して
 // から実行する（cm 規律: kickstart -k / exit で agent が死んでも監査が
@@ -60,6 +63,9 @@ type CommandRunner struct {
 	// sid 空＝その PC のローカル claude pane 全部。戻り値の要約が Ack detail に
 	// 載る（何件やって何件 skip したかを監査に残す）。
 	DoRestartClaude func(ctx context.Context, sid string) (summary string, err error)
+	// DoUpdateClaude は claude 本体の更新＋セッション反映（updateclaude.go）。
+	// ダウンロードを含むので DoRestartClaude より長くかかる（agent 側で上限あり）。
+	DoUpdateClaude func(ctx context.Context, sid string) (summary string, err error)
 }
 
 // Run は命令制御線（WatchCommands）を回す。claim 済命令のみ handle
@@ -134,6 +140,20 @@ func (cr *CommandRunner) handle(ctx context.Context, cm state.Command) {
 		summary, err := cr.DoRestartClaude(ctx, cm.SID)
 		if err != nil {
 			_ = cr.St.AckCommand(ctx, cm.ID, "error", "claude 再起動 失敗: "+err.Error())
+			return
+		}
+		_ = cr.St.AckCommand(ctx, cm.ID, "done", summary)
+
+	case "update-claude":
+		if cr.DoUpdateClaude == nil {
+			_ = cr.St.AckCommand(ctx, cm.ID, "error", "update-claude 未配線")
+			return
+		}
+		// restart-claude と同じく agent 自身は死なない＝Ack は実行後。版の
+		// 前後と再起動結果の要約を detail に残す。
+		summary, err := cr.DoUpdateClaude(ctx, cm.SID)
+		if err != nil {
+			_ = cr.St.AckCommand(ctx, cm.ID, "error", "claude 更新 失敗: "+err.Error())
 			return
 		}
 		_ = cr.St.AckCommand(ctx, cm.ID, "done", summary)

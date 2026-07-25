@@ -181,6 +181,32 @@ mkdir -p ~/.claude/skills
 ln -s "$PWD/skills/mv-tab" ~/.claude/skills/mv-tab
 ```
 
+### update-claude（claude 本体の更新 → セッション反映をワンコマンドで）
+
+```sh
+# claude を最新にして、そのままこの PC のセッションへ反映
+herdr-drover update-claude
+
+# 何が起きるか確認（実行しない）／1 枚だけ／作業中も強制
+herdr-drover update-claude --dry-run
+herdr-drover update-claude w1:pD
+herdr-drover update-claude --force
+```
+
+Web からは端末カードの「claude 更新」。他 PC・slave にも届く。
+
+- `claude update` は symlink を差し替えるだけで**走っているセッションには効かない**、
+  逆に再起動だけでは**ディスクが古いままなら何も新しくならない**。この 2 段を 1
+  コマンドに閉じたもの。中身は `claude update` → 下記 restart-claude。
+- **更新が無くても再起動する**。「ディスクは最新だがセッションは旧版」がまさに
+  直したい状態なので、そこで止まらない。
+- 更新対象のバイナリは稼働中セッションの起動パスから決める（PATH は使わない）。
+  根拠を毎回出力し、種類が食い違う場合は推測せずエラーにする。
+- 更新に失敗した場合はセッションを触らない（古いまま作り直しても無意味なため）。
+
+⚠ `herdr-drover update` は **herdr-drover 自身**の更新です（claude 本体は
+`update-claude`）。
+
 ### restart-claude（claude バイナリ更新をセッションへ反映）
 
 claude 本体を更新しても、**すでに起動しているセッションは古いバイナリのまま**動く
