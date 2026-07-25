@@ -9,3 +9,6 @@ dist/
 # AGENTS.md は Codex 用の指示だが絶対パスを含みうるので追跡外。
 .codex/
 AGENTS.md
+
+# direnv (.envrc) は AWS_PROFILE 等のマシン/アカウント固有 env を持つので追跡外。
+.envrc
