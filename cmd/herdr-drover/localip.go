@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -93,4 +94,98 @@ func parseTailscaleDNSName(statusJSON []byte) string {
 		return ""
 	}
 	return strings.TrimSuffix(st.Self.DNSName, ".")
+}
+
+// virtualIfacePrefixes は churn の原因になる仮想 NIC の名前 prefix。
+// 敵対的レビュー指摘: Docker/Podman/Colima の bridge や veth が container 起動
+// のたびに up/down して IPv4 集合が変わり、真の NIC 変化でないのに watchLifecycle
+// が発火し続ける（cooldown より長い間隔だと毎回発火するため設計上抑制できない）。
+// これらは実 relay 接続経路には関与しないので fingerprint 対象から除外する。
+// macOS の bridge*/utun* は Tailscale/VPN で正常に up されるものも含むため
+// 除外しない（VPN toggle は本来検知したい変化）。
+var virtualIfacePrefixes = []string{
+	"docker",  // Linux docker0 / docker_gwbridge
+	"br-",     // Linux docker user-defined bridge (br-<hex>)
+	"veth",    // Linux container veth pair endpoints
+	"cni",     // Kubernetes CNI (cni0 等)
+	"flannel", // Flannel VXLAN
+	"weave",   // Weave Net
+	"podman",  // Podman bridge
+	"kube",    // kube-bridge, kube-ipvs0 等
+	"vmnet",   // VMware Fusion / Colima 系
+}
+
+// isVirtualIface は Docker/Podman/K8s の仮想 NIC を判定する（fingerprint 除外用）。
+func isVirtualIface(name string) bool {
+	for _, p := range virtualIfacePrefixes {
+		if strings.HasPrefix(name, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// nicFingerprint は自 PC の NIC 変化検知用の軽量なキーを返す（attach.go の
+// watchLifecycle が Wi-Fi 切替 / VPN toggle / 有線抜差し等を検知するために使う）。
+// localIPs() を再利用しない理由: localIPs は tailscale CLI を fork/exec するため
+// (最悪 2s ブロック) 検知ループから短周期で呼ぶには重すぎる。また
+// tailscale MagicDNS 名は NIC 変化とは無関係の情報。
+//
+// IPv6 の SLAAC privacy address (RFC 4941) は数時間おきに新旧が入れ替わり、
+// NIC が変わっていないのに address 集合が変わる＝誤検知の元。Go の
+// net.InterfaceAddrs() は temporary/deprecated flag を露出しないため IPv6 の
+// 一時アドレスを厳密に弾く手段が無い。従って **本キーは IPv4 のみを対象に
+// する**（Wi-Fi/有線切替は DHCP で IPv4 が必ず変わるので実用上十分検知できる。
+// 純 IPv6-only 環境は現状想定外）。
+//
+// Docker/Podman/K8s bridge は fingerprint から除外（敵対的レビュー指摘への対処。
+// container 起動のたびに up/down する変化で毎回 forceClose するのを防ぐ）。
+// virtualIfacePrefixes 参照。net.Interfaces() ベースにするのは interface 名を
+// 得るため（net.InterfaceAddrs() は addrs のみで name 情報が無い）。
+//
+// 順序保証: interface enumeration 順は不定なので sort して canonical 化。
+// IPNet.String() は "10.101.71.143/24" 形式で prefix 幅も含む＝同じ IP でも mask
+// 変化を拾える。呼出コスト: net.Interfaces() + 各 iface の Addrs() で netlink/
+// sysctl round-trip が数回、通常 sub-ms。
+//
+// net.Interfaces() 失敗は "" を返す（呼び手は「前回値と同じ空」として扱う
+// ＝短期の一時失敗で誤発火しない）。
+func nicFingerprint() string {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return ""
+	}
+	keys := make([]string, 0, len(ifaces))
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 {
+			continue // down は対象外
+		}
+		if iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		if isVirtualIface(iface.Name) {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, a := range addrs {
+			ipnet, ok := a.(*net.IPNet)
+			if !ok || ipnet.IP.IsLoopback() || ipnet.IP.IsLinkLocalUnicast() {
+				continue
+			}
+			v4 := ipnet.IP.To4()
+			if v4 == nil {
+				continue // IPv6 は SLAAC privacy address 誤検知回避のため除外
+			}
+			ones, _ := ipnet.Mask.Size()
+			if ones == 0 || ones > 32 {
+				ones = 32
+			}
+			keys = append(keys, fmt.Sprintf("%s/%d", v4.String(), ones))
+		}
+	}
+	sort.Strings(keys)
+	return strings.Join(keys, ",")
 }

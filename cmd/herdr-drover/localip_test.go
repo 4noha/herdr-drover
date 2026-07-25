@@ -51,3 +51,34 @@ func TestLocalIPsExcludesLoopback(t *testing.T) {
 		}
 	}
 }
+
+// TestNICFingerprintStable は連続 2 回呼んで結果が同じことを確認する（sort が
+// canonical 化しているか＝enumeration 順の不定さで false diff が出ないか）。
+func TestNICFingerprintStable(t *testing.T) {
+	a := nicFingerprint()
+	b := nicFingerprint()
+	if a != b {
+		t.Fatalf("nicFingerprint が非決定的: %q != %q", a, b)
+	}
+}
+
+// TestNICFingerprintExcludesLoopbackAndIPv6 は fingerprint に loopback / IPv6 が
+// 含まれないことを確認する（IPv6 SLAAC privacy address の誤検知回避が仕様）。
+func TestNICFingerprintExcludesLoopbackAndIPv6(t *testing.T) {
+	fp := nicFingerprint()
+	if fp == "" {
+		t.Skip("この環境では IPv4 NIC が無いため skip")
+	}
+	// loopback チェック
+	if fp == "127.0.0.1/8" ||
+		fp == "127.0.0.1/8," ||
+		len(fp) >= 12 && fp[:12] == "127.0.0.1/8," {
+		t.Fatalf("nicFingerprint に loopback が含まれた: %q", fp)
+	}
+	// IPv6 チェック: ":" が含まれないこと（IPv4 のみのはず）
+	for _, c := range fp {
+		if c == ':' {
+			t.Fatalf("nicFingerprint に IPv6 アドレスらしき文字列が含まれた: %q", fp)
+		}
+	}
+}

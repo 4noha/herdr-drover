@@ -8,9 +8,9 @@
 //     token (`drover_inj_pc` / `drover_inj_sid`) を最終権威にする。
 //   - token だけでは 2 つの穴が残る:
 //     (a) reconcile が pane を create してから token を付与するまでの race 窓に
-//         producer が scan すると token 無しで push＝cross-PC 増殖
+//     producer が scan すると token 無しで push＝cross-PC 増殖
 //     (b) herdr サーバのみ再起動すると report_metadata token が消える
-//         （pane_id は保持されるが token は落ちる・実 herdr 0.7.4 で実測）
+//     （pane_id は保持されるが token は落ちる・実 herdr 0.7.4 で実測）
 //   - 本 index が (a) は「pane を作る直前に Reserve で pending 予約」、(b) は
 //     「起動時に pane.list と照合して token 無しの pane_id に token を再表明」で塞ぐ。
 //

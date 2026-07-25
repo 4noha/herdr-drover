@@ -66,6 +66,141 @@ const inputWriteTimeout = 2 * time.Second
 // 誤検知しない範囲で切る。
 const dialTimeout = 15 * time.Second
 
+// watchLifecycleTick は watchLifecycle のポーリング周期。3s は Go doc の
+// スリープ検知パターン（wall clock diff）と NIC diff の両方に対して低負荷
+// （net.InterfaceAddrs は syscall 1 回で sub-ms）で、検知遅延は 3〜6s。
+const watchLifecycleTick = 3 * time.Second
+
+// watchLifecycleClockJump はスリープ復帰と判定する wall clock ジャンプ幅。
+// Go の time.Time の monotonic clock は macOS/Linux 共に S3/S4 sleep 中に停止する
+// （time パッケージ公式 doc 記載）ため、time.Now().Round(0) で monotonic を剥がして
+// wall clock で比較する。>15s は NTP step（通常 ms オーダー）を十分マージンで
+// 超えつつ、典型 sleep（秒〜時間）を確実に捕える閾値。pumpFrames の DefaultIdle=30s
+// より短く proactive に切断＝quiescence 到達前に再接続を開始できる。
+const watchLifecycleClockJump = 15 * time.Second
+
+// watchLifecycleCooldown はスリープ復帰検知と NIC 変化検知の共有 cooldown。
+// (1) sleep/wake は「wall clock jump→数秒後に NIC associate 完了」の 2 段発火に
+// なりがちで、両者を 30s 窓で束ねて 1 回だけの再接続に集約する。
+// (2) Wi-Fi 切替は「旧 set→空→新 set」の 2 段遷移で NIC diff が 2 回来るが、
+// 同じ cooldown で 2 回目を抑止する。
+// (3) pumpFrames の DefaultIdle=30s と同じ長さにして、正常な quiescence 再接続
+// の頻度以上には切らないよう保つ。
+const watchLifecycleCooldown = 30 * time.Second
+
+// watchLifecycle は cmdAttach の goroutine として常駐し、スリープ復帰・NIC 変化を
+// 検知したら holder.forceClose と wakeCh 送信で「今すぐ再接続」を促す。
+//   - ctx は cmdAttach の signal.NotifyContext（プロセス寿命）。attachOnce の dctx
+//     に紐付けると backoff 中は停止＝主たる発生窓（backoff 30s に伸びた後）で検知
+//     漏れになるため cmdAttach スコープが正。
+//   - nowFn/fingerprintFn/tickCh は単体テスト用の DI seam（fake clock / fake NIC を
+//     注入して sleep 実測なしで検証）。nil ならデフォルト（time.Now・nicFingerprint・
+//     time.NewTicker）。baselineReady は「baseline 取得完了」の合図（テスト側で
+//     nowFn/fingerprintFn を変える前に待つためのバリア。nil なら合図しない）。
+//   - 検知時のアクションは holder.forceClose（現 conn を能動的に切断＝pumpFrames が
+//     Read err で return→attachOnce 終了→cmdAttach の backoff）と、wakeCh への
+//     非ブロッキング送信（backoff sleep 中なら select を早期に解く）の 2 経路を毎回
+//     ペアで行う。attachOnce 実行中は前者が効き、backoff sleep 中は後者が効き、
+//     両分岐が同時成立しても副作用なし。
+//
+// NIC transient 空の扱い: 中間 tick で fingerprint が "" を返す（syscall 一時失敗
+// 等）ときは **lastFP を書き換えない**。空を経由した a→""→b の遷移で真の変化 (a→b)
+// を吸収しないため（敵対的レビュー指摘に対処）。空↔非空の初回遷移（起動直後の
+// baseline が空だった場合の実 NIC 検出）は 1 回だけ許容し以後は lastFP を非空で保つ。
+func watchLifecycle(
+	ctx context.Context,
+	holder *connHolder,
+	wakeCh chan<- struct{},
+	nowFn func() time.Time,
+	fingerprintFn func() string,
+	tickCh <-chan time.Time,
+	notify func(reason string),
+	baselineReady chan<- struct{},
+) {
+	if nowFn == nil {
+		nowFn = func() time.Time { return time.Now().Round(0) }
+	}
+	if fingerprintFn == nil {
+		fingerprintFn = nicFingerprint
+	}
+	var stopTicker func()
+	if tickCh == nil {
+		t := time.NewTicker(watchLifecycleTick)
+		defer t.Stop()
+		tickCh = t.C
+		stopTicker = t.Stop
+	}
+	_ = stopTicker // defer で処理済み。lint 抑制
+
+	// baseline を初回 tick 前に取る（起動直後の誤発火を防ぐ＝初回 tick で「変化した」
+	// 判定になるのを避けるため）。
+	last := nowFn()
+	lastFP := fingerprintFn()
+	if baselineReady != nil {
+		close(baselineReady) // テストが nowFn/fingerprintFn を変える前の同期点
+	}
+	// cooldownUntil はスリープ復帰と NIC 変化が共有する。zero value は epoch=常時
+	// 発火可能。発火時刻 + watchLifecycleCooldown へ更新する。
+	var cooldownUntil time.Time
+
+	kick := func(reason string) {
+		if notify != nil {
+			notify(reason)
+		}
+		holder.forceClose()
+		select {
+		case wakeCh <- struct{}{}:
+		default:
+		}
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tickCh:
+			now := nowFn()
+			fp := fingerprintFn()
+			jumped := now.Sub(last) > watchLifecycleClockJump
+			// changed 判定は「非空同士の差分」に限定。fp=="" (net.InterfaceAddrs
+			// 一時失敗) は lastFP を書き換えず保持＝次に非空が戻った時に本来の
+			// diff が生きるようにする（transient 空を挟んだ real change の吸収を防ぐ）。
+			changed := fp != "" && lastFP != "" && fp != lastFP
+			last = now
+			if fp != "" && lastFP == "" {
+				// 初回 baseline が空だったケースの最初の非空取得＝現在値を新 baseline
+				// として採用のみで発火しない（起動直後の誤発火防止）。以後 lastFP は
+				// 非空で維持されるので transient 空を挟んでも本フォールバックは走らない。
+				lastFP = fp
+			}
+
+			if !jumped && !changed {
+				continue
+			}
+			if now.Before(cooldownUntil) {
+				// cooldown 中の変化は最新値で追随のみ（cooldown 明けに 1 回だけ
+				// 発火するよう lastFP は更新して次周期以降の diff を正しくする）。
+				if changed {
+					lastFP = fp
+				}
+				continue
+			}
+			cooldownUntil = now.Add(watchLifecycleCooldown)
+			switch {
+			case jumped && changed:
+				kick("スリープ復帰＋NIC 変化")
+			case jumped:
+				kick("スリープ復帰")
+			default:
+				kick("NIC 変化")
+			}
+			if changed {
+				lastFP = fp
+			}
+		}
+	}
+}
+
 // connHolder は「現在の接続」を保持し、常駐 stdin reader が接続切替を跨いで現接続
 // へ書けるようにする（reader を cycle ごとに作らない＝キーストローク奪い合い防止）。
 // 未接続(nil)中の入力は破棄する（次の接続確立後の入力から届く）。
@@ -98,6 +233,23 @@ func (h *connHolder) write(p []byte) error {
 		_ = c.Close()
 	}
 	return err
+}
+
+// forceClose は現接続を能動的に close する（watchLifecycle 経由でスリープ復帰・
+// NIC 変化を検知した時に呼ばれる。pumpFrames が Read err で return→attachOnce
+// 終了→cmdAttach の backoff ループが新 conn で再 dial、の既存経路にそのまま乗る）。
+// set(nil) は close を伴わない参照外しなので意味論が違う＝別メソッドで分ける。
+// 二重 Close は net.Conn の冪等契約（および attachOnce の defer conn.Close と
+// SIGWINCH goroutine の `<-dctx.Done() で Close`）で吸収される＝戻り値は無視。
+// c==nil（未接続中＝backoff sleep 中）は no-op。
+func (h *connHolder) forceClose() {
+	h.mu.Lock()
+	c := h.c
+	h.c = nil
+	h.mu.Unlock()
+	if c != nil {
+		_ = c.Close()
+	}
 }
 
 // dialWithTimeout は dial（ブロッキング呼び出し）を別 goroutine で走らせ、
@@ -193,11 +345,26 @@ func cmdAttach(args []string, stdout, stderr io.Writer) error {
 		}
 	}()
 
+	// wakeCh はスリープ復帰・NIC 変化検知時に watchLifecycle が非ブロッキング送信
+	// する（capacity 1 で最新のみ保持）。backoff sleep 中の select を早期に解いて
+	// 「復帰直後の再接続を最大 backoff-1s ではなく即時に」する。attachOnce 実行中は
+	// holder.forceClose 側が pumpFrames Read err を誘発するので wakeCh は buffer に
+	// 溜まって次の backoff 局面で 1 回消費されるだけ＝副作用なし。
+	wakeCh := make(chan struct{}, 1)
+	go watchLifecycle(ctx, holder, wakeCh, nil, nil, nil, func(reason string) {
+		fmt.Fprintf(out, "\r\n↗ %s: %s — 再接続します\r\n", remotePC, reason)
+	}, nil)
+
 	// ⚠ この pane は reconcile が管理する（リモートセッション消滅で pane.close）。
 	// attach は **設定/Firestore/relay のどの失敗でも exit しない**（exit すると
 	// pane が死に→次周の reconcile が再作成→runaway churn になる。実障害で確認）。
 	// ctx cancel（SIGTERM / pane close で herdr が kill）だけで戻る＝生存し続けて
 	// backoff 再試行する。
+	//
+	// スリープ復帰 / NIC 変化検知（watchLifecycle）は holder.forceClose→pumpFrames
+	// Read err→attachOnce return→backoff sleep 中なら wakeCh で早期脱出、の経路で
+	// 自動復旧する。watchLifecycle は cmdAttach ctx 寿命＝backoff 中も生存
+	// （dctx に紐付けると backoff 30s に伸びた区間で検知漏れ＝あえて cmdAttach 側）。
 	backoff := 500 * time.Millisecond
 	for {
 		if ctx.Err() != nil {
@@ -214,6 +381,12 @@ func cmdAttach(args []string, stdout, stderr io.Writer) error {
 		select {
 		case <-ctx.Done():
 			return nil
+		case <-wakeCh:
+			// スリープ復帰 / NIC 変化検知＝ネットワーク条件が変わったので backoff
+			// 状態自体をリセット（前回まで dial 失敗続きで 30s まで伸びていても、
+			// 環境変化後の最初の再試行は即時に始めるべき）。
+			backoff = 500 * time.Millisecond
+			continue
 		case <-time.After(backoff):
 		}
 		if backoff < 30*time.Second {

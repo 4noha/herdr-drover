@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -269,6 +270,277 @@ func TestDialWithTimeoutReturnsFastSuccess(t *testing.T) {
 	}
 	if conn != client {
 		t.Fatal("dial が返した conn がそのまま返っていない")
+	}
+}
+
+// closableConn は net.Conn の最小サブセットを満たしつつ Close 呼出を観測できる
+// fake。connHolder.forceClose のテスト用（実 net.Pipe だと defer close ハンド
+// リングと閉じ合わせが煩雑なので shim を用意する）。
+type closableConn struct {
+	closed atomic.Bool
+}
+
+func (c *closableConn) Read([]byte) (int, error)         { return 0, io.EOF }
+func (c *closableConn) Write(p []byte) (int, error)      { return len(p), nil }
+func (c *closableConn) Close() error                     { c.closed.Store(true); return nil }
+func (c *closableConn) LocalAddr() net.Addr              { return nil }
+func (c *closableConn) RemoteAddr() net.Addr             { return nil }
+func (c *closableConn) SetDeadline(time.Time) error      { return nil }
+func (c *closableConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *closableConn) SetWriteDeadline(time.Time) error { return nil }
+
+// TestConnHolderForceCloseClosesCurrentConn は forceClose が現接続を Close し、
+// 参照を nil に落として以後の write が破棄扱い（nil ガード）になることを検証。
+// 旧コード（forceClose 未実装）ではコンパイル自体通らないので、DESIGN 鉄則の
+// 「修正前に旧コードでテストが落ちる」は build-time で担保される。
+func TestConnHolderForceCloseClosesCurrentConn(t *testing.T) {
+	c := &closableConn{}
+	h := &connHolder{}
+	h.set(c)
+
+	h.forceClose()
+
+	if !c.closed.Load() {
+		t.Fatal("forceClose が現 conn を Close していない")
+	}
+	// 参照 nil 化: 以後の write は nil ガードで no-op を返すべき
+	if err := h.write([]byte("dropped")); err != nil {
+		t.Fatalf("forceClose 後の write が nil error で返らなかった: %v", err)
+	}
+}
+
+// TestConnHolderForceCloseNilSafe は c==nil（未接続中＝backoff sleep 中）の
+// forceClose 呼出が panic せず no-op なことを確認する。
+func TestConnHolderForceCloseNilSafe(t *testing.T) {
+	h := &connHolder{}
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("nil conn への forceClose で panic: %v", r)
+		}
+	}()
+	h.forceClose()
+}
+
+// TestWatchLifecycleFiresOnClockJump は wall clock が >15s ジャンプした（=
+// スリープ復帰した）時に forceClose と wakeCh 送信が発火することを検証する。
+// fake now/tickCh を注入し実 sleep なしで数十 ms で判定する。baselineReady で
+// goroutine start と nowVal.Store の race を排除（敵対的レビュー指摘への対処）。
+// 旧コード（watchLifecycle 未実装）ではコンパイルが通らない＝build-time で回帰確認。
+func TestWatchLifecycleFiresOnClockJump(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	conn := &closableConn{}
+	h := &connHolder{}
+	h.set(conn)
+	wake := make(chan struct{}, 1)
+	tick := make(chan time.Time, 1)
+	ready := make(chan struct{})
+
+	base := time.Unix(1_700_000_000, 0)
+	var nowVal atomic.Int64
+	nowVal.Store(base.UnixNano())
+	nowFn := func() time.Time { return time.Unix(0, nowVal.Load()) }
+	fpFn := func() string { return "192.168.1.10/24" }
+
+	done := make(chan struct{})
+	go func() {
+		watchLifecycle(ctx, h, wake, nowFn, fpFn, tick, nil, ready)
+		close(done)
+	}()
+
+	<-ready // baseline 取得完了を待つ＝この後の nowVal.Store は必ず baseline より後
+
+	// tick 1 (baseline 後の最初): 変化なし → 発火しない
+	tick <- base.Add(3 * time.Second)
+	if drained := drainOne(wake, 50*time.Millisecond); drained {
+		t.Fatal("変化ないのに wakeCh が発火した")
+	}
+	if conn.closed.Load() {
+		t.Fatal("変化ないのに forceClose された")
+	}
+
+	// tick 2: 壁時計を 20s 進めた（=スリープ復帰） → 発火するはず
+	nowVal.Store(base.Add(23 * time.Second).UnixNano())
+	tick <- base.Add(23 * time.Second)
+
+	if !drainOne(wake, 500*time.Millisecond) {
+		t.Fatal("clock jump 検知で wakeCh に送信されなかった")
+	}
+	if !conn.closed.Load() {
+		t.Fatal("clock jump 検知で forceClose されなかった")
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("watchLifecycle が ctx cancel 後も終了しなかった")
+	}
+}
+
+// TestWatchLifecycleFiresOnNICChange は NIC fingerprint が変わった時に発火する
+// ことを検証する。壁時計は動かさない。
+func TestWatchLifecycleFiresOnNICChange(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	conn := &closableConn{}
+	h := &connHolder{}
+	h.set(conn)
+	wake := make(chan struct{}, 1)
+	tick := make(chan time.Time, 1)
+	ready := make(chan struct{})
+
+	base := time.Unix(1_700_000_000, 0)
+	nowFn := func() time.Time { return base }
+	var fp atomic.Value
+	fp.Store("10.0.0.5/24")
+	fpFn := func() string { return fp.Load().(string) }
+
+	done := make(chan struct{})
+	go func() {
+		watchLifecycle(ctx, h, wake, nowFn, fpFn, tick, nil, ready)
+		close(done)
+	}()
+	<-ready
+
+	// tick 1: 変化なし
+	tick <- base
+	if drainOne(wake, 50*time.Millisecond) {
+		t.Fatal("変化ないのに発火した")
+	}
+
+	// NIC 変化を注入 → tick 2 で検知
+	fp.Store("10.0.0.99/24,192.168.5.42/24")
+	tick <- base
+	if !drainOne(wake, 500*time.Millisecond) {
+		t.Fatal("NIC 変化検知で wakeCh に送信されなかった")
+	}
+	if !conn.closed.Load() {
+		t.Fatal("NIC 変化検知で forceClose されなかった")
+	}
+
+	cancel()
+	<-done
+}
+
+// TestWatchLifecycleCooldownSuppressesDoubleFire は cooldown 期間中の追加変化が
+// 発火を再誘発しないことを検証する（Wi-Fi 切替の「旧→空→新」2 段遷移、
+// wall clock jump 直後の NIC associate 連鎖の抑制）。
+func TestWatchLifecycleCooldownSuppressesDoubleFire(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	conn := &closableConn{}
+	h := &connHolder{}
+	h.set(conn)
+	wake := make(chan struct{}, 2) // 誤発火を捕らえられるよう capacity 2
+	tick := make(chan time.Time, 1)
+	ready := make(chan struct{})
+
+	base := time.Unix(1_700_000_000, 0)
+	var nowVal atomic.Int64
+	nowVal.Store(base.UnixNano())
+	nowFn := func() time.Time { return time.Unix(0, nowVal.Load()) }
+	var fp atomic.Value
+	fp.Store("a")
+	fpFn := func() string { return fp.Load().(string) }
+
+	done := make(chan struct{})
+	go func() {
+		watchLifecycle(ctx, h, wake, nowFn, fpFn, tick, nil, ready)
+		close(done)
+	}()
+	<-ready
+
+	// baseline は既に確立済（ready で同期完了）。tick 1 は変化なし
+	tick <- base
+	if drainOne(wake, 50*time.Millisecond) {
+		t.Fatal("baseline tick で発火してしまった")
+	}
+
+	// 1 回目の NIC 変化 → 発火
+	fp.Store("b")
+	nowVal.Store(base.Add(3 * time.Second).UnixNano())
+	tick <- base.Add(3 * time.Second)
+	if !drainOne(wake, 500*time.Millisecond) {
+		t.Fatal("1 回目の変化で発火しなかった")
+	}
+
+	// cooldown 内（10s 後）の追加変化 → 発火しない
+	fp.Store("c")
+	nowVal.Store(base.Add(13 * time.Second).UnixNano())
+	tick <- base.Add(13 * time.Second)
+	if drainOne(wake, 100*time.Millisecond) {
+		t.Fatal("cooldown 中の変化で再発火した（2 段遷移抑制の失敗）")
+	}
+
+	// cooldown 経過後（40s 後）に更に変化 → 発火
+	fp.Store("d")
+	nowVal.Store(base.Add(40 * time.Second).UnixNano())
+	tick <- base.Add(40 * time.Second)
+	if !drainOne(wake, 500*time.Millisecond) {
+		t.Fatal("cooldown 経過後の変化で発火しなかった")
+	}
+
+	cancel()
+	<-done
+}
+
+// TestWatchLifecycleAbsorbsTransientEmptyFingerprint は fp が中間 tick で ""
+// を返した後に真の NIC 変化があった場合、それを吸収せず検知することを確認する
+// （敵対的レビュー指摘: "a" → "" → "b" が silent に消える回帰への回帰テスト）。
+func TestWatchLifecycleAbsorbsTransientEmptyFingerprint(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	conn := &closableConn{}
+	h := &connHolder{}
+	h.set(conn)
+	wake := make(chan struct{}, 1)
+	tick := make(chan time.Time, 1)
+	ready := make(chan struct{})
+
+	base := time.Unix(1_700_000_000, 0)
+	nowFn := func() time.Time { return base }
+	var fp atomic.Value
+	fp.Store("192.168.1.5/24")
+	fpFn := func() string { return fp.Load().(string) }
+
+	done := make(chan struct{})
+	go func() {
+		watchLifecycle(ctx, h, wake, nowFn, fpFn, tick, nil, ready)
+		close(done)
+	}()
+	<-ready
+
+	// tick 1: 中間で fp が空を返す（net.InterfaceAddrs 一時失敗）
+	fp.Store("")
+	tick <- base
+	if drainOne(wake, 50*time.Millisecond) {
+		t.Fatal("transient 空で誤発火した")
+	}
+
+	// tick 2: 真の NIC 変化（Wi-Fi 切替） → 発火するはず
+	fp.Store("192.168.2.10/24")
+	tick <- base
+	if !drainOne(wake, 500*time.Millisecond) {
+		t.Fatal("transient 空の後の実 NIC 変化が silent に吸収された（regression）")
+	}
+
+	cancel()
+	<-done
+}
+
+// drainOne は wake チャネルから 1 個取り出せたら true。timeout 内に何も来なければ false。
+// テスト用のポーリング helper。
+func drainOne(ch <-chan struct{}, timeout time.Duration) bool {
+	select {
+	case <-ch:
+		return true
+	case <-time.After(timeout):
+		return false
 	}
 }
 
