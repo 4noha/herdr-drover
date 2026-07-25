@@ -68,6 +68,15 @@ claude 本体を更新しても **exec 済みプロセスは旧 inode のまま*
   テストで source を変えると偽陰性になる。
 - ⚠`TabInfo.number` は**位置ではない**（実測: w1 は tab 3 枚で number=5/21/23）。
   tab 位置は `tab.list` の並び順が権威＝`number-1` を index に使うと壊れる。
+- ⚠**実インシデント（v0.5.15 で発生・v0.5.16 で修正）**: herdr の `agent_session`
+  が指す uuid は復元可能な会話を保証しない。初回の実機一括再起動で claude-3
+  （obsidian-vault・uuid 48378c2d…）の jsonl が `~/.claude/projects` に存在せず、
+  `claude --resume` が即 exit → **単独 pane の Tab がプロセス終了で丸ごと自動
+  close** され pane が消えた。v0.5.16 で「差し替え後 4s 生存確認→落ちたら resume
+  無しで作り直す」二段構えを追加（回帰テスト
+  `TestRestartClaudeFallsBackWhenResumeDies`＝旧コードで `pane_not_found` FAIL
+  を確認済み）。**単独 pane Tab は中のプロセスが死ぬと Tab ごと消える**は
+  restart 以外にも効く herdr の一般則。
 
 ---
 

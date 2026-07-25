@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/4noha/herdr-drover/internal/herdrapi"
 )
@@ -203,6 +204,126 @@ func writeStubClaude(t *testing.T) string {
 		t.Fatalf("stub 作成: %v", err)
 	}
 	return stub
+}
+
+// writeResumeRejectingStub は「--resume を渡されたら即 exit 1」する stub を作る
+// ＝会話 jsonl が消えている claude の実挙動（"No conversation found"）の再現。
+func writeResumeRejectingStub(t *testing.T) string {
+	t.Helper()
+	stub := filepath.Join(t.TempDir(), "claude-stub")
+	script := "#!/bin/sh\n" +
+		"for a in \"$@\"; do\n" +
+		"  if [ \"$a\" = \"--resume\" ]; then echo 'No conversation found' >&2; exit 1; fi\n" +
+		"done\n" +
+		"exec sleep 300\n"
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatalf("stub 作成: %v", err)
+	}
+	return stub
+}
+
+// 復元できない会話 uuid（jsonl 消失）を渡しても **pane を消したまま終わらせない**。
+//
+// 実インシデント 2026-07-25: herdr の agent_session が指す uuid に対応する
+// ~/.claude/projects/**/<uuid>.jsonl が存在せず、`claude --resume <uuid>` が即
+// exit → 単独 pane の Tab がプロセス終了で丸ごと自動 close され、セッションが
+// 画面から消えた。resume 無しで作り直すフォールバックが無い旧コードで FAIL する。
+func TestRestartClaudeFallsBackWhenResumeDies(t *testing.T) {
+	sock := startHerdrForTest(t)
+	api := herdrapi.New(sock)
+	stub := writeResumeRejectingStub(t)
+	dir := t.TempDir()
+
+	wsID, err := currentWorkspaceID(api)
+	if err != nil {
+		t.Fatalf("currentWorkspaceID: %v", err)
+	}
+	if _, err := applyClaudeTab(api, wsID, "before", []string{stub}, dir); err != nil {
+		t.Fatalf("before tab: %v", err)
+	}
+	target, err := applyClaudeTab(api, wsID, "doomed", []string{stub}, dir)
+	if err != nil {
+		t.Fatalf("target tab: %v", err)
+	}
+	if _, err := applyClaudeTab(api, wsID, "after", []string{stub}, dir); err != nil {
+		t.Fatalf("after tab: %v", err)
+	}
+	if _, err := renameClaudePaneTo(api, target, "claude"); err != nil {
+		t.Fatalf("agent.rename: %v", err)
+	}
+	const deadUUID = "48378c2d-4ac5-43f4-b667-08a9bbc3049a"
+	if err := api.ReportAgentSession(target, "herdr:claude", "claude", deadUUID); err != nil {
+		t.Fatalf("report_agent_session: %v", err)
+	}
+
+	before, err := api.PaneGet(target)
+	if err != nil {
+		t.Fatalf("pane.get: %v", err)
+	}
+	tabs, err := listTabs(api)
+	if err != nil {
+		t.Fatalf("tab.list: %v", err)
+	}
+	wantIdx, ok := tabIndexInWorkspace(tabs, before.WorkspaceID, before.TabID)
+	if !ok {
+		t.Fatalf("対象 tab %s が tab.list に無い", before.TabID)
+	}
+
+	var log bytes.Buffer
+	results, err := restartClaudePanes(api, target, false, false, &log)
+	if err != nil {
+		t.Fatalf("restartClaudePanes: %v（log=%s）", err, log.String())
+	}
+	if len(results) != 1 || results[0].Status != "done" {
+		t.Fatalf("results = %+v（フォールバックで done のはず。log=%s）", results, log.String())
+	}
+
+	// **本質**: pane が消えていないこと（旧コードはここで消えた）。
+	ag, found := paneOfAgent(t, api, "claude")
+	if !found {
+		t.Fatalf("pane が失われた（resume 即死時のフォールバックが効いていない）。log=%s", log.String())
+	}
+	// 実装ヘルパーに依存せず生存を見る（この回帰テストが**挙動**で落ちるように）。
+	for i := 0; i < 6; i++ {
+		if _, err := api.PaneGet(ag.PaneID); err != nil {
+			t.Fatalf("フォールバック後の pane %s も生き残っていない: %v", ag.PaneID, err)
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+
+	// resume 無しの元 argv で起動していること。
+	root, err := exportTabLayout(api, ag.TabID)
+	if err != nil {
+		t.Fatalf("layout.export: %v", err)
+	}
+	leaves := root.leaves()
+	if len(leaves) != 1 {
+		t.Fatalf("新 tab の pane 数 = %d", len(leaves))
+	}
+	if got := strings.Join(leaves[0].Command, " "); got != stub {
+		t.Fatalf("フォールバック argv = %q, want %q（resume が残っている）", got, stub)
+	}
+
+	// 位置と label も復元されていること。
+	tabs, err = listTabs(api)
+	if err != nil {
+		t.Fatalf("tab.list(2): %v", err)
+	}
+	gotIdx, ok := tabIndexInWorkspace(tabs, ag.WorkspaceID, ag.TabID)
+	if !ok {
+		t.Fatalf("新 tab %s が tab.list に無い", ag.TabID)
+	}
+	if gotIdx != wantIdx {
+		t.Fatalf("tab 位置 = %d, want %d", gotIdx, wantIdx)
+	}
+	for _, tb := range tabs {
+		if tb.TabID == ag.TabID && tb.Label != "doomed" {
+			t.Fatalf("tab label = %q（doomed が引き継がれるはず）", tb.Label)
+		}
+	}
+	if !strings.Contains(results[0].Detail, "復元不可") {
+		t.Fatalf("detail が復元不可を報告していない: %q", results[0].Detail)
+	}
 }
 
 // paneOfAgent は agent 名 exact 一致の pane_id を返す。

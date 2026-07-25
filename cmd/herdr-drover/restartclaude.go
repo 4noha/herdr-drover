@@ -38,7 +38,9 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/4noha/herdr-drover/internal/herdrapi"
 )
@@ -125,20 +127,13 @@ func selectRestartTargets(agents []herdrapi.AgentInfo, panes []herdrapi.PaneInfo
 		"（agent 名が claude/claude-N でない・↗窓 注入 pane・既に消滅、のいずれか）", sid)
 }
 
-// rebuildResumeArgv は pane の実 argv から既存の resume 指定を取り除き、uuid が
-// あれば `--resume <uuid>` を付け直した新 argv を返す純関数。
-//
-// argv[0]（実バイナリ絶対パス）と resume 以外のフラグはそのまま保つ＝PATH 解決も
-// フラグ推測もしない。uuid=="" は「herdr がまだ会話 uuid を検出していない」＝
-// argv を**一切いじらない**（既存の --resume を落とすと会話を失う）。
-func rebuildResumeArgv(argv []string, uuid string) []string {
+// stripResumeArgv は argv から resume 指定だけを取り除く純関数
+// （argv[0] と resume 以外のフラグは順序ごとそのまま）。
+func stripResumeArgv(argv []string) []string {
 	if len(argv) == 0 {
 		return nil
 	}
-	if uuid == "" {
-		return append([]string(nil), argv...)
-	}
-	out := make([]string, 0, len(argv)+2)
+	out := make([]string, 0, len(argv))
 	out = append(out, argv[0])
 	for i := 1; i < len(argv); i++ {
 		a := argv[i]
@@ -157,7 +152,23 @@ func rebuildResumeArgv(argv []string, uuid string) []string {
 		}
 		out = append(out, a)
 	}
-	return append(out, "--resume", uuid)
+	return out
+}
+
+// rebuildResumeArgv は pane の実 argv から既存の resume 指定を取り除き、uuid が
+// あれば `--resume <uuid>` を付け直した新 argv を返す純関数。
+//
+// argv[0]（実バイナリ絶対パス）と resume 以外のフラグはそのまま保つ＝PATH 解決も
+// フラグ推測もしない。uuid=="" は「herdr がまだ会話 uuid を検出していない」＝
+// argv を**一切いじらない**（既存の --resume を落とすと会話を失う）。
+func rebuildResumeArgv(argv []string, uuid string) []string {
+	if len(argv) == 0 {
+		return nil
+	}
+	if uuid == "" {
+		return append([]string(nil), argv...)
+	}
+	return append(stripResumeArgv(argv), "--resume", uuid)
 }
 
 // layoutNode は layout.export / layout.apply の LayoutNode（実採取の tagged union:
@@ -255,6 +266,43 @@ func tabIndexInWorkspace(tabs []herdrapi.TabInfo, wsID, tabID string) (int, bool
 	return 0, false
 }
 
+// 差し替え後の生存確認パラメータ。**この猶予が本機能の安全弁**:
+// herdr の agent_session が指す uuid は「復元可能な会話」を保証しない
+// （実測 2026-07-25: 対応する ~/.claude/projects/**/<uuid>.jsonl が存在しない
+// pane があった）。`claude --resume <無い uuid>` は即 exit し、単独 pane の Tab は
+// プロセス終了で **Tab ごと自動 close** される＝pane を消したまま終わる実害が出た。
+// 差し替え直後にここで検知し、resume 無しで作り直して pane を必ず残す。
+const (
+	restartGraceWindow   = 4 * time.Second
+	restartGraceInterval = 250 * time.Millisecond
+)
+
+// paneGone は pane が**確実に消えた**ときだけ true（herdr の exact なエラー
+// コード pane_not_found のみ）。socket 一時障害など他のエラーは「生存」扱いに
+// 倒す＝一過性の失敗で作り直しを誘発して pane を二重に壊さない。
+func paneGone(api *herdrapi.Client, paneID string) bool {
+	_, err := api.PaneGet(paneID)
+	if err == nil {
+		return false
+	}
+	var apiErr *herdrapi.APIError
+	return errors.As(err, &apiErr) && apiErr.Code == "pane_not_found"
+}
+
+// waitPaneSettled は grace の間 pane が生き続けたら true。落ちた瞬間に false。
+func waitPaneSettled(api *herdrapi.Client, paneID string, grace time.Duration) bool {
+	deadline := time.Now().Add(grace)
+	for {
+		if paneGone(api, paneID) {
+			return false
+		}
+		if time.Now().After(deadline) {
+			return true
+		}
+		time.Sleep(restartGraceInterval)
+	}
+}
+
 // moveTabTo は同一 workspace 内で tab を index へ動かす（tab.move は同 WS の
 // reorder 専用＝WS 間移動には使えない）。
 func moveTabTo(api *herdrapi.Client, tabID string, index int) error {
@@ -300,8 +348,32 @@ func renameClaudePaneTo(api *herdrapi.Client, paneID, preferred string) (string,
 	return ag.Name, nil
 }
 
+// settlePlacement は新 pane を元の並び位置へ戻し agent 名を復元する。どちらの
+// 失敗も「pane は生きている」ので再起動自体は台無しにしない＝warn 止まり
+// （silent にはしない）。戻り値は最終的な agent 名（付けられなければ ""）。
+func settlePlacement(api *herdrapi.Client, newPaneID, newTabID, preferredName string,
+	origIdx int, haveIdx bool, out io.Writer) string {
+	if haveIdx && newTabID != "" {
+		if err := moveTabTo(api, newTabID, origIdx); err != nil {
+			fmt.Fprintf(out, "restart-claude: warn: tab 位置復元 失敗 tab=%s idx=%d: %v\n",
+				newTabID, origIdx, err)
+		}
+	}
+	name, err := renameClaudePaneTo(api, newPaneID, preferredName)
+	if err != nil {
+		fmt.Fprintf(out, "restart-claude: warn: agent 名 %q を戻せなかった pane=%s: %v\n",
+			preferredName, newPaneID, err)
+		return ""
+	}
+	return name
+}
+
 // restartOneClaudePane は 1 枚を差し替える。戻り値は (status, detail)＝呼び側が
 // そのまま監査へ流す（error を返さないのは「1 枚の失敗で残りを止めない」ため）。
+//
+// 二段構え: まず会話を引き継ぐ argv で差し替え、**起動直後に落ちたら**（＝その
+// 会話が復元できない）resume 無しで作り直す。pane を消したまま終わらせないことを
+// 最優先の不変条件にする。
 func restartOneClaudePane(api *herdrapi.Client, t restartTarget, force bool, out io.Writer) (string, string) {
 	// working は既定でスキップ＝実行中タスクを道連れにしない。
 	if !force && t.AgentStatus == "working" {
@@ -328,42 +400,65 @@ func restartOneClaudePane(api *herdrapi.Client, t restartTarget, force bool, out
 	if cwd == "" {
 		cwd = t.Cwd
 	}
-	newArgv := rebuildResumeArgv(leaf.Command, t.ResumeUUID)
 
-	// 位置復元用に差し替え**前**の index を採る（layout.apply 後は旧 tab が消える）。
+	// 位置・label は差し替え**前**に採る（layout.apply 後は旧 tab が消える）。
 	tabs, err := listTabs(api)
 	if err != nil {
 		return "error", err.Error()
 	}
 	origIdx, haveIdx := tabIndexInWorkspace(tabs, t.WorkspaceID, t.TabID)
+	if !haveIdx {
+		fmt.Fprintf(out, "restart-claude: warn: 旧 tab %s が tab.list に無く位置復元を skip\n", t.TabID)
+	}
+	tabLabel := ""
+	for _, tb := range tabs {
+		if tb.TabID == t.TabID {
+			tabLabel = tb.Label
+			break
+		}
+	}
 
+	// 第 1 段: 会話を引き継ぐ argv で同 Tab を差し替え。
+	newArgv := rebuildResumeArgv(leaf.Command, t.ResumeUUID)
 	newPaneID, newTabID, err := replaceTabWithCommand(api, t.TabID, cwd, newArgv)
 	if err != nil {
 		return "error", err.Error()
 	}
-
-	// layout.apply は新 tab を末尾に作る＝元の並び位置へ戻す。失敗しても
-	// 再起動自体は成功しているので warn に留める（silent にはしない）。
-	if haveIdx {
-		if err := moveTabTo(api, newTabID, origIdx); err != nil {
-			fmt.Fprintf(out, "restart-claude: warn: tab 位置復元 失敗 tab=%s idx=%d: %v\n",
-				newTabID, origIdx, err)
+	name := settlePlacement(api, newPaneID, newTabID, t.AgentName, origIdx, haveIdx, out)
+	if waitPaneSettled(api, newPaneID, restartGraceWindow) {
+		resume := "なし（会話 uuid 未検出＝argv そのまま）"
+		if t.ResumeUUID != "" {
+			resume = "--resume " + t.ResumeUUID
 		}
-	} else {
-		fmt.Fprintf(out, "restart-claude: warn: 旧 tab %s が tab.list に無く位置復元を skip\n", t.TabID)
+		return "done", fmt.Sprintf("pane %s→%s name=%s %s", t.PaneID, newPaneID, name, resume)
 	}
 
-	name, err := renameClaudePaneTo(api, newPaneID, t.AgentName)
+	// 第 2 段: 起動直後に落ちた＝その会話は復元できない（herdr の agent_session が
+	// 指す uuid の jsonl が消えている等。実測 2026-07-25）。単独 pane の Tab は
+	// プロセス終了で Tab ごと閉じているので、resume 無しの元 argv で**新しい Tab**
+	// を作り直して pane を必ず残す。
+	fmt.Fprintf(out, "restart-claude: warn: %s は --resume %s で即終了（この会話は復元できない）"+
+		"＝resume 無しで作り直します\n", t.AgentName, t.ResumeUUID)
+	if tabLabel == "" {
+		tabLabel = filepath.Base(cwd)
+	}
+	fbArgv := stripResumeArgv(leaf.Command)
+	fbPaneID, err := applyClaudeTab(api, t.WorkspaceID, tabLabel, fbArgv, cwd)
 	if err != nil {
-		// pane は生きている（＝黙って孤児にしない）。名前だけ付かなかったことを返す。
-		return "error", fmt.Sprintf("再起動は成功したが agent 名を戻せなかった pane=%s: %v", newPaneID, err)
+		return "error", fmt.Sprintf("--resume %s で即終了し、resume 無しの作り直しにも失敗"+
+			"（pane が失われた）: %v", t.ResumeUUID, err)
 	}
-
-	resume := "なし（会話 uuid 未検出＝argv そのまま）"
-	if t.ResumeUUID != "" {
-		resume = "--resume " + t.ResumeUUID
+	fbTabID := ""
+	if p, gerr := api.PaneGet(fbPaneID); gerr == nil {
+		fbTabID = p.TabID
 	}
-	return "done", fmt.Sprintf("pane %s→%s name=%s %s", t.PaneID, newPaneID, name, resume)
+	name = settlePlacement(api, fbPaneID, fbTabID, t.AgentName, origIdx, haveIdx, out)
+	if !waitPaneSettled(api, fbPaneID, restartGraceWindow) {
+		return "error", fmt.Sprintf("resume 無しでも起動直後に終了した pane=%s argv=%v"+
+			"（claude 側の問題＝手動確認が要る）", fbPaneID, fbArgv)
+	}
+	return "done", fmt.Sprintf("pane %s→%s name=%s resume 復元不可のため新規会話で起動"+
+		"（会話 %s は jsonl 不在）", t.PaneID, fbPaneID, name, t.ResumeUUID)
 }
 
 // restartClaudePanes は対象を選んで順に差し替える。CLI と遠隔命令の**共通の芯**
