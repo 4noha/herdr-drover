@@ -97,6 +97,11 @@ claude 本体を更新しても **exec 済みプロセスは旧 inode のまま*
   `TestRestartClaudeFallsBackWhenResumeDies`＝旧コードで `pane_not_found` FAIL
   を確認済み）。**単独 pane Tab は中のプロセスが死ぬと Tab ごと消える**は
   restart 以外にも効く herdr の一般則。
+  - **真因（v0.5.17 の実運用で再確認）**: claude は**最初のメッセージを送るまで
+    jsonl を書かない**＝起動しただけの未使用セッションは「uuid はあるが jsonl は
+    無い」状態になる。稀な破損ではなく**通常状態**なのでフォールバックは必須。
+    2026-07-25 の update-claude 実行でも claude-3（作り直し直後で未使用）が
+    この経路に入り、v0.5.16 のフォールバックが実際に pane を救った。
 
 ---
 

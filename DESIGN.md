@@ -116,9 +116,10 @@ pane を作り直して新版を掴ませる。
   は既定 skip（CLI `--force` で強制）／`layout.apply{tab_id}` は tab の全 pane を
   作り直すため、同居 pane のある Tab は巻き添え回避で skip。
 - **二段構え（不変条件: pane を消したまま終わらせない）**: herdr の
-  `agent_session` が指す uuid は「復元可能な会話」を**保証しない**（実測
-  2026-07-25: 対応する `~/.claude/projects/**/<uuid>.jsonl` が存在しない pane が
-  あった）。`claude --resume <無い uuid>` は即 exit し、**単独 pane の Tab は
+  `agent_session` が指す uuid は「復元可能な会話」を**保証しない**。claude は
+  **最初のメッセージを送るまで jsonl を書かない**ので、起動しただけで未使用の
+  セッションは「uuid はあるが `~/.claude/projects/**/<uuid>.jsonl` は無い」状態に
+  なる（実測 2026-07-25・2 回発生）＝稀な破損ではなく**未使用セッションの通常状態**。`claude --resume <無い uuid>` は即 exit し、**単独 pane の Tab は
   プロセス終了で Tab ごと自動 close される**＝pane が画面から消える実害が出た。
   差し替え後 `restartGraceWindow`(4s) 生存を見て、落ちたら `--resume` を外した
   元 argv で新しい Tab を作り直し、位置・label・agent 名を復元する。生存判定は
