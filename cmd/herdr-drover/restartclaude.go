@@ -48,7 +48,21 @@ import (
 // injectTokenKeys は ↗窓 注入 pane に reconcile が付ける metadata token。
 // 1 つでも付いていれば注入 pane＝再起動対象から外す（実測 2026-07-25: 注入 11 枚は
 // 全て両方を持ち、ローカル claude 4 枚は tokens 空）。
-var injectTokenKeys = []string{"drover_inj_pc", "drover_inj_sid"}
+//
+// ⚠キーは **herdrapi の定数を参照する**（v0.5.22）。以前はここで literal を
+// 二重定義しており、キーを変えると片側が取り残される状態だった。
+var injectTokenKeys = []string{herdrapi.InjTokenPC, herdrapi.InjTokenSID}
+
+// hasInjectToken は identity token の有無で ↗窓 注入 pane を判定する純関数
+// （pane.list / agent.list どちらの tokens でも使える共通判定）。
+func hasInjectToken(tokens map[string]string) bool {
+	for _, k := range injectTokenKeys {
+		if _, ok := tokens[k]; ok {
+			return true
+		}
+	}
+	return false
+}
 
 // restartTarget は再起動対象 1 件（exact-match で選ばれたローカル claude pane）。
 type restartTarget struct {
@@ -79,48 +93,40 @@ type restartOutcome struct {
 	Detail string
 }
 
-func isInjectedPane(p *herdrapi.PaneInfo) bool {
-	for _, k := range injectTokenKeys {
-		if _, ok := p.Tokens[k]; ok {
-			return true
-		}
-	}
-	return false
-}
+func isInjectedPane(p *herdrapi.PaneInfo) bool { return hasInjectToken(p.Tokens) }
+
+// isInjectedAgent は agent.list 由来の判定（AgentInfo も tokens を持つ＝実測）。
+func isInjectedAgent(a herdrapi.AgentInfo) bool { return hasInjectToken(a.Tokens) }
 
 // selectRestartTargets は再起動対象を exact-match で選ぶ純関数。
 // sid=="" は「その PC のローカル claude pane 全部」、sid 指定はその 1 枚だけ。
 // 対象外の sid は **loud に error**（黙って 0 件にすると「押したのに何も起きない」
 // が成功に見える＝silent 変更禁止の鉄則⑤）。
-func selectRestartTargets(agents []herdrapi.AgentInfo, panes []herdrapi.PaneInfo, sid string) ([]restartTarget, error) {
-	byPane := make(map[string]*herdrapi.PaneInfo, len(panes))
-	for i := range panes {
-		byPane[panes[i].PaneID] = &panes[i]
-	}
+// **agent.list 単独で判定する**（v0.5.22）。以前は pane.list と join して
+// tokens/agent_session/tab_id を得ていたが、herdr の AgentInfo は PaneInfo と
+// ほぼ同一スキーマでこれらを全て持つ（実測 2026-07-25: 全 15 pane・全照合
+// フィールドで両者の値が完全一致、pane_id 集合も一致）。join は冗長なうえ、
+// herdr の ndjson は **1 接続=1 リクエスト**なので 2 回の往復の間に構成が
+// 変わりうる＝**join 自体が競合の窓**だった。1 リクエストに閉じて解消する。
+func selectRestartTargets(agents []herdrapi.AgentInfo, sid string) ([]restartTarget, error) {
 	var out []restartTarget
 	for _, a := range agents {
 		if !isClaudeAgentName(a.Name) {
 			continue
 		}
-		p := byPane[a.PaneID]
-		if p == nil {
-			// agent.list と pane.list の間で消えた pane（1 接続=1 リクエストの
-			// 非原子性）。次回の呼び出しで拾える＝ここでは静かに落とす。
-			continue
-		}
-		if isInjectedPane(p) {
+		if isInjectedAgent(a) {
 			continue
 		}
 		t := restartTarget{
 			PaneID:      a.PaneID,
-			TabID:       p.TabID,
-			WorkspaceID: p.WorkspaceID,
+			TabID:       a.TabID,
+			WorkspaceID: a.WorkspaceID,
 			AgentName:   a.Name,
-			AgentStatus: p.AgentStatus,
-			Cwd:         p.Cwd,
+			AgentStatus: a.AgentStatus,
+			Cwd:         a.Cwd,
 		}
-		if p.AgentSession.Kind == "id" {
-			t.ResumeUUID = p.AgentSession.Value
+		if a.AgentSession.Kind == "id" {
+			t.ResumeUUID = a.AgentSession.Value
 		}
 		out = append(out, t)
 	}
@@ -516,11 +522,7 @@ func restartClaudePanes(api *herdrapi.Client, opt restartOptions, out io.Writer)
 	if err != nil {
 		return nil, fmt.Errorf("agent.list: %w", err)
 	}
-	panes, err := api.PaneList()
-	if err != nil {
-		return nil, fmt.Errorf("pane.list: %w", err)
-	}
-	targets, err := selectRestartTargets(agents, panes, opt.SID)
+	targets, err := selectRestartTargets(agents, opt.SID)
 	if err != nil {
 		return nil, err
 	}

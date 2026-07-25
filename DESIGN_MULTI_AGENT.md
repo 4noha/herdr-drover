@@ -143,14 +143,27 @@ agent=<リモートの window_name>, state)` を打つと、herdr 側で
 | 同定 | 2 系統 OR（シム命名 / `p.Agent == "claude"`）＋矛盾判定。**注入 pane 除外は実装済み**（v0.5.20 で修正） |
 | wsmap キー | cwd のみ。agent 次元が無い |
 
-#### B6. 型の欠落（**一般化の根本ボトルネック**）
+#### B6. 型の欠落（**一般化の根本ボトルネック**）→ **v0.5.22 で解消済み**
 
-`internal/herdrapi` の `PaneInfo` に **`agent` フィールドが無い**。`AgentInfo` に
-`agent` / `agent_session` / `tokens` が無い。このため:
+~~`internal/herdrapi` の `PaneInfo` に `agent` が無い。`AgentInfo` に
+`agent`/`agent_session`/`tokens` が無い~~ → **P0 として実装済み**:
 
-- organize は同じ JSON を独自の `orgPane` 型で**二重 decode**している
-- agent.list 起点の処理は注入 pane を除外するのに pane.list との join が要る
-- **これが無い限り、他の全部が命名規約に依存し続ける**
+- `PaneInfo.Agent` / `AgentInfo.{Agent,Title,Tokens,AgentSession}` を追加
+- organize の `orgPane` 二重 decode を廃止し `herdrapi.PaneInfo` に一本化
+- `selectRestartTargets` の pane.list join を廃止（agent.list 単独へ）。
+  **join は冗長なだけでなく競合の窓だった** — herdr の ndjson は
+  1 接続=1 リクエストなので 2 往復の間に構成が変わりうる
+- 注入 token キーの literal 二重定義を `herdrapi.InjTokenPC/SID` 参照へ統一
+
+実測の裏取り: 全 15 pane で agent.list と pane.list の照合フィールド
+（agent / agent_status / tokens / agent_session / tab_id / workspace_id / cwd /
+terminal_id）が**完全一致**、pane_id 集合も一致、`name`(agent.list) ==
+`label`(pane.list)。回帰テスト `TestAgentListCarriesTokensAndSession` が
+実 herdr で tokens/agent_session の実在を担保する（JSON タグを壊すと FAIL する
+ことを確認済み＝「型だけ足して実は空」を検出できる）。
+
+⚠ 以後 **新しいフィールドが要るときは herdrapi に足す**こと。ローカル型を
+再び生やすと同じ二重管理に戻る。
 
 #### B7. クラウド同期スキーマ
 
@@ -387,7 +400,7 @@ Firestore→Web まで中間層の改修ゼロ**で届く。影響は「初回 1
 
 | 段 | 内容 | 理由 |
 |---|---|---|
-| **P0** | herdrapi 型に `agent`/`agent_session`/`tokens` を追加、organize の二重 decode を廃止 | **これ無しでは他の全部が命名規約に依存し続ける** |
+| ~~P0~~ | ~~herdrapi 型に `agent`/`agent_session`/`tokens` を追加、organize の二重 decode を廃止~~ **完了（v0.5.22）** | これ無しでは他の全部が命名規約に依存し続ける |
 | P1 | `ResolveAgentKind` の一元化（3 系統を統合） | identity の単一地点化 |
 | P2 | producer に `agent` を載せる（空なら載せない） | Web 出し分け・per-agent 命令の入力 |
 | P3 | Cloud Run に新命令名を allowlist 追加（旧名残置）して**先行**デプロイ | 順序を誤ると命令が全滅 |
@@ -407,8 +420,9 @@ Firestore→Web まで中間層の改修ゼロ**で届く。影響は「初回 1
 2. **注入 pane の除外は 3 系統に散在している**（producer / restartclaude /
    organize）。追加も削除も忘れると「↗窓 を再起動する」「偽 cwd をルール化する」等の
    実害が出る。**新しい pane 列挙経路を足すときは必ず除外を入れる**。
-   ⚠ `restartclaude.go` は token キーを `herdrapi.InjTokenPC/SID` ではなく
-   **literal で二重定義**している（キー変更時に片側が取り残される）。
+   ~~⚠ `restartclaude.go` は token キーを literal で二重定義している~~
+   → v0.5.22 で `herdrapi.InjTokenPC/SID` 参照へ統一済み。判定は
+   `hasInjectToken(tokens)` の 1 関数に集約（pane.list / agent.list 共通）。
 
 3. **注入 pane の `cwd` は偽値**。ルール書込経路（capture / learn）で拾うと
    wsmap が汚染される。
@@ -452,7 +466,7 @@ Firestore→Web まで中間層の改修ゼロ**で届く。影響は「初回 1
 | devices.js の diagPre keys | cm 残骸（pid/start_time/usage_percent/reset_time は常に undefined）、`agent_status` が漏れている |
 | TODO.md の resume backstop | 「未着手・token 方式」と書いているが実装は agent_session 方式で完了済み |
 | README の organize 説明 | 「切り出し」と書いているが現行は Tab ごと引っ越しに格上げ済み |
-| `restartclaude.go` の token キー | literal 二重定義（`herdrapi.InjTokenPC/SID` を参照すべき） |
+
 
 ---
 

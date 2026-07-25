@@ -52,11 +52,7 @@ func claudeBinsFromPanes(api *herdrapi.Client) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("agent.list: %w", err)
 	}
-	panes, err := api.PaneList()
-	if err != nil {
-		return nil, fmt.Errorf("pane.list: %w", err)
-	}
-	targets, err := selectRestartTargets(agents, panes, "")
+	targets, err := selectRestartTargets(agents, "")
 	if err != nil {
 		return nil, err
 	}

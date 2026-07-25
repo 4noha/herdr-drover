@@ -183,7 +183,7 @@ func runMvTabMove(api *herdrapi.Client, srcTabID, dstWSID string, stdout io.Writ
 
 	// 引越し対象の pane を選ぶ（moveWholeTab は「その pane が属する Tab の
 	// 全 pane を wsid の新 Tab へ丸ごと」動かす仕様＝tab の任意の pane で OK）。
-	panes, err := listPanesWithAgent(api)
+	panes, err := api.PaneList()
 	if err != nil {
 		return err
 	}

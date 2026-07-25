@@ -155,24 +155,25 @@ func TestRebuildResumeArgvModel(t *testing.T) {
 }
 
 func TestSelectRestartTargets(t *testing.T) {
+	// agent.list 単独で判定する（v0.5.22）＝tokens/agent_session/tab_id は
+	// AgentInfo が持つ（herdr の実採取で PaneInfo と同値であることを確認済み）。
 	agents := []herdrapi.AgentInfo{
-		{Name: "claude", PaneID: "w1:p1"},
-		{Name: "claude-2", PaneID: "w1:p2"},
-		{Name: "hdprobe", PaneID: "w1:p3"},   // シム encode 形でない＝対象外
-		{Name: "claude-9", PaneID: "w1:p4"},  // ↗窓 注入 pane（token あり）＝対象外
-		{Name: "claude-7", PaneID: "w1:p99"}, // pane.list に不在＝対象外
-	}
-	panes := []herdrapi.PaneInfo{
-		{PaneID: "w1:p1", TabID: "w1:t1", WorkspaceID: "w1", AgentStatus: "idle",
+		{Name: "claude", PaneID: "w1:p1", TabID: "w1:t1", WorkspaceID: "w1", AgentStatus: "idle",
 			AgentSession: herdrapi.AgentSession{Kind: "id", Value: "u-1"}},
-		{PaneID: "w1:p2", TabID: "w1:t2", WorkspaceID: "w1", AgentStatus: "working"},
-		{PaneID: "w1:p3", TabID: "w1:t3", WorkspaceID: "w1"},
-		{PaneID: "w1:p4", TabID: "w1:t4", WorkspaceID: "w1",
-			Tokens: map[string]string{"drover_inj_pc": "other-herdr", "drover_inj_sid": "w1:p5"}},
+		{Name: "claude-2", PaneID: "w1:p2", TabID: "w1:t2", WorkspaceID: "w1", AgentStatus: "working"},
+		// シム encode 形でない＝対象外
+		{Name: "hdprobe", PaneID: "w1:p3", TabID: "w1:t3", WorkspaceID: "w1"},
+		// ↗窓 注入 pane（identity token あり）＝対象外
+		{Name: "claude-9", PaneID: "w1:p4", TabID: "w1:t4", WorkspaceID: "w1",
+			Tokens: map[string]string{herdrapi.InjTokenPC: "other-herdr", herdrapi.InjTokenSID: "w1:p5"}},
+		// token が片方だけでも注入 pane として扱う（部分的にしか読めない場合に
+		// 「ローカル claude」へ倒さない＝安全側）
+		{Name: "claude-8", PaneID: "w1:p5", TabID: "w1:t5", WorkspaceID: "w1",
+			Tokens: map[string]string{herdrapi.InjTokenSID: "w1:p7"}},
 	}
 
 	t.Run("sid 空は全ローカル claude pane", func(t *testing.T) {
-		got, err := selectRestartTargets(agents, panes, "")
+		got, err := selectRestartTargets(agents, "")
 		if err != nil {
 			t.Fatalf("err: %v", err)
 		}
@@ -188,16 +189,16 @@ func TestSelectRestartTargets(t *testing.T) {
 	})
 
 	t.Run("注入 pane は token で構造的に除外", func(t *testing.T) {
-		got, _ := selectRestartTargets(agents, panes, "")
+		got, _ := selectRestartTargets(agents, "")
 		for _, g := range got {
-			if g.PaneID == "w1:p4" {
-				t.Fatalf("↗窓 注入 pane w1:p4 が対象に入った（token 除外が効いていない）: %+v", got)
+			if g.PaneID == "w1:p4" || g.PaneID == "w1:p5" {
+				t.Fatalf("↗窓 注入 pane %s が対象に入った（token 除外が効いていない）: %+v", g.PaneID, got)
 			}
 		}
 	})
 
 	t.Run("sid 指定はその 1 枚だけ", func(t *testing.T) {
-		got, err := selectRestartTargets(agents, panes, "w1:p2")
+		got, err := selectRestartTargets(agents, "w1:p2")
 		if err != nil {
 			t.Fatalf("err: %v", err)
 		}
@@ -207,8 +208,8 @@ func TestSelectRestartTargets(t *testing.T) {
 	})
 
 	t.Run("対象外 sid は loud に error（黙って 0 件にしない）", func(t *testing.T) {
-		for _, sid := range []string{"w1:p3", "w1:p4", "w1:pZZ"} {
-			if _, err := selectRestartTargets(agents, panes, sid); err == nil {
+		for _, sid := range []string{"w1:p3", "w1:p4", "w1:p5", "w1:pZZ"} {
+			if _, err := selectRestartTargets(agents, sid); err == nil {
 				t.Fatalf("sid %q が error にならなかった", sid)
 			}
 		}
@@ -632,5 +633,77 @@ func TestRestartClaudeLeavesInjectedPane(t *testing.T) {
 	// sid 直指定でも撥ねる（Web から誤って押しても壊れない）。
 	if _, err := restartClaudePanes(api, restartOptions{SID: inj, Force: false, DryRun: false}, &log); err == nil {
 		t.Fatalf("注入 pane を sid 指定したのに error にならなかった")
+	}
+}
+
+// **実 herdr で AgentInfo が tokens / agent_session / tab_id を実際に運ぶこと**を
+// 担保する。型に足しただけで herdr が返していなければ、注入 pane の除外が
+// 常に false になって ↗窓 を再起動してしまう（silent な identity 破壊）。
+//
+// 旧コメント「agent.list の AgentInfo に tokens は載らない」を信じて pane.list と
+// join していたが、herdr 0.7.4 では載る（実採取で確認）。その前提が変わったら
+// このテストが落ちる＝join 廃止の安全網。
+func TestAgentListCarriesTokensAndSession(t *testing.T) {
+	sock := startHerdrForTest(t)
+	api := herdrapi.New(sock)
+	stub := writeStubClaude(t)
+	dir := t.TempDir()
+
+	wsID, err := currentWorkspaceID(api)
+	if err != nil {
+		t.Fatalf("currentWorkspaceID: %v", err)
+	}
+	pane, err := applyClaudeTab(api, wsID, "tok", []string{stub}, dir)
+	if err != nil {
+		t.Fatalf("layout.apply: %v", err)
+	}
+	if _, err := renameClaudePaneTo(api, pane, "claude"); err != nil {
+		t.Fatalf("agent.rename: %v", err)
+	}
+	const uuid = "ebdd35b1-f1b6-4e90-8395-c9ff09e00d32"
+	if err := api.ReportAgentSession(pane, "herdr:claude", "claude", uuid); err != nil {
+		t.Fatalf("report_agent_session: %v", err)
+	}
+	if err := api.PaneReportMetadata(pane, "drover", herdrapi.ReportMetadata{
+		Tokens: map[string]string{herdrapi.InjTokenPC: "other-herdr"},
+	}); err != nil {
+		t.Fatalf("report_metadata: %v", err)
+	}
+
+	agents, err := api.AgentList()
+	if err != nil {
+		t.Fatalf("agent.list: %v", err)
+	}
+	var got *herdrapi.AgentInfo
+	for i := range agents {
+		if agents[i].PaneID == pane {
+			got = &agents[i]
+			break
+		}
+	}
+	if got == nil {
+		t.Fatalf("agent.list に pane %s が居ない", pane)
+	}
+	if got.Tokens[herdrapi.InjTokenPC] != "other-herdr" {
+		t.Fatalf("AgentInfo.Tokens が空（herdr が agent.list で tokens を返さない）: %+v", got.Tokens)
+	}
+	if got.AgentSession.Kind != "id" || got.AgentSession.Value != uuid {
+		t.Fatalf("AgentInfo.AgentSession が載っていない: %+v", got.AgentSession)
+	}
+	if got.TabID == "" || got.WorkspaceID == "" || got.Cwd == "" {
+		t.Fatalf("AgentInfo に tab_id/workspace_id/cwd が載っていない: %+v", got)
+	}
+	// pane.list と同値であること（join 廃止の根拠）。
+	p, err := api.PaneGet(pane)
+	if err != nil {
+		t.Fatalf("pane.get: %v", err)
+	}
+	if p.TabID != got.TabID || p.WorkspaceID != got.WorkspaceID ||
+		p.AgentStatus != got.AgentStatus || p.AgentSession != got.AgentSession {
+		t.Fatalf("agent.list と pane.list が食い違う: agent=%+v pane=%+v", got, p)
+	}
+	// この状態なら注入 pane として除外されること。
+	if targets, _ := selectRestartTargets(agents, ""); len(targets) != 0 {
+		t.Fatalf("token 付き pane が対象に入った: %+v", targets)
 	}
 }

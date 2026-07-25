@@ -58,35 +58,13 @@ import (
 	"github.com/4noha/herdr-drover/internal/wsmap"
 )
 
-// ============ wire 型（herdrapi 無改変のローカル decode） ============
-
-// orgPane は pane.list / pane_moved event の pane を decode する。
-// herdrapi.PaneInfo に無い `agent`（herdr の検出種別・null 可）が要るため
-// ローカルに持つ（types.go は本タスクの変更範囲外）。フィールド名は実採取
-// JSON と一致（実測: {"pane_id":"w1:p2",...,"agent":"claude",...}）。
-type orgPane struct {
-	PaneID      string            `json:"pane_id"`
-	TerminalID  string            `json:"terminal_id"`
-	WorkspaceID string            `json:"workspace_id"`
-	TabID       string            `json:"tab_id"`
-	Cwd         string            `json:"cwd"`
-	Agent       string            `json:"agent"`  // 検出種別（"claude" 等。null は ""）
-	Tokens      map[string]string `json:"tokens"` // report_metadata token（inject 判定用・v0.5.5〜）
-}
-
-func listPanesWithAgent(api *herdrapi.Client) ([]orgPane, error) {
-	raw, err := api.Call("pane.list", nil)
-	if err != nil {
-		return nil, fmt.Errorf("pane.list: %w", err)
-	}
-	var out struct {
-		Panes []orgPane `json:"panes"`
-	}
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, fmt.Errorf("pane_list decode: %w", err)
-	}
-	return out.Panes, nil
-}
+// ============ wire 型 ============
+//
+// pane の decode は **herdrapi.PaneInfo に一本化**（v0.5.22）。以前は
+// `agent`（herdr の検出種別）が herdrapi に無かったため organize がローカルの
+// herdrapi.PaneInfo 型で同じ JSON を二重 decode していたが、herdrapi 側に Agent を足して
+// 解消した。新しいフィールドが要るときは **herdrapi.PaneInfo に足す**こと
+// （ローカル型を再び生やすと同じ二重管理に戻る）。
 
 // listTabs は tab.list（実採取: {"type":"tab_list","tabs":[TabInfo...]}）。
 func listTabs(api *herdrapi.Client) ([]herdrapi.TabInfo, error) {
@@ -122,7 +100,7 @@ type paneMoveResult struct {
 	Changed        bool              `json:"changed"`
 	PreviousPaneID string            `json:"previous_pane_id"`
 	PreviousTabID  string            `json:"previous_tab_id"`
-	Pane           orgPane           `json:"pane"`
+	Pane           herdrapi.PaneInfo `json:"pane"`
 	CreatedTab     *herdrapi.TabInfo `json:"created_tab"`
 	ClosedTabID    string            `json:"closed_tab_id"`
 }
@@ -276,7 +254,7 @@ func claudeNamesByPane(agents []herdrapi.AgentInfo) map[string]string {
 // classifyClaudePane は pane が claude セッションかを 2 系統 OR の
 // exact-match で判定する（ファイル冒頭コメントの根拠参照）。
 // conflict が非空なら「機械確定不能」＝対象外＋報告（推測で動かさない）。
-func classifyClaudePane(p orgPane, names map[string]string) (isClaude bool, conflict string) {
+func classifyClaudePane(p herdrapi.PaneInfo, names map[string]string) (isClaude bool, conflict string) {
 	// ↗窓 注入 pane は**常に対象外**（reconcile が inject_placement で配置を
 	// 管理する領分＝organize が動かすと両者が取り合う）。identity token での
 	// exact-match 除外は restart-claude と同じ規律。
@@ -360,7 +338,7 @@ func carryTabLabel(tab herdrapi.TabInfo, tabs []herdrapi.TabInfo) string {
 // computeOrganizePlan は organize の計画を決定的に立てる純関数。
 // resolve は wsmap の cwd→label 解決（""=ルールなし）。順序は分類矛盾
 // （pane.list 順）→ Tab 走査（tab.list 順）＝常に同じ出力。
-func computeOrganizePlan(panes []orgPane, tabs []herdrapi.TabInfo, wss []herdrapi.WorkspaceInfo, names map[string]string, resolve func(cwd string) string) []orgPlanItem {
+func computeOrganizePlan(panes []herdrapi.PaneInfo, tabs []herdrapi.TabInfo, wss []herdrapi.WorkspaceInfo, names map[string]string, resolve func(cwd string) string) []orgPlanItem {
 	var plan []orgPlanItem
 
 	claude := map[string]bool{}
@@ -375,8 +353,8 @@ func computeOrganizePlan(panes []orgPane, tabs []herdrapi.TabInfo, wss []herdrap
 		}
 	}
 
-	panesByTab := map[string][]orgPane{}
-	claudeByTab := map[string][]orgPane{}
+	panesByTab := map[string][]herdrapi.PaneInfo{}
+	claudeByTab := map[string][]herdrapi.PaneInfo{}
 	for _, p := range panes {
 		panesByTab[p.TabID] = append(panesByTab[p.TabID], p)
 		if claude[p.PaneID] {
@@ -450,7 +428,7 @@ func cmdOrganize(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	panes, err := listPanesWithAgent(api)
+	panes, err := api.PaneList()
 	if err != nil {
 		return err
 	}
@@ -480,7 +458,7 @@ func wsDesc(it orgPlanItem) string {
 	return fmt.Sprintf("%s(%s)", it.ToWSID, it.ToLabel)
 }
 
-func runOrganize(api *herdrapi.Client, m *wsmap.Map, panes []orgPane, agents []herdrapi.AgentInfo, tabs []herdrapi.TabInfo, wss []herdrapi.WorkspaceInfo, dry bool, stdout io.Writer) error {
+func runOrganize(api *herdrapi.Client, m *wsmap.Map, panes []herdrapi.PaneInfo, agents []herdrapi.AgentInfo, tabs []herdrapi.TabInfo, wss []herdrapi.WorkspaceInfo, dry bool, stdout io.Writer) error {
 	home, _ := os.UserHomeDir()
 	plan := computeOrganizePlan(panes, tabs, wss, claudeNamesByPane(agents),
 		func(cwd string) string { return m.Resolve(cwd, home) })
@@ -579,12 +557,12 @@ type captureItem struct {
 // computeCapture は「claude pane の cwd → その Tab の workspace label」を
 // 決定的に列挙する純関数。同一 cwd が複数 workspace に散る場合は曖昧＝skip
 // （どちらが意図か推測しない）。label の無い workspace はルール化不能＝skip。
-func computeCapture(panes []orgPane, claude map[string]bool, wss []herdrapi.WorkspaceInfo) []captureItem {
+func computeCapture(panes []herdrapi.PaneInfo, claude map[string]bool, wss []herdrapi.WorkspaceInfo) []captureItem {
 	labelByWS := make(map[string]string, len(wss))
 	for _, w := range wss {
 		labelByWS[w.WorkspaceID] = w.Label
 	}
-	byCwd := map[string][]orgPane{}
+	byCwd := map[string][]herdrapi.PaneInfo{}
 	for _, p := range panes {
 		if claude[p.PaneID] && p.Cwd != "" {
 			byCwd[p.Cwd] = append(byCwd[p.Cwd], p)
@@ -689,7 +667,7 @@ func expandRulePath(p, home string) string {
 	return filepath.Clean(p)
 }
 
-func runCaptureMode(m *wsmap.Map, panes []orgPane, agents []herdrapi.AgentInfo, tabs []herdrapi.TabInfo, wss []herdrapi.WorkspaceInfo, dry bool, stdout io.Writer) error {
+func runCaptureMode(m *wsmap.Map, panes []herdrapi.PaneInfo, agents []herdrapi.AgentInfo, tabs []herdrapi.TabInfo, wss []herdrapi.WorkspaceInfo, dry bool, stdout io.Writer) error {
 	names := claudeNamesByPane(agents)
 	claude := map[string]bool{}
 	for _, p := range panes {
@@ -760,7 +738,7 @@ type captureInjectItem struct {
 // 抜き出す。pane.list に token あり／Tab label が "↗" 始まり／workspace に label あり
 // の 3 条件を満たすものだけを候補にする（推測しない＝鉄則③）。
 // 同 (pc, short_dir) が複数 workspace に散っていれば skip（曖昧）。
-func computeCaptureInject(panes []orgPane, tabs []herdrapi.TabInfo, wss []herdrapi.WorkspaceInfo) []captureInjectItem {
+func computeCaptureInject(panes []herdrapi.PaneInfo, tabs []herdrapi.TabInfo, wss []herdrapi.WorkspaceInfo) []captureInjectItem {
 	labelByWS := make(map[string]string, len(wss))
 	for _, w := range wss {
 		labelByWS[w.WorkspaceID] = w.Label
@@ -936,8 +914,8 @@ func readLearnMoves() (bool, error) {
 // previous_pane_id/previous_workspace_id/previous_tab_id/pane/created_tab/
 // closed_tab_id）。学習に要る分だけ decode する。
 type paneMovedData struct {
-	PreviousWorkspaceID string  `json:"previous_workspace_id"`
-	Pane                orgPane `json:"pane"`
+	PreviousWorkspaceID string            `json:"previous_workspace_id"`
+	Pane                herdrapi.PaneInfo `json:"pane"`
 }
 
 // paneLoc はバックログ照合 snapshot の配置（workspace_id と cwd の exact 組）。
@@ -960,7 +938,7 @@ func runLearnLoop(ctx context.Context, api *herdrapi.Client, lg *log.Logger) err
 	// 処理済み event で逐次更新する＝Subscribe の内部再接続の再送も既知配置
 	// として落ち、切断中に起きた移動の再送だけが学習される。
 	// pane.list 失敗時は照合不能のまま学習を始めない（誤学習より loud な停止）。
-	panes, err := listPanesWithAgent(api)
+	panes, err := api.PaneList()
 	if err != nil {
 		return fmt.Errorf("learn: 起動時 pane.list 失敗（バックログ照合不能のため学習を開始しない）: %w", err)
 	}

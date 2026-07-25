@@ -205,6 +205,26 @@ claude 本体を更新しても **exec 済みプロセスは旧 inode のまま*
     2026-07-25 の update-claude 実行でも claude-3（作り直し直後で未使用）が
     この経路に入り、v0.5.16 のフォールバックが実際に pane を救った。
 
+### 2026-07-25 追加: P0 完了（herdrapi 型の一本化）
+
+DESIGN_MULTI_AGENT.md の P0（マルチエージェント化の根本ボトルネック）を実装。
+
+- `PaneInfo.Agent` / `AgentInfo.{Agent,Title,Tokens,AgentSession}` を追加
+- organize の `orgPane` **二重 decode を廃止**し `herdrapi.PaneInfo` へ一本化
+  （12＋19 箇所）。`listPanesWithAgent` も削除して `api.PaneList()` 直呼びに
+- `selectRestartTargets` の **pane.list join を廃止**（agent.list 単独）。
+  join は冗長なだけでなく**競合の窓**だった（1 接続=1 リクエストなので
+  2 往復の間に構成が変わりうる）
+- 注入 token キーの literal 二重定義を `herdrapi.InjTokenPC/SID` へ統一し、
+  判定を `hasInjectToken(tokens)` 1 関数に集約
+- ⚠実測で判明: **`agent.list` は tokens / agent_session を返す**。
+  旧コメント「agent.list に tokens は載らない」は誤り。また agent.list は
+  「名前付き agent の一覧」ではなく **pane と同数返る**（未命名は Name 空）
+- ⚠**新しいフィールドが要るときは herdrapi に足す**。ローカル型を再び生やすと
+  同じ二重管理に戻る
+- 回帰テスト `TestAgentListCarriesTokensAndSession`（実 herdr）。JSON タグを
+  壊すと FAIL することを確認済み＝「型だけ足して実は空」を検出できる
+
 ### 2026-07-25 追加: 仕様資料 2 本（SPEC.md / DESIGN_MULTI_AGENT.md）
 
 - **[SPEC.md](SPEC.md)** = 機能・インターフェース仕様の正。CLI 全 16 サブコマンド／

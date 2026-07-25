@@ -61,7 +61,8 @@ type PaneInfo struct {
 	ForegroundCwd string            `json:"foreground_cwd"`
 	Label         string            `json:"label,omitempty"`
 	Title         string            `json:"title,omitempty"`
-	AgentStatus   string            `json:"agent_status"` // "unknown"|"idle"|"working"|"blocked"（CLI help の列挙）
+	Agent         string            `json:"agent,omitempty"` // herdr の**検出種別**。下記注意書き参照
+	AgentStatus   string            `json:"agent_status"`    // "unknown"|"idle"|"working"|"blocked"|"done"
 	Tokens        map[string]string `json:"tokens,omitempty"`
 	Scroll        ScrollInfo        `json:"scroll"`
 	AgentSession  AgentSession      `json:"agent_session"`
@@ -99,6 +100,21 @@ const (
 // 持ち回るので追随不要（既存の注入 workspace はそのまま使い続けられる）。
 const InjWorkspaceLabel = "↗remote"
 
+// ⚠ PaneInfo.Agent / AgentInfo.Agent（herdr の**検出種別**）を identity に使う
+// ときの注意（実測 2026-07-25）:
+//
+//   - 権威は herdr の `effective_agent_label()` だが、これは **hook 由来の申告値を
+//     最優先する**。つまり `pane.report_agent` を打った側の値がそのまま出る。
+//   - drover 自身が `mirror_agents`（reconcile.mirrorInjectedAgent）で ↗窓 注入
+//     pane にリモートの window_name を転記しているため、**この値には
+//     `claude-2` のような任意文字列が入りうる**（herdr は未知ラベルを trim して
+//     素通しする）。実際に注入 pane の Agent が "claude" になっている実測あり。
+//   - したがって「検出値」ではなく「検出値 ∪ 外部申告値」として読むこと。
+//     identity に使うなら **herdr の canonical label への exact-match を必須**にし、
+//     注入 pane（Tokens に InjTokenPC/SID）は先に除外する。
+//   - 種別として最も信頼できるのは AgentSession.{Source,Agent}（herdr が
+//     `("herdr:<agent>", "<agent>")` の exact 許可制で受けたものだけ）。
+//
 // AgentSession は herdr が検出したエージェントのセッション識別子。claude では
 // `{source:"herdr:claude", agent:"claude", kind:"id", value:<会話 uuid>}` で、
 // value が `claude --resume <uuid>` の uuid と一致する（実測・resume backstop の権威）。
@@ -148,17 +164,31 @@ type PaneLayoutSnapshot struct {
 //	{"terminal_id":"term_656c6d7143a445","name":"hdprobe","agent_status":"unknown",
 //	 "workspace_id":"w1","tab_id":"w1:t1","pane_id":"w1:p3","focused":false,
 //	 "cwd":"/Users/...","foreground_cwd":"/Users/...","revision":0}
+//
+// ⚠**agent.list は「名前付き agent の一覧」ではなく pane と同数返る**（実測
+// 2026-07-25: pane.list 15 件に対し agent.list も 15 件）。herdr が検出した
+// agent が居ない pane も列挙され、その場合 Name/Agent が空になる。
+// AgentInfo と PaneInfo は herdr 側でほぼ同一スキーマ（agent/title/tokens/
+// agent_session を両方が持つ）＝**agent.list 単独で注入 pane の除外も
+// 検出種別の判定もできる**（pane.list との join は不要）。
 type AgentInfo struct {
-	TerminalID    string `json:"terminal_id"`
-	Name          string `json:"name"`
-	AgentStatus   string `json:"agent_status"`
-	WorkspaceID   string `json:"workspace_id"`
-	TabID         string `json:"tab_id"`
-	PaneID        string `json:"pane_id"`
-	Focused       bool   `json:"focused"`
-	Cwd           string `json:"cwd"`
-	ForegroundCwd string `json:"foreground_cwd"`
-	Revision      int    `json:"revision"`
+	TerminalID  string `json:"terminal_id"`
+	Name        string `json:"name,omitempty"`  // drover のシム命名（agent.rename）。未命名は ""
+	Agent       string `json:"agent,omitempty"` // herdr の**検出種別**。下記注意書き参照
+	Title       string `json:"title,omitempty"`
+	AgentStatus string `json:"agent_status"`
+	// Tokens は pane.report_metadata の token（↗窓 注入 pane の identity
+	// drover_inj_pc / drover_inj_sid を含む）。旧コメントの「agent.list に
+	// tokens は載らない」は**誤り**（herdr 0.7.4 の実採取で載ることを確認）。
+	Tokens        map[string]string `json:"tokens,omitempty"`
+	AgentSession  AgentSession      `json:"agent_session"`
+	WorkspaceID   string            `json:"workspace_id"`
+	TabID         string            `json:"tab_id"`
+	PaneID        string            `json:"pane_id"`
+	Focused       bool              `json:"focused"`
+	Cwd           string            `json:"cwd"`
+	ForegroundCwd string            `json:"foreground_cwd"`
+	Revision      int               `json:"revision"`
 }
 
 // PaneReadInfo は pane.read の応答 read。

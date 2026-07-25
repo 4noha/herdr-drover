@@ -37,17 +37,17 @@ func TestClassifyClaudePaneTable(t *testing.T) {
 		"w1:p4": "claude",   // 名は claude 形だが検出種別が別物（矛盾）
 	}
 	cases := []struct {
-		pane     orgPane
+		pane     herdrapi.PaneInfo
 		want     bool
 		conflict bool
 	}{
-		{orgPane{PaneID: "w1:p1", Agent: ""}, true, false},       // (a) 名のみ
-		{orgPane{PaneID: "w1:p2", Agent: "claude"}, true, false}, // (a)+(b)
-		{orgPane{PaneID: "w1:p3", Agent: ""}, false, false},      // どちらでもない
-		{orgPane{PaneID: "w1:p5", Agent: "claude"}, true, false}, // (b) 検出のみ（name 無し＝herdr 直接起動）
-		{orgPane{PaneID: "w1:p6", Agent: "codex"}, false, false}, // 別 agent 検出＝非 claude が機械確定
-		{orgPane{PaneID: "w1:p4", Agent: "codex"}, false, true},  // 矛盾＝対象外＋報告
-		{orgPane{PaneID: "w1:p3", Agent: "claude"}, true, false}, // 名は別だが検出が claude → 対象
+		{herdrapi.PaneInfo{PaneID: "w1:p1", Agent: ""}, true, false},       // (a) 名のみ
+		{herdrapi.PaneInfo{PaneID: "w1:p2", Agent: "claude"}, true, false}, // (a)+(b)
+		{herdrapi.PaneInfo{PaneID: "w1:p3", Agent: ""}, false, false},      // どちらでもない
+		{herdrapi.PaneInfo{PaneID: "w1:p5", Agent: "claude"}, true, false}, // (b) 検出のみ（name 無し＝herdr 直接起動）
+		{herdrapi.PaneInfo{PaneID: "w1:p6", Agent: "codex"}, false, false}, // 別 agent 検出＝非 claude が機械確定
+		{herdrapi.PaneInfo{PaneID: "w1:p4", Agent: "codex"}, false, true},  // 矛盾＝対象外＋報告
+		{herdrapi.PaneInfo{PaneID: "w1:p3", Agent: "claude"}, true, false}, // 名は別だが検出が claude → 対象
 
 		// ↗窓 注入 pane は identity token で**常に対象外**。
 		// mirror_agents(v0.5.8) がリモートの agent 名を検出値 `agent` へ転記する
@@ -55,14 +55,14 @@ func TestClassifyClaudePaneTable(t *testing.T) {
 		// （実測 2026-07-25: organize --dry-run が注入 pane 2 枚の MOVE を計画。
 		// しかも注入 pane の cwd は herdr が同 workspace の既存値を継承する
 		// quirk があるので、でたらめな cwd で誤ルーティングされる）。
-		{orgPane{PaneID: "w1:p7", Agent: "claude",
+		{herdrapi.PaneInfo{PaneID: "w1:p7", Agent: "claude",
 			Tokens: map[string]string{injTokPC: "other-herdr", injTokSID: "w1:p9"}}, false, false},
 		// 片方の token だけでも注入 pane として扱う（token 付与は 2 キー同時だが、
 		// 部分的に読めた場合に「ローカル claude」へ倒さない＝安全側）。
-		{orgPane{PaneID: "w1:p8", Agent: "claude",
+		{herdrapi.PaneInfo{PaneID: "w1:p8", Agent: "claude",
 			Tokens: map[string]string{injTokPC: "other-herdr"}}, false, false},
 		// シム命名まで一致していても注入 pane なら対象外。
-		{orgPane{PaneID: "w1:p1", Agent: "claude",
+		{herdrapi.PaneInfo{PaneID: "w1:p1", Agent: "claude",
 			Tokens: map[string]string{injTokSID: "w1:p3"}}, false, false},
 	}
 	for i, c := range cases {
@@ -110,7 +110,7 @@ func TestComputeOrganizePlanTable(t *testing.T) {
 		{TabID: "w2:t1", WorkspaceID: "w2", Label: "ok"},    // 既に配置済
 		{TabID: "w1:t5", WorkspaceID: "w1", Label: "none"},  // ルールなし
 	}
-	panes := []orgPane{
+	panes := []herdrapi.PaneInfo{
 		{PaneID: "w1:p1", TabID: "w1:t1", WorkspaceID: "w1", Cwd: "/a", Agent: "claude"},
 		{PaneID: "w1:p2", TabID: "w1:t2", WorkspaceID: "w1", Cwd: "/b", Agent: "claude"},
 		{PaneID: "w1:p3", TabID: "w1:t2", WorkspaceID: "w1", Cwd: "/x", Agent: ""}, // 同居 shell
@@ -176,7 +176,7 @@ func TestComputeCaptureTable(t *testing.T) {
 		{WorkspaceID: "w2", Number: 2, Label: "dst"},
 		{WorkspaceID: "w3", Number: 3, Label: ""}, // label 無し
 	}
-	panes := []orgPane{
+	panes := []herdrapi.PaneInfo{
 		{PaneID: "p1", WorkspaceID: "w1", Cwd: "/a", Agent: "claude"},
 		{PaneID: "p2", WorkspaceID: "w1", Cwd: "/amb", Agent: "claude"},
 		{PaneID: "p3", WorkspaceID: "w2", Cwd: "/amb", Agent: "claude"}, // 同 cwd が複数 ws に散在
@@ -216,7 +216,7 @@ func TestComputeCaptureDuplicateLabelSkips(t *testing.T) {
 		{WorkspaceID: "w2", Number: 2, Label: "work"}, // 重複 label
 		{WorkspaceID: "w3", Number: 3, Label: "solo"},
 	}
-	panes := []orgPane{
+	panes := []herdrapi.PaneInfo{
 		// number 最小でない方に配置＝organize が w1 へ差し戻す危険ケース
 		{PaneID: "p1", WorkspaceID: "w2", Cwd: "/dup", Agent: "claude"},
 		// number 最小の方でも label は語彙として曖昧＝一貫して skip
@@ -264,7 +264,7 @@ func TestCaptureSaveKeepsConcurrentWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	// capture 実行: /proj/a のみ newlabel へ upsert（/proj/b は触らない）。
-	panes := []orgPane{{PaneID: "p1", WorkspaceID: "w1", Cwd: "/proj/a", Agent: "claude"}}
+	panes := []herdrapi.PaneInfo{{PaneID: "p1", WorkspaceID: "w1", Cwd: "/proj/a", Agent: "claude"}}
 	wss := []herdrapi.WorkspaceInfo{{WorkspaceID: "w1", Number: 1, Label: "newlabel"}}
 	var out bytes.Buffer
 	if err := runCaptureMode(m, panes, nil, nil, wss, false, &out); err != nil {
@@ -428,9 +428,9 @@ func orgWaitFor(t *testing.T, timeout time.Duration, what string, cond func() bo
 	t.Fatalf("timeout waiting for %s", what)
 }
 
-func orgPanes(t *testing.T, api *herdrapi.Client) []orgPane {
+func orgPanes(t *testing.T, api *herdrapi.Client) []herdrapi.PaneInfo {
 	t.Helper()
-	panes, err := listPanesWithAgent(api)
+	panes, err := api.PaneList()
 	if err != nil {
 		t.Fatalf("pane.list: %v", err)
 	}
@@ -438,7 +438,7 @@ func orgPanes(t *testing.T, api *herdrapi.Client) []orgPane {
 }
 
 // orgFindPaneByCwd は cwd 完全一致の pane を返す（無ければ nil）。
-func orgFindPaneByCwd(panes []orgPane, cwd string) *orgPane {
+func orgFindPaneByCwd(panes []herdrapi.PaneInfo, cwd string) *herdrapi.PaneInfo {
 	for i := range panes {
 		if panes[i].Cwd == cwd {
 			return &panes[i]
@@ -579,7 +579,7 @@ func TestOrganizeRealHerdrMoveTabKeepDryRun(t *testing.T) {
 		t.Fatalf("単独 Tab の label が引き継がれていない: tab=%s label=%q", pA.TabID, labelOf[pA.TabID])
 	}
 	// MOVE_TAB: mixed Tab を丸ごと dst へ（claude も同居 sleep も dst・元 Tab は自動 close）
-	var pB, pSleep *orgPane
+	var pB, pSleep *herdrapi.PaneInfo
 	for i := range panes {
 		if panes[i].Cwd == dirB && panes[i].Agent == "claude" {
 			pB = &panes[i]

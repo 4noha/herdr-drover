@@ -83,8 +83,10 @@ Firestore サーバは Cloud Run に 1 回デプロイして全 PC で共有す�
 **対象の選定**（すべて exact-match。ヒューリスティック分類は禁止）:
 
 1. `agent.list` の `name` がシム encode 形（`claude` / `claude-N`）**かつ**
-2. `pane.list` の `tokens` に `drover_inj_pc` / `drover_inj_sid` が**無い**
-   （↗窓 注入 pane を構造的に除外）
+2. `tokens` に `drover_inj_pc` / `drover_inj_sid` が**無い**（↗窓 注入 pane を
+   構造的に除外）。判定は `agent.list` 単独で完結する（AgentInfo が tokens /
+   agent_session / tab_id を持つ＝実測。**pane.list との join はしない** —
+   1 接続=1 リクエストなので 2 往復は競合の窓になる）
 3. `sid` 指定時はその pane のみ。対象外 sid は **loud に error**（黙って 0 件に
    しない）
 
