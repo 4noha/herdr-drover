@@ -1,4 +1,4 @@
-# 実装手順メモ / 引き継ぎ（2026-07-21 更新）
+# 実装手順メモ / 引き継ぎ（2026-07-25 更新）
 
 **開発の鉄則は [CLAUDE.md](CLAUDE.md) / DESIGN.md 末尾**（実テスト担保・旧コード
 FAIL 確認・exact-match・AGPL 衛生・silent 変更禁止・対外操作はユーザー確認後）。
@@ -6,11 +6,13 @@ FAIL 確認・exact-match・AGPL 衛生・silent 変更禁止・対外操作は�
 
 ---
 
-## 最新状態（2026-07-18〜21・稼働版 v0.5.8）
+## 最新状態（2026-07-18〜25・最新タグ v0.5.18／HEAD は未タグ 2 commit ahead）
 
 直近で以下を実装・リリース済み（詳細は各 DESIGN doc）。**全て darwin/linux
-build 緑・テスト緑**。稼働 launchd `com.4noha.herdr-drover`（pc=`mac-studio-herdr`）
-は **v0.5.8**。
+build 緑・テスト緑**。origin/main = v0.5.18（`5bb956d`）、HEAD は `f539700`
+（MagicDNS 名）＋`1088c2e`（watchLifecycle）の未タグ 2 commit（別 PC の v0.5.15〜
+v0.5.18 と rebase 統合済＝2026-07-25）。稼働 launchd `com.4noha.herdr-drover`
+（pc=`mac-studio-herdr`）は **v0.5.18**。
 
 - ✅ **Tab 単位着地ルール**（`organize`/`--capture`/live 学習・`internal/wsmap`）。
 - ✅ **自動 min ローカルビューア**（`localview.go`・observe/control 自動切替）。
@@ -45,6 +47,62 @@ build 緑・テスト緑**。稼働 launchd `com.4noha.herdr-drover`（pc=`mac-s
   pane(tab label='1') を inject pane 追加後に close（`wsmap.ResolveWorkspaceIDWithRoot`）。
   herdr 再起動は session 復元で空にしない＝作成経路固有。⚠ organize/claudeshim も同 create
   経路で同種ゴミ（稀）＝下記 follow-up。
+- ✅ **slave の遠隔コマンド受信（v0.5.9）**: slave daemon の
+  `relayState.WatchCommands`(long-poll) / `AckCommand` を実装。owner の Web/CLI からの
+  self-update・restart-agent が slave にも届く（drover-cloud v0.1.5 の `/slave/commands`・
+  `/slave/command-ack` と対）。master 経路・CommandRunner・relay.go byte tunnel は無改変。
+- ✅ **タスク完了 Web Push 通知（v0.5.10/v0.5.11）**: herdr ネイティブ agent_status の
+  working→idle/done/blocked 遷移を検知し、Web に登録済ブラウザへ FCM push
+  （drover-cloud v0.1.6/v0.1.7 と対）。`producer.PushStatus`/`DeleteSession` は無改変で
+  `WithOnSessions` フックが BuildSessions 結果を副作用専用に渡す（`isInjected` 同型の
+  後付け注入）。master 限定＝slave 対象外。SA 鍵/push 鍵が無ければ no-op で無影響。
+  v0.5.11 で通知タイトル＝`short_dir`（プロジェクト名）／body＝`<PC名> · タスク完了`／
+  tag＝`<PC名>:<pane key>` を追加（固定 tag だと通知一覧で上書きされ「どれが終わったか」
+  不明だった問題の修正）。
+- ✅ **terminal_title にリモート PC 名＋実 cwd（v0.5.12）**: 実運用事故（inject pane の
+  cwd/foreground_cwd は herdr が同一 workspace の既存 pane 値を継承＝全 inject pane が
+  同じ cwd を示し PR レビュー依頼を誤爆）への対処。producer が session に同期している
+  cwd を terminal_title に表示する経路を追加（cwd フィールド自体はローカルに無い実
+  パスなので偽装できない）。
+- ✅ **connHolder.write 無期限ブロック修正（v0.5.13）**: attach.go の stdin reader は
+  複数 reader のキー奪い合いを避けるため 1 goroutine 設計だが、conn.Write が relay の
+  viewer 未読状態で無期限ブロックすると以後の入力が全停止（TCP ESTABLISHED のまま
+  silent failure）。internal/bridge の source 側は writeTimeout 済だったが viewer 側の
+  本パスに対応漏れ＝writeTimeout を追加。
+- ✅ **ネットワーク切断/停滞の受動復旧一式（v0.5.14 が最終形＝origin/main の起点）**:
+  Wi-Fi 切替後の「gRPC/relay dial が死んだまま接続し続ける」への対処。gRPC keepalive
+  は drover-cloud 側の話で単体では直せないため、以下 4 点で受動復旧を担保:
+  1. attach conn.Read 無通信 30s タイムアウト（`be4984c`）＝OS TCP タイムアウトを
+     待たず backoff へ戻す。
+  2. reconcile ctx 1 周 20s + WatchSessions 死活非依存の 2 分周期 backstop kick
+     （`9e63259`）＝Firestore gRPC が無期限ブロックしても打ち切って復帰。
+  3. reconcileWatchdog（連続 5 回 abort＝10 分停滞で launchctl kickstart で自己
+     再起動）＋ dialWithTimeout（websocket.NetConn の ctx は接続全体を縛るので外側
+     select で打ち切る形）（`5c8a7ef`＝v0.5.14）。
+  4. pane.list との突合で terminal_title を再表明（`04624f5`）＝herdr サーバ再起動で
+     token 同様に落ちるので毎周 cur を読んで期待値と食い違ったら再貼付。
+- ✅ **terminal_title に Tailscale MagicDNS 名（未タグ・`f539700`）**: 既存 local_ips は
+  Tailscale の CGNAT/IPv6 ULA を含むが MagicDNS 名（`host.tailnet.ts.net`）は別途
+  `tailscale status --json` から取得。PATH の CLI 優先、無ければ App Store 版
+  `Tailscale.app` バンドル内 CLI に fallback。パースは `parseTailscaleDNSName` に切り
+  出し実プロセス呼び出し無しで単体テスト可能。
+- ✅ **スリープ復帰・NIC 変化の能動検知で attach を即時再接続（未タグ・`1088c2e`）**:
+  v0.5.14 の受動復旧は最大 30〜60s（DefaultIdle+backoff）の沈黙経路。イベントを能動
+  検知して即再接続する常駐 watcher を attach 側に追加。
+  - `watchLifecycle` goroutine（cmdAttach スコープ＝backoff 中も生存）が 3s tick で
+    (i) `time.Now().Round(0)` の wall clock jump > 15s（Go monotonic clock は S3/S4
+    sleep 中停止＝Round(0) で剥がして wall clock 差判定）と (ii) `nicFingerprint()`
+    の diff を監視。検知で `connHolder.forceClose`（現接続を能動 close→既存
+    pumpFrames→backoff 経路に乗せる）＋ `wakeCh` で backoff sleep を早期脱出＋
+    backoff 状態自体をリセット。
+  - `nicFingerprint`: `net.Interfaces()` の IPv4 のみを sort 結合。IPv6 SLAAC privacy
+    address (RFC 4941) は誤検知源で除外／Docker/Podman/K8s/veth/Colima bridge は
+    container 起動で up/down するため `virtualIfacePrefixes` で除外。
+  - 共有 cooldown 30s（DefaultIdle と同長）で 2 段遷移（sleep→NIC associate、Wi-Fi の
+    旧→空→新）を 1 回に集約。transient 空（net.InterfaceAddrs 一時失敗）は `lastFP`
+    書き換えず＝`a→""→b` の real change を silent に吸収しない（敵対的レビュー指摘）。
+  - テスト: fake now/tickCh/fpFn を DI seam から注入して実 sleep なしで検証（7 本、
+    -race 緑）。
 
 ### 2026-07-25 追加: claude 本体の更新（update-claude・ワンコマンド）
 
@@ -134,7 +192,8 @@ slave 両方で検証」（エージェント対エージェント）。
     relay/state/web/CommandRunner を無改変**（最小差分）。
 - **Phase 3 ⏳（保留・ユーザー判断「今は release までで止める」2026-07-19）**:
   実機 e2e。再開レシピ:
-  1. slave（n9htqcr6g0-herdr 等）で `herdr-drover update`（→v0.5.8。現在 v0.4.4）。
+  1. slave（n9htqcr6g0-herdr 等）で `herdr-drover update`（→最新 v0.5.18。最終確認 v0.4.4）。
+     v0.5.9 の遠隔コマンド `self-update` で owner の Web からも push できるはず（未実測）。
   2. owner で `~/.herdr-drover/bin/herdr-drover ssh-forward <slave> repoA`
      （SSH_AUTH_SOCK 稼働中）。
   3. slave で `SSH_AUTH_SOCK=~/.herdr-drover/agent-fwd/afwd-repoA.sock \
@@ -223,15 +282,19 @@ launchctl kickstart -k gui/$(id -u)/com.4noha.herdr-drover
 
 ---
 
-## 環境の現状（2026-07-21 時点）
+## 環境の現状（2026-07-25 時点）
 
 - herdr 0.7.4（brew）・既定サーバ稼働・plugin link 済（`4noha.drover`）。
-- 稼働 launchd `com.4noha.herdr-drover`（pc=`mac-studio-herdr`・v0.5.8・
-  クラウド `claude-master-4noha`/既デプロイ relay
+- 稼働 launchd `com.4noha.herdr-drover`（クラウド `claude-master-4noha`/既デプロイ relay
   `wss://claude-master-relay-nkzxa3hxma-an.a.run.app`）。
 - **enroll 済み PC**: mac-studio-herdr(owner/master)・d24wt27c3j-herdr(master)・
-  **n9htqcr6g0-herdr(slave)**・**lph77xyyc7-herdr(slave)**。slave 2 台は現在 v0.4.4
-  （remote self-update は slave 非到達＝各機で `herdr-drover update` 要）。
+  **n9htqcr6g0-herdr(slave)**・**lph77xyyc7-herdr(slave)**。
+- **版数の実測状況**（`herdr-drover status` は稼働 CLI/daemon の両方を返す）:
+  - d24wt27c3j-herdr（本作業マシン）: v0.5.18（daemon/CLI 一致・実測 2026-07-25）
+  - mac-studio-herdr: 別 PC で v0.5.15〜v0.5.18 を実装（rebase 統合済）。実測は必要時。
+  - slave 2 台: 最終確認 v0.4.4（remote self-update は slave 非到達＝各機で
+    `herdr-drover update` 要）。v0.5.9 の遠隔コマンド（`slave/commands` long-poll）で
+    slave にも push 到達するはずだが実機確認は SSH 転送 Phase 3 と併せて要検証。
 - `claude` alias は drover シム（`~/.herdr-drover/bin/herdr-drover claude`）。
 - owner の `herdr-drover` は PATH 未登録＝full path で起動。SSH_AUTH_SOCK は稼働中。
 - SA 鍵 `~/.herdr-drover/sa.json`（600・非コミット）。cm 世界は本 Mac では店じまい済み。
