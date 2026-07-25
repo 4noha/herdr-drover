@@ -8,6 +8,12 @@ cwd 自動 attach／新 Tab 起動を提供する。Python 版 claude-master(cm)
 
 - 導入手順: [SETUP.md](SETUP.md)／使い方: [README.md](README.md)／
   設計: [DESIGN.md](DESIGN.md)／**進行中作業の正: [TODO.md](TODO.md)**
+- **機能・インターフェース仕様の正: [SPEC.md](SPEC.md)**（CLI・遠隔命令の Ack
+  セマンティクス・クラウドスキーマ・herdr API 契約・**不変条件**・デプロイ手順）
+- **マルチエージェント対応: [DESIGN_MULTI_AGENT.md](DESIGN_MULTI_AGENT.md)**
+  （Claude 専用箇所の棚卸しと一般化設計。**別エージェント導入時はまずこれ**。
+  herdr は既にマルチエージェント基盤＝検出 21 種／resume 14 種で、drover 側が
+  追いついていないという構図）
 - 機能別設計: [DESIGN_SLAVE.md](DESIGN_SLAVE.md)＋[DESIGN_SLAVE_SPEC.md](DESIGN_SLAVE_SPEC.md)
   （共用 PC）／[DESIGN_SSH_FORWARD.md](DESIGN_SSH_FORWARD.md)（SSH 転送）
 - **再開時はまず TODO.md を読む**（in-flight タスク・残課題・デプロイ手順の正）

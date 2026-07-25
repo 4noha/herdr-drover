@@ -36,7 +36,9 @@
 
 **構築手順は [SETUP.md](SETUP.md)**（PC 側の導入＋クラウド参加）。クラウドを
 一から立てる手順は [drover-cloud/SETUP.md](https://github.com/4noha/drover-cloud/blob/main/SETUP.md)。
-設計詳細は [DESIGN.md](DESIGN.md)。
+設計詳細は [DESIGN.md](DESIGN.md)、**機能・インターフェース仕様は
+[SPEC.md](SPEC.md)**、**他のコーディングエージェント対応は
+[DESIGN_MULTI_AGENT.md](DESIGN_MULTI_AGENT.md)**。
 
 ## 使い方
 

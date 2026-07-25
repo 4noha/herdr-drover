@@ -205,6 +205,24 @@ claude 本体を更新しても **exec 済みプロセスは旧 inode のまま*
     2026-07-25 の update-claude 実行でも claude-3（作り直し直後で未使用）が
     この経路に入り、v0.5.16 のフォールバックが実際に pane を救った。
 
+### 2026-07-25 追加: 仕様資料 2 本（SPEC.md / DESIGN_MULTI_AGENT.md）
+
+- **[SPEC.md](SPEC.md)** = 機能・インターフェース仕様の正。CLI 全 16 サブコマンド／
+  遠隔命令 6 種の Ack セマンティクスと順序制約／クラウドデータモデル／
+  herdr API 28 メソッドと実測トラップ／設定／**不変条件 10 項**／デプロイ手順。
+- **[DESIGN_MULTI_AGENT.md](DESIGN_MULTI_AGENT.md)** = 別のコーディング
+  エージェント導入のための棚卸しと一般化設計。6 サブシステムを並列調査し
+  敵対的検証＋作業ツリー再検証で確定（13 エージェント／208 万トークン）。
+- **最重要の事実**: herdr は**既にマルチエージェント基盤**（検出 21 種／
+  状態 manifest 19 種／session 追跡・resume 14 種）。drover が追いついていない
+  という構図。しかも**対応は三層**（検出できる ≠ 会話を再開できる）で、
+  gemini/agy/cline/kiro/amp/grok/maki は **resume 原理的に不能**。
+- **根本ボトルネックは型の欠落**: `herdrapi.PaneInfo` に `agent` が無く、
+  `AgentInfo` に `agent`/`agent_session`/`tokens` が無い。これが無い限り
+  identity が命名規約に依存し続ける＝**P0**。
+- ⚠herdr の resume argv テーブル（`agent_resume.rs plan()`）は **API 非公開**＝
+  drover にミラーが要る（二重管理・herdr 更新で乖離しうる）。
+
 ---
 
 ## 進行中 / 保留（再開ポイント）
