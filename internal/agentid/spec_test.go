@@ -163,3 +163,34 @@ func TestSupportsKind(t *testing.T) {
 		t.Error("resume 非対応は常に false")
 	}
 }
+
+// IsDirectInvocation は **21 種すべて**で機能しなければならない。
+// 実装当初は claude だけの独自テーブルを見ており、codex / cursor の pane は
+// 「対象に入るが必ず skip」という静かな不発になっていた（restart-agent-session
+// --agent codex が永久に何もしない）。判定表は herdr の lookup_agent と同一にする。
+func TestIsDirectInvocationCoversAllAgents(t *testing.T) {
+	for label := range CanonicalLabels {
+		aliases := HerdrExecAliases(label)
+		if len(aliases) == 0 {
+			t.Errorf("%s: herdr の alias 表に無い", label)
+			continue
+		}
+		for _, a := range aliases {
+			if !IsDirectInvocation(label, []string{"/usr/local/bin/" + a, "--flag"}) {
+				t.Errorf("%s: alias %q を直接起動と判定しない", label, a)
+			}
+		}
+		// wrapper 経由は常に false。
+		if IsDirectInvocation(label, []string{"/bin/zsh", "-lc", aliases[0]}) {
+			t.Errorf("%s: wrapper 経由を直接起動と判定した", label)
+		}
+	}
+	// cursor は argv[0] が agent 名と異なる（実行名 cursor-agent）。
+	if !IsDirectInvocation("cursor", []string{"/usr/local/bin/cursor-agent"}) {
+		t.Error("cursor-agent を cursor の直接起動と判定できていない")
+	}
+	// 未知 kind は常に false。
+	if IsDirectInvocation("nosuch", []string{"/usr/bin/nosuch"}) {
+		t.Error("未知 kind を直接起動と判定した")
+	}
+}

@@ -189,7 +189,12 @@ func TestIsDirectAgentInvocation(t *testing.T) {
 		}
 	}
 	// 表に無い kind は常に false（知らないものは触らない）。
-	if IsDirectInvocation("codex", []string{"/usr/bin/codex"}) {
+	// ⚠codex は **対応済**（herdr の alias 表に載る canonical 21 種はすべて判定
+	// できる）。ここで見るのは canonical ですらない文字列。
+	if IsDirectInvocation("nosuch-agent", []string{"/usr/bin/nosuch-agent"}) {
 		t.Error("未対応 kind を直接起動と判定した（推測で触ってはいけない）")
+	}
+	if !IsDirectInvocation("codex", []string{"/usr/bin/codex"}) {
+		t.Error("codex は対応済のはず（alias 表に載っている）")
 	}
 }

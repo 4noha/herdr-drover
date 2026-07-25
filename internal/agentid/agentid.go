@@ -138,26 +138,23 @@ func Decode(name string) (string, bool) {
 	return agent, true
 }
 
-// execNames は「その argv が当該エージェントの**直接起動**か」を判定する
-// 実行ファイル名（basename）の許容集合。DESIGN_MULTI_AGENT.md の ResumeSpec の芽。
+// IsDirectInvocation は launch_argv がエージェント本体の直接起動かを返す。
+// `zsh -lc '… claude'` のような wrapper 経由では false（resume 引数を足しても
+// エージェントに届かないため、再起動すると会話を失う）。
 //
 // identity（何のエージェントか）と actionability（drover が argv を組み立て直せるか）
 // は別物。restart/update は後者も満たす pane にだけ触れる。
-var execNames = map[string][]string{
-	"claude": {"claude"},
-}
-
-// IsDirectInvocation は launch_argv がエージェント本体の直接起動かを返す。
-// `zsh -lc '… claude'` のような wrapper 経由では false（`--resume` を足しても
-// エージェントに届かないため、再起動すると会話を失う）。
 //
+// 判定表は herdr の `lookup_agent` alias 表（spec.go の herdrExecAliases）を使う。
+// **これが「どの basename ならそのエージェントとして動いているか」の唯一の権威**
+// （herdr の検出も同じ表で行われる＝drover が別の表を持つと両者がずれる）。
 // 表に無い kind は false＝**知らないものは触らない**（推測禁止の鉄則①③）。
 func IsDirectInvocation(kind string, argv []string) bool {
 	if len(argv) == 0 {
 		return false
 	}
 	base := filepath.Base(argv[0])
-	for _, want := range execNames[kind] {
+	for _, want := range herdrExecAliases[kind] {
 		if base == want {
 			return true
 		}
