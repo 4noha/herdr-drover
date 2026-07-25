@@ -344,6 +344,23 @@ organize / producer が共有）。権威は強い順に:
 違う**ので、`agent_session` が付かないときは status を確認する — ただし
 **未設置は原因の候補の 1 つにすぎない**（下の trust ダイアログの例を参照）。
 
+**自動導入**（v0.5.26〜）: シムが**新規セッションを始める直前**に未導入なら
+`herdr integration install <agent>` を実行する（`DROVER_AUTO_INTEGRATION=off` で無効）。
+規律:
+
+- **未導入のときだけ**入れる。導入済み（版が古くても）には触らない
+  — ユーザーが手で直した hook を勝手に戻さない。
+- 導入したら**必ず報告**する（silent な設定変更をしない）。
+- 失敗しても**起動を止めない**（hook 無しでもエージェント自体は動く）。
+- **attach 経路では実行しない**。hook は session 開始時に発火するので、既存
+  セッションに後から入れても ref は**遡らない**＝効果が無い。
+- ⚠**「観測した agent に対して入れる」方式にしてはいけない**。↗窓 の注入 pane は
+  リモートのエージェントを鏡写しするので `agent` が付く（reconcile の
+  `mirror_agents`）が、実体は `herdr-drover attach` でローカルにその CLI は無い
+  （実測 2026-07-25: 注入 11 枚すべて attach プロセス・`agent_session` は None）。
+  観測駆動にすると**そのPCに無いエージェントの設定を書いてしまう**。
+  ⇒ **注入 pane に integration は不要**（そのエージェントが実際に走る PC 側で要る）。
+
 ⚠ **初回起動時の同意ダイアログに注意**。cursor-agent は新しい cwd で
 `Workspace Trust Required` を出して**入力を全て吸う**。通過するまで会話が始まらず、
 `agent_session` も付かない（＝resume 不可）。自動化から見ると「検出はされるのに

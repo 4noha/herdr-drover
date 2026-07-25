@@ -107,6 +107,7 @@ func cmdAgentShim(agent string, args []string, stdout, stderr io.Writer) error {
 		if err != nil {
 			return err
 		}
+		ensureAgentIntegrationOnce(agent, stderr)
 		return execAttach(bin, append([]string{bin}, args...), os.Environ())
 	}
 
@@ -189,6 +190,19 @@ func cmdAgentShim(agent string, args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	// **新規セッションを始める直前**に integration hook を保証する。hook は
+	// session 開始時に発火するので、ここで入れれば「これから始めるセッション」から
+	// 会話 ref（agent_session）が付く＝resume できるようになる。
+	//
+	// ⚠**attach 経路では呼ばない**。既存セッションに後から hook を入れても ref は
+	// 遡らないので効果が無く、herdr CLI を余計に叩くだけ。
+	//
+	// ⚠**「観測した agent に対して入れる」方式にしてはいけない**。↗窓 の注入 pane は
+	// リモートのエージェントを鏡写しするので `agent` が付く（reconcile の
+	// mirror_agents）が、実体は `herdr-drover attach` でローカルにその CLI は無い
+	// （実測 2026-07-25: 注入 11 枚すべて attach プロセス・agent_session は None）。
+	// 観測駆動にすると**そのPCに無いエージェントの設定を書いてしまう**。
+	ensureAgentIntegrationOnce(agent, stderr)
 	ag, err := startClaudeAgent(api, agent, append([]string{bin}, args...), cwd)
 	if err != nil {
 		return fmt.Errorf("agent.start: %w", err)
