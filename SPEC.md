@@ -410,12 +410,29 @@ herdr server を起動すると起きる**）、herdr が生やす全 pane が�
 | pane に `CLAUDE_CODE_CHILD_SESSION=""`（空値）を注入 | ✅ | **保存されない** |
 | `claude -p`（print mode・マーカーあり） | — | **保存される** |
 
-⇒ **drover 側の env 注入では直せない**（試して駄目だったので実装は取り下げた。
-同じ空振りを繰り返さないこと）。`layout.apply` の leaf は `env` を受け取り、
-それが pane のプロセスまで届くことは実測済みなので、**注入の仕組みの問題ではない**。
+⇒ **pane 側への env 注入では直せない**（試して駄目だったので実装は取り下げた。
+同じ空振りを繰り返さないこと）。
 
-**唯一分かっている対処は herdr server をクリーンな環境で起動し直すこと**
-（⚠全 pane が失われるので慎重に。`herdr integration` や設定の再導入は不要）。
+### 原因と恒久対処（v0.5.27 で特定・修正）
+
+**混入経路は drover 自身だった**。シムの `ensureHerdrServer` が herdr server を
+自動起動するとき、**親の環境をそのまま渡していた**（`cmd.Env=nil` で継承）。
+Claude Code のセッション内からシムが呼ばれ herdr が未起動だと、
+`CLAUDE_CODE_CHILD_SESSION` を抱えたサーバが常駐する。**herdr は pane を
+server の env で起こす**ので、そこから生える全 pane が継承する。
+
+実障害: mac-studio の herdr server は 2026-07-18 10:37（herdr 移行の日）に
+この経路で起動され、8 日間マーカーを持ち続けていた。他 PC で起きなかったのは、
+そちらのサーバが Claude Code の外から起動されていたため。
+
+**対処**: `sanitizedServerEnv` が呼び出し元固有の変数を **exact-match** で落とす
+（`CLAUDE_CODE_CHILD_SESSION` / `_SESSION_ID` / `_ENTRYPOINT` / `_SSE_PORT`）。
+落としたものは必ず報告する。`HERDR_SOCKET_PATH` / `XDG_CONFIG_HOME` は透過
+（隔離テストの前提）。
+
+⚠**既に汚染されたサーバは自動では直らない**（env はプロセス起動時に決まる）。
+そのマシンでは **herdr server をクリーンな環境で起動し直す**必要がある
+（⚠全 pane が失われるので慎重に。設定や integration の再導入は不要）。
 
 **drover 側の挙動は正しい**: `--resume` で即終了 → 二段構えフォールバックが
 resume 無しで作り直して **pane は必ず残す**＋`resume 復元不可のため新規会話で起動`

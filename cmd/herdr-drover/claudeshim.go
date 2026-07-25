@@ -393,7 +393,9 @@ func ensureHerdrServer(api *herdrapi.Client, stderr io.Writer) error {
 	cmd.Stdin = devnull
 	cmd.Stdout = devnull
 	cmd.Stderr = devnull
-	// env は継承（cmd.Env=nil）＝HERDR_SOCKET_PATH/XDG_CONFIG_HOME 透過。
+	// env は基本的に継承する（HERDR_SOCKET_PATH/XDG_CONFIG_HOME 透過）。
+	// **ただしエージェント固有の「呼び出し元」マーカーは落とす**（下記）。
+	cmd.Env = sanitizedServerEnv(os.Environ(), stderr)
 	// 親から切り離して常駐させる（unix: Setsid／windows: 新プロセスグループ）。
 	setDetachedProc(cmd)
 	if err := cmd.Start(); err != nil {
@@ -415,6 +417,55 @@ func ensureHerdrServer(api *herdrapi.Client, stderr io.Writer) error {
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
+}
+
+// serverEnvBlocklist は herdr server へ**引き継いではいけない**環境変数。
+//
+// ⚠これらは「今この瞬間の呼び出し元」を表すプロセス固有の印であって、
+// **長寿命の常駐サーバが持ち続けてよい値ではない**。herdr server が持つと
+// **そこから生える全 pane が継承する**（herdr は pane を server の env で起こす）。
+//
+// 実障害（2026-07-25 に発覚・原因は 2026-07-18 の herdr 移行時）:
+// Claude Code のセッション内からシムが呼ばれ、herdr が未起動だったため
+// ensureHerdrServer が**親の env をそのまま渡して**サーバを常駐させた。
+// その結果 `CLAUDE_CODE_CHILD_SESSION` を持つサーバが 8 日間動き続け、
+// **そのマシンの claude セッションは全て transcript が保存されない**状態だった
+// （claude は子セッションとみなして保存しない → --resume が読むものが無い →
+// **resume が丸ごと壊れる**）。他 PC で起きなかったのは、そちらの herdr server が
+// Claude Code の外から起動されていたため。
+//
+// ⚠**pane 側への env 注入では直せない**ことを A/B で確認済み（SPEC.md 参照）。
+// 根本は「サーバがマーカーを抱えて常駐すること」なので、ここで断つ。
+var serverEnvBlocklist = []string{
+	"CLAUDE_CODE_CHILD_SESSION", // 子セッション印。持つと transcript が保存されない
+	"CLAUDE_CODE_SESSION_ID",    // 呼び出し元セッションの id
+	"CLAUDE_CODE_ENTRYPOINT",    // 呼び出し元の起動形態
+	"CLAUDE_CODE_SSE_PORT",      // 呼び出し元プロセスへの接続口（常駐後は無効）
+}
+
+// sanitizedServerEnv は herdr server へ渡す env から serverEnvBlocklist を除く。
+// 落としたものは**必ず報告**する（silent な環境改変をしない＝鉄則⑤）。
+func sanitizedServerEnv(env []string, stderr io.Writer) []string {
+	blocked := make(map[string]bool, len(serverEnvBlocklist))
+	for _, k := range serverEnvBlocklist {
+		blocked[k] = true
+	}
+	out := make([]string, 0, len(env))
+	var dropped []string
+	for _, kv := range env {
+		k, _, ok := strings.Cut(kv, "=")
+		if ok && blocked[k] {
+			dropped = append(dropped, k)
+			continue
+		}
+		out = append(out, kv)
+	}
+	if len(dropped) > 0 {
+		fmt.Fprintf(stderr, "herdr server 起動: 呼び出し元固有の環境変数を除外しました "+
+			"(%s)。常駐サーバが持つと、そこから生える全 pane が継承して "+
+			"transcript 保存や resume が壊れます\n", strings.Join(dropped, ", "))
+	}
+	return out
 }
 
 // lookupClaude は実 claude バイナリを PATH から絶対パスで解決する。
