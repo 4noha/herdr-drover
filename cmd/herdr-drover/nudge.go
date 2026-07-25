@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"syscall"
 )
 
 func cmdNudge(stdout io.Writer) error {
@@ -36,9 +35,7 @@ func sendNudge(path string, stdout io.Writer) error {
 		// 「stale」と名指しする方が原因が伝わる。
 		return fmt.Errorf("daemon が死んでいる（pid %d は不在＝stale pidfile %s）。`herdr-drover agent` を再起動せよ", pid, path)
 	}
-	if err := syscall.Kill(pid, syscall.SIGUSR1); err != nil {
-		return fmt.Errorf("SIGUSR1 送出失敗（pid %d）: %w", pid, err)
-	}
-	fmt.Fprintf(stdout, "nudged: pid %d へ SIGUSR1（即時 re-scan）\n", pid)
-	return nil
+	// 即時 re-scan の合図送出は OS 依存（unix: SIGUSR1／windows: 非対応で
+	// agent の周期 tick に委譲）＝platform_{unix,windows}.go の nudgeDaemon。
+	return nudgeDaemon(pid, stdout)
 }

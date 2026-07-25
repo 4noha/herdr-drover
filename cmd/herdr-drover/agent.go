@@ -134,9 +134,11 @@ func cmdAgent(stdout, stderr io.Writer) error {
 	// nudge は runAgentLoop の起動直後 1 tick が取りこぼしを埋める。
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
-	nudge := make(chan os.Signal, 1)
-	signal.Notify(nudge, syscall.SIGUSR1)
-	defer signal.Stop(nudge)
+	// nudge（即時 re-scan トリガ）の受け口は OS 依存＝platform_{unix,windows}.go
+	// の notifyNudge（unix: SIGUSR1 購読／windows: 発火しないチャネル＝周期 tick
+	// に委譲）。
+	nudge, stopNudge := notifyNudge()
+	defer stopNudge()
 
 	// live 学習（opt-in・既定 false＝挙動完全不変）: config.json の
 	// learn_moves=true のときだけ pane.moved を購読し手動 Tab 移動を wsmap の
@@ -271,9 +273,14 @@ func runOneCloud(ctx context.Context, cfg Config, cl Cloud, primary bool, hcli *
 	// slave は他 PC のセッションを注入しない（オーナーの私物セッションが共用 PC
 	// へ漏れる直接原因＝この goroutine を起こさないことで構造的に断つ）。master
 	// は従来どおり primary クラウドのみ注入（scConcrete は master で非 nil）。
-	if cfg.Role != "slave" && primary && cl.RelayURL != "" {
+	// remoteInjectSupported は OS 依存（platform_{unix,windows}.go）。Windows は
+	// 注入 pane 内の attach viewer（cmdAttach）が非対応＝注入すると即死→再生成の
+	// スラッシングになるため常に無効化する（producer/Web 閲覧は下で動く）。
+	if remoteInjectSupported && cfg.Role != "slave" && primary && cl.RelayURL != "" {
 		go runRemoteInject(ctx, hcli, scConcrete, cl, idx, lg, cfg.MirrorAgents, restartSelf)
 		lg.Printf("%sリモート pane 注入 起動（他 PC のセッションを↗注入・primary）", tag)
+	} else if !remoteInjectSupported && primary && cl.RelayURL != "" {
+		lg.Printf("%sリモート pane 注入は Windows 非対応のため無効（producer/Web 閲覧のみ）", tag)
 	}
 
 	// 遠隔命令制御線。DoRestart/DoUpdate/DoExit はプロセス単位（どのクラウドの

@@ -6,13 +6,11 @@ package main
 // 常に pidAlive で実生存を確認し、pidfile の存在自体を信用しない。
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 )
 
 // pidfilePath は ~/.herdr-drover/agent.pid を返す。
@@ -84,7 +82,7 @@ func acquirePidfile(path string, pid int) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if err := tryLockExclusiveNB(lock); err != nil {
 		lock.Close()
 		// 拒否の判定は flock のみ（原子）。pid の名指しは診断用の best-effort
 		//（勝者が pidfile を書く前ならまだ旧値/不在のことがある）。
@@ -114,12 +112,5 @@ func readPidfile(path string) (int, error) {
 	return pid, nil
 }
 
-// pidAlive は pid の実生存を signal 0 で判定する。EPERM は「存在するが
-// 権限がない」＝生存扱い（cm diag の isAlive と同じ規約）。
-func pidAlive(pid int) bool {
-	err := syscall.Kill(pid, 0)
-	if err == nil {
-		return true
-	}
-	return errors.Is(err, syscall.EPERM)
-}
+// pidAlive（pid の実生存判定）は OS 依存＝platform_{unix,windows}.go
+// （unix: signal 0／windows: OpenProcess）。

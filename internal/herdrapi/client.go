@@ -6,9 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"os"
-	"path/filepath"
 	"sync/atomic"
 	"time"
 )
@@ -53,6 +51,8 @@ func New(socketPath string) *Client {
 }
 
 // ResolveSocketPath は New と同じ解決規則を単体で提供する（診断表示用）。
+// 既定パスは OS 依存（unix: ~/.config/herdr/herdr.sock、windows:
+// %APPDATA%\herdr\herdr.sock）＝defaultSocketPath（dial_{unix,windows}.go）。
 func ResolveSocketPath(explicit string) string {
 	if explicit != "" {
 		return explicit
@@ -60,13 +60,7 @@ func ResolveSocketPath(explicit string) string {
 	if p := os.Getenv("HERDR_SOCKET_PATH"); p != "" {
 		return p
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		// home 不明でも「herdr.sock」への相対 dial で即エラーになり原因が
-		// 分かる方が、空文字で意味不明に失敗するよりまし。
-		return "herdr.sock"
-	}
-	return filepath.Join(home, ".config", "herdr", "herdr.sock")
+	return defaultSocketPath()
 }
 
 // request / response は wire 形式（実採取に一致）。
@@ -96,7 +90,7 @@ func (c *Client) Call(method string, params any) (json.RawMessage, error) {
 	if timeout <= 0 {
 		timeout = defaultCallTimeout
 	}
-	conn, err := net.DialTimeout("unix", c.SocketPath, defaultDialTimeout)
+	conn, err := dialHerdr(c.SocketPath, defaultDialTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("herdr dial %s: %w", c.SocketPath, err)
 	}

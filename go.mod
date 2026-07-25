@@ -7,6 +7,12 @@ require (
 	golang.org/x/sys v0.43.0
 )
 
+// Windows 移植のためのローカル fork（selfupdate に place_windows.go を追加）。
+replace github.com/4noha/drover-cloud => ../drover-cloud
+
+// Windows の herdr API 接続（named pipe）用。unix ビルドでは未使用。
+require github.com/Microsoft/go-winio v0.6.2
+
 require (
 	cloud.google.com/go/firestore v1.22.0 // indirect
 	google.golang.org/api v0.279.0 // indirect

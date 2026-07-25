@@ -37,9 +37,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
-	"unsafe"
 
 	"github.com/4noha/herdr-drover/internal/herdrapi"
 	"github.com/4noha/herdr-drover/internal/wsmap"
@@ -55,7 +53,7 @@ var (
 	// execAttach は syscall.Exec の seam。成功時は戻らない。attach への置換と
 	// 非 TTY×引数ありの素 claude 透過（cmdClaude 冒頭）の両方が使う共通 seam。
 	execAttach = func(argv0 string, argv []string, env []string) error {
-		return syscall.Exec(argv0, argv, env)
+		return execProcess(argv0, argv, env)
 	}
 	// stdinIsTTY は stdin の TTY 判定。⚠旧 ModeCharDevice 判定は /dev/null
 	//（char device）でも真になる実バグだった: os/exec の Stdin=nil は
@@ -65,14 +63,10 @@ var (
 	// /dev/null=false・pipe=false・pty slave=true（実測。ioctl 番号は
 	// claudeshim_tty_{darwin,linux}.go の OS-split 定数＝依存追加なしで
 	// golang.org/x/term 不使用の規律を維持）。
-	stdinIsTTY = func() bool {
-		// バッファは termios 実サイズ（darwin 72B / linux 36B）より十分大きく。
-		var termios [128]byte
-		_, _, errno := syscall.Syscall(
-			syscall.SYS_IOCTL, os.Stdin.Fd(), uintptr(ioctlReadTermios),
-			uintptr(unsafe.Pointer(&termios[0])))
-		return errno == 0
-	}
+	// stdinIsTTY は stdin が対話端末か（/dev/null=false・pipe=false・
+	// pty slave/console=true）。実装は OS 分割（unix: tcgetattr 相当 ioctl／
+	// windows: GetConsoleMode）＝platform_{unix,windows}.go の stdinIsTTYImpl。
+	stdinIsTTY = stdinIsTTYImpl
 )
 
 // lastSpawnedServerPID は直近に自動起動した herdr server の PID（0=未 spawn）。
@@ -400,7 +394,8 @@ func ensureHerdrServer(api *herdrapi.Client, stderr io.Writer) error {
 	cmd.Stdout = devnull
 	cmd.Stderr = devnull
 	// env は継承（cmd.Env=nil）＝HERDR_SOCKET_PATH/XDG_CONFIG_HOME 透過。
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	// 親から切り離して常駐させる（unix: Setsid／windows: 新プロセスグループ）。
+	setDetachedProc(cmd)
 	if err := cmd.Start(); err != nil {
 		devnull.Close()
 		return fmt.Errorf("herdr server 自動起動失敗: %w", err)

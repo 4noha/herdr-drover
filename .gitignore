@@ -3,6 +3,7 @@ bin/
 dist/
 *.log
 .DS_Store
+/herdr-drover.exe
 
 # Codex CLI がプロジェクト側に自動生成する設定・指示ファイル。
 # .codex/config.toml は sandbox_mode 等のセキュリティ設定を含むので追跡外。
