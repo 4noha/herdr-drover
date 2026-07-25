@@ -20,14 +20,12 @@ package main
 //     空で自動 close。pane.move は単一 pane しか分割できないため単軸/右偏り連鎖は
 //     厳密・複雑な入れ子は連鎖近似。moveWholeTab）。曖昧（1 Tab に別 cwd の claude
 //     複数）は skip＋報告。
-//   - claude pane の同定は 2 系統 OR・どちらも exact-match（鉄則③）:
-//     (a) シム命名: agent 名が claude / claude-N（claudeshim の encode と
-//     厳密往復する isClaudeAgentName） (b) herdr 直接起動: pane.list の
-//     検出種別 `agent == "claude"`（herdr のプロセス名検出。name 無し＝
-//     ユーザーが herdr UI から開いたセッションも取りこぼさない。実測:
-//     agent.list は無名の検出 agent も列挙し name キー自体が無い）。
-//     両者が矛盾する pane（名は claude 形だが検出種別が別物）は機械確定
-//     不能＝対象外＋報告（推測で動かさない）。
+//   - claude pane の同定は **resolveAgentKind（agentid.go）に一元化**
+//     （v0.5.23）。権威は強い順に agent_session の (source,agent) ／
+//     シム命名 claude・claude-N ／ herdr の検出値 agent（canonical 21 label
+//     への exact-match のみ）。注入 pane は最優先で除外。権威同士が矛盾する
+//     pane は機械確定不能＝対象外＋報告（推測で動かさない）。以前はここだけが
+//     独自に 2 系統 OR を持ち、restart/update 側（シム命名のみ）と非対称だった。
 //   - herdr の events は新規購読のたびに過去 event のバックログを再送する
 //     （実測）＝learn は event を鵜呑みにせず、**購読前 pane 配置 snapshot**
 //     （処理済み event で逐次更新）と**ライブ状態**の 2 重 exact 照合で
@@ -251,29 +249,20 @@ func claudeNamesByPane(agents []herdrapi.AgentInfo) map[string]string {
 	return m
 }
 
-// classifyClaudePane は pane が claude セッションかを 2 系統 OR の
-// exact-match で判定する（ファイル冒頭コメントの根拠参照）。
+// classifyClaudePane は pane が claude セッションかを判定する。
+// **判定の実体は resolveAgentKind（agentid.go）に一元化**（v0.5.23）。
+// 以前はここが独自に「2 系統 OR ＋矛盾判定」を持っており、restart/update 側の
+// 判定（シム命名のみ）と非対称だった＝organize は拾うのに restart は拾わない、
+// という静かな穴になっていた。
+//
 // conflict が非空なら「機械確定不能」＝対象外＋報告（推測で動かさない）。
+// ↗窓 注入 pane は resolveAgentKind が最優先で弾く。
 func classifyClaudePane(p herdrapi.PaneInfo, names map[string]string) (isClaude bool, conflict string) {
-	// ↗窓 注入 pane は**常に対象外**（reconcile が inject_placement で配置を
-	// 管理する領分＝organize が動かすと両者が取り合う）。identity token での
-	// exact-match 除外は restart-claude と同じ規律。
-	//
-	// ⚠これが無いと実害が出る（実測 2026-07-25・organize --dry-run で確認）:
-	// mirror_agents(v0.5.8) が注入 pane の herdr 検出値 `agent` にリモート側の
-	// agent 名を転記するため、リモートが claude なら detected が真になる。
-	// さらに注入 pane の cwd は herdr が同一 workspace の既存 pane 値を継承する
-	// （v0.5.12 で判明した quirk）ので、**でたらめな cwd で誤ルーティング**される。
-	if p.Tokens[injTokPC] != "" || p.Tokens[injTokSID] != "" {
-		return false, ""
+	kind, conflict := resolveAgentKind(identityOfPane(p, names[p.PaneID]))
+	if conflict != "" {
+		return false, conflict
 	}
-	name := names[p.PaneID]
-	named := isClaudeAgentName(name)
-	detected := p.Agent == "claude"
-	if named && p.Agent != "" && !detected {
-		return false, fmt.Sprintf("agent 名 %q は claude 形だが herdr 検出種別は %q（矛盾＝機械確定不能）", name, p.Agent)
-	}
-	return named || detected, ""
+	return kind == "claude", ""
 }
 
 // ============ organize 計画（純関数＝テーブルテスト対象） ============

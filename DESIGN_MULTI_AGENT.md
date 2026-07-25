@@ -102,8 +102,8 @@ agent=<リモートの window_name>, state)` を打つと、herdr 側で
 | バイナリ解決 | `exec.LookPath("claude")` の literal 固定。エラー文も固定 |
 | **無条件実行** | `lookupClaude` が**全経路の先頭で走る**。既存 pane へ attach するだけでも PATH に無ければ shim 全体が exit 1 |
 | 命名 encode | `claude` / `claude-N`（`agent_name_taken` の exact-match で採番・上限 64） |
-| 命名 decode | `isClaudeAgentName`。**3 サブシステムの共有 decode**（shim の attach/picker・restart/update・organize/capture/learn） |
-| 候補選定 | `claudeCandidates` が `isClaudeAgentName(name) && cwd 一致`。**herdr UI から直接起動された agent は `Name=""` で候補外** |
+| 命名 decode | `decodeAgentName`（`isClaudeAgentName` は薄いラッパ）。**3 サブシステムの共有 decode**（shim の attach/picker・restart/update・organize/capture/learn） |
+| 候補選定 | `claudeCandidates` が `resolveAgentKind == "claude" && cwd 一致`（v0.5.23 で一元化）。~~herdr UI 直接起動は候補外~~ **解消済** |
 | dispatch | `case "claude"` とエラー前置が固定 |
 | usage / 文言 | `alias claude='herdr-drover claude'` を含め claude 固定 |
 
@@ -121,7 +121,7 @@ agent=<リモートの window_name>, state)` を打つと、herdr 側で
 
 | 項目 | 事実 |
 |---|---|
-| identity 条件 | `isClaudeAgentName(a.Name)` の **1 系統のみ**（organize の 2 系統 OR と非対称） |
+| identity 条件 | `resolveAgentKind`（v0.5.23）。~~1 系統のみで organize と非対称~~ **解消済**。加えて `isDirectAgentInvocation` で argv ゲート |
 | **既存の穴** | herdr UI から直接起動した claude セッションは restart/update の全経路から**今すでに**除外されている（organize は検出系統で拾うのに lifecycle だけ拾っていない） |
 | 改名 fallback | preferred 名が taken なら別番号へ改名＝他エージェント pane が `claude-N` に化ける経路（現状は到達不能だが一般化で顕在化） |
 | 対象 0 件 | `nil, nil` で成功扱い。`update-all` は段 2 へ進んで `done` で Ack される＝「更新成功なのに 1 つも再起動されていない」が履歴上 done で残る |
@@ -401,7 +401,7 @@ Firestore→Web まで中間層の改修ゼロ**で届く。影響は「初回 1
 | 段 | 内容 | 理由 |
 |---|---|---|
 | ~~P0~~ | ~~herdrapi 型に `agent`/`agent_session`/`tokens` を追加、organize の二重 decode を廃止~~ **完了（v0.5.22）** | これ無しでは他の全部が命名規約に依存し続ける |
-| P1 | `ResolveAgentKind` の一元化（3 系統を統合） | identity の単一地点化 |
+| ~~P1~~ | ~~`resolveAgentKind` の一元化（shim / restart・update / organize を統合）~~ **完了（v0.5.23）** | identity の単一地点化。`isDirectAgentInvocation`（actionability）も分離して導入 |
 | P2 | producer に `agent` を載せる（空なら載せない） | Web 出し分け・per-agent 命令の入力 |
 | P3 | Cloud Run に新命令名を allowlist 追加（旧名残置）して**先行**デプロイ | 順序を誤ると命令が全滅 |
 | P4 | Spec テーブル（Resume/Updater/Install）導入 + CLI/遠隔命令の `--agent` | |

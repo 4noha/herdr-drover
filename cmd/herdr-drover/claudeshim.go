@@ -307,10 +307,7 @@ func applyClaudeTab(api *herdrapi.Client, wsID, tabLabel string, argv []string, 
 // terminal_id 込みの AgentInfo＝attach にそのまま使える。
 func nameClaudePane(api *herdrapi.Client, paneID string) (*herdrapi.AgentInfo, error) {
 	for i := 1; i <= maxClaudeAgents; i++ {
-		name := "claude"
-		if i > 1 {
-			name = fmt.Sprintf("claude-%d", i)
-		}
+		name := encodeAgentName("claude", i)
 		raw, err := api.Call("agent.rename", struct {
 			Target string `json:"target"`
 			Name   string `json:"name"`
@@ -332,27 +329,6 @@ func nameClaudePane(api *herdrapi.Client, paneID string) (*herdrapi.AgentInfo, e
 		return nil, fmt.Errorf("agent.rename %s: %w", paneID, err)
 	}
 	return nil, fmt.Errorf("claude agent 名が %d 個まで全て使用中（herdr の agent 名は一意制約。pane %s は作成済み）", maxClaudeAgents, paneID)
-}
-
-// isClaudeAgentName は decode 側: encode（startClaudeAgent）が実際に生成する
-// 形と厳密往復する。encode は i=1→"claude"・i>=2→fmt.Sprintf("claude-%d", i)
-// しか作らない＝decode も "claude" か "claude-N"（N>=2・%d は先頭ゼロを
-// 生成しない）のみ真。"claude-0"/"claude-1"/"claude-02" を受けていた旧実装は
-// decode が encode の真部分集合でなく「構造往復」の主張と不一致だった
-// （レビュー指摘・回帰テストで FAIL 確認済み）。
-func isClaudeAgentName(name string) bool {
-	if name == "claude" {
-		return true
-	}
-	rest, ok := strings.CutPrefix(name, "claude-")
-	if !ok || rest == "" || rest[0] == '0' {
-		return false
-	}
-	n, err := strconv.Atoi(rest)
-	if err != nil || n < 2 {
-		return false
-	}
-	return true
 }
 
 // ensureHerdrServer は ping 失敗時に herdr server を detached 自動起動する
@@ -416,22 +392,24 @@ func lookupClaude() (string, error) {
 	return filepath.Abs(p)
 }
 
-// claudeCandidates は cwd 完全一致かつ agent 名が本シムの encode 形
-// （isClaudeAgentName）の exact-match のみを候補にする純関数
-// （ヒューリスティック分類禁止。cwd の部分一致・子孫一致はしない）。
+// claudeCandidates は cwd 一致の claude セッションを返す（シムの attach 候補）。
+// **identity は resolveAgentKind に一元化**（v0.5.23）。以前はここだけ
+// 「シム命名のみ」で判定しており、herdr UI から直接起動された claude が
+// 候補に挙がらず（＝cwd 一致 attach というシムの存在理由が効かず）2 本目を
+// 新規 Tab に作ってしまっていた。organize/restart は同じ pane を claude と
+// 数えるので、経路によって「この cwd の claude 数」が食い違っていた。
 //
-// identity は name 完全一致＋cwd 完全一致（鉄則③の定義そのもの）。DESIGN.md
-// の「metadata＋launch_argv 二重符号化」は Phase 3 リモート pane 注入の
-// identity 規律（drover 注入 pane を任意 pane 群から見分ける別問題）であり
-// 本シムへは適用しない: agent.list の AgentInfo に tokens は載らない（実採取
-// types.go）＝pane.list との突合せが要る複雑化に加え、既存シムセッションが
-// metadata 無しで孤児化し upgrade 直後に dup を量産する退行になる。
+// 注入 pane の除外も resolveAgentKind が最優先で行う。
 func claudeCandidates(agents []herdrapi.AgentInfo, cwd string) []herdrapi.AgentInfo {
 	var out []herdrapi.AgentInfo
 	for _, a := range agents {
-		if isClaudeAgentName(a.Name) && a.Cwd == cwd {
-			out = append(out, a)
+		if a.Cwd != cwd {
+			continue
 		}
+		if kind, conflict := resolveAgentKind(identityOfAgent(a)); conflict != "" || kind != "claude" {
+			continue
+		}
+		out = append(out, a)
 	}
 	return out
 }

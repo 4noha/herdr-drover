@@ -80,15 +80,34 @@ Firestore サーバは Cloud Run に 1 回デプロイして全 PC で共有す�
 （`~/.local/bin/claude` は `versions/<ver>` への symlink）。pane を作り直して
 新版を掴ませる。
 
-**対象の選定**（すべて exact-match。ヒューリスティック分類は禁止）:
+**対象の選定**（すべて exact-match。ヒューリスティック分類は禁止）。
+identity 判定は `resolveAgentKind`（`cmd/herdr-drover/agentid.go`）に一元化され、
+shim / restart・update / organize が**同じ規則**を共有する（v0.5.23）:
 
-1. `agent.list` の `name` がシム encode 形（`claude` / `claude-N`）**かつ**
+1. `resolveAgentKind` が `claude` を返すこと。権威は強い順に
+   ① `agent_session` の `(source,agent)`＝`("herdr:claude","claude")`
+   ② シム命名 `claude` / `claude-N`
+   ③ herdr の検出値 `agent`（canonical 21 label への exact-match のみ）
+   — ②③ は**どちらか一方でも成立すれば対象**。以前は restart/update だけが
+   ①③ を見ておらず、herdr UI から直接起動した claude を取りこぼしていた
 2. `tokens` に `drover_inj_pc` / `drover_inj_sid` が**無い**（↗窓 注入 pane を
-   構造的に除外）。判定は `agent.list` 単独で完結する（AgentInfo が tokens /
-   agent_session / tab_id を持つ＝実測。**pane.list との join はしない** —
+   構造的に除外）。これは**最優先で**評価する — reconcile の mirror_agents が
+   注入 pane の検出値に `claude` を書くため、後ろに置くとリモートの鏡を
+   ローカルセッションと誤認する。判定は `agent.list` 単独で完結する（AgentInfo が
+   tokens / agent_session / tab_id を持つ＝実測。**pane.list との join はしない** —
    1 接続=1 リクエストなので 2 往復は競合の窓になる）
-3. `sid` 指定時はその pane のみ。対象外 sid は **loud に error**（黙って 0 件に
+3. 権威同士が矛盾する pane（例: 名 `claude` / 検出 `codex`）は**機械確定不能**＝
+   対象外＋必ず報告（推測で動かさない）
+4. **argv が claude の直接起動であること**（`isDirectAgentInvocation`＝
+   `launch_argv[0]` の basename が `claude`）。identity が claude でも
+   `zsh -lc '… claude'` のような wrapper 起動は**触らない** — 末尾に `--resume` を
+   足しても claude に届かず、会話を失ったまま「done」と報告してしまうため
+5. `sid` 指定時はその pane のみ。対象外 sid は **loud に error**（黙って 0 件に
    しない）
+
+**未命名 pane の扱い**: herdr UI 起動の pane（agent 名なし）も対象だが、
+再起動後に**agent 名を付けない**（drover 管理名に変えるのはユーザーが頼んで
+いない identity 変更）。次回も検出値 ③ で拾えるので取りこぼさない。
 
 **argv の構築**:
 
@@ -319,8 +338,10 @@ workspace.close  workspace.create  workspace.focus  workspace.list  workspace.re
 1. **exact-match identity のみ**。ヒューリスティック分類はしない。曖昧なら
    skip して**必ず報告**する（silent skip 禁止）。
 2. **↗窓 注入 pane は常に対象外**。identity token（`drover_inj_pc` /
-   `drover_inj_sid`）で構造的に除外する。現在 3 系統に散在（producer /
-   restartclaude / organize）＝**新しい pane 列挙経路を足すときは必ず除外を入れる**。
+   `drover_inj_sid`）で構造的に除外する。除外は `resolveAgentKind` の**最優先段**に
+   集約済み（v0.5.23。shim / restart・update / organize が共有）。producer だけは
+   別経路なので独自に除外する＝**新しい pane 列挙経路を足すときは
+   `resolveAgentKind` を通すこと**。
 3. **注入 pane の cwd は偽値**（§5.1）。ルール書込経路（capture / learn）で
    拾わないこと。
 4. **自己再起動は必ず最後**（§2.5）。exit がハンドラを終わらせるため。
@@ -336,6 +357,12 @@ workspace.close  workspace.create  workspace.focus  workspace.list  workspace.re
     snapshot 駆動でローカル pane の消滅を契機にしないため、注入 pane が消えたまま
     放置される（実測 2026-07-25: 11→0 のまま停止）。daemon の起動時 reconcile が
     唯一の確実な再生成契機。
+11. **identity ≠ 破壊してよい対象**。pane を作り直す操作（restart / update）は
+    `resolveAgentKind` に加えて `isDirectAgentInvocation`（`launch_argv[0]` の
+    basename）を必ず確認する。wrapper 起動 pane に `--resume` を足しても
+    エージェントに届かず、会話を失ったまま成功と報告してしまう。
+12. **未命名 pane に勝手に命名しない**。herdr UI 起動の pane を再起動しても
+    agent 名を付けない（頼まれていない identity 変更になる）。
 
 ---
 

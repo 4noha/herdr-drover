@@ -90,7 +90,7 @@ func TestUpdateAllStopsWhenClaudeStepFails(t *testing.T) {
 	sock := startHerdrForTest(t)
 	api := herdrapi.New(sock)
 	work := t.TempDir()
-	bin := filepath.Join(work, "claude-stub")
+	bin := filepath.Join(work, "claude")
 	script := "#!/bin/sh\n" +
 		"case \"$1\" in\n" +
 		"  --version) echo '2.1.214'; exit 0 ;;\n" +

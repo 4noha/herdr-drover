@@ -47,17 +47,34 @@ const claudeUpdateTimeout = 15 * time.Minute
 
 // claudeBinsFromPanes は稼働中のローカル claude pane が実際に起動している argv[0]
 // を重複なく集める（restart-claude と同じ exact な権威＝PATH を引かない）。
-func claudeBinsFromPanes(api *herdrapi.Client) ([]string, error) {
+// claudeBinsFromPanes は稼働中の claude pane の launch_argv[0] から**更新対象
+// バイナリの候補**を集める。
+//
+// ⚠identity を herdr の検出値まで広げた（P1）結果、drover が起動していない pane も
+// ここに来る。そのまま argv[0] を候補に入れると:
+//   - `herdr agent start w -- claude` の相対名 "claude" が混ざり「2 種類＝曖昧」
+//     error が恒常発火して update が丸ごと止まる
+//   - それが単独だと相対名が採用され、launchd daemon（PATH に ~/.local/bin が
+//     無い）で exec 失敗＝このファイル冒頭で禁じた PATH 依存の再導入になる
+//
+// よって **絶対パスかつ claude の直接起動**の argv[0] だけを候補にする。
+// 落としたものは必ず 1 行出す（silent skip 禁止）。
+func claudeBinsFromPanes(api *herdrapi.Client, out io.Writer) ([]string, error) {
 	agents, err := api.AgentList()
 	if err != nil {
 		return nil, fmt.Errorf("agent.list: %w", err)
 	}
-	targets, err := selectRestartTargets(agents, "")
+	targets, conflicts, err := selectRestartTargets(agents, "")
+	// 失敗経路（バイナリ特定に失敗して restartClaudePanes へ到達しない場合）でも
+	// 「なぜこの pane が対象外なのか」が残るよう、ここでも矛盾を報告する。
+	for _, c := range conflicts {
+		fmt.Fprintf(out, "update-claude: skip  %s\n", c)
+	}
 	if err != nil {
 		return nil, err
 	}
 	seen := make(map[string]bool)
-	var out []string
+	var bins []string
 	for _, t := range targets {
 		root, err := exportTabLayout(api, t.TabID)
 		if err != nil {
@@ -67,13 +84,24 @@ func claudeBinsFromPanes(api *herdrapi.Client) ([]string, error) {
 			if l.PaneID != t.PaneID || len(l.Command) == 0 {
 				continue
 			}
-			if bin := l.Command[0]; !seen[bin] {
+			bin := l.Command[0]
+			if !isDirectAgentInvocation("claude", l.Command) {
+				fmt.Fprintf(out, "update-claude: note: pane=%s は claude の直接起動でない"+
+					"（argv[0]=%q）＝バイナリ特定の根拠にしない\n", t.PaneID, bin)
+				continue
+			}
+			if !filepath.IsAbs(bin) {
+				fmt.Fprintf(out, "update-claude: note: pane=%s の argv[0] が相対名 %q "+
+					"＝daemon の PATH では解決できないのでバイナリ特定の根拠にしない\n", t.PaneID, bin)
+				continue
+			}
+			if !seen[bin] {
 				seen[bin] = true
-				out = append(out, bin)
+				bins = append(bins, bin)
 			}
 		}
 	}
-	return out, nil
+	return bins, nil
 }
 
 // resolveClaudeBin は更新対象の claude 実バイナリを決め、根拠（source）も返す。
@@ -82,8 +110,8 @@ func claudeBinsFromPanes(api *herdrapi.Client) ([]string, error) {
 //     ＝どれを更新すべきか推測しない）
 //  2. PATH（CLI 実行時に有効。daemon では通常引けない）
 //  3. `~/.local/bin/claude`（native installer の既定配置＝推測ではなく既知の規約）
-func resolveClaudeBin(api *herdrapi.Client) (bin, source string, err error) {
-	bins, berr := claudeBinsFromPanes(api)
+func resolveClaudeBin(api *herdrapi.Client, out io.Writer) (bin, source string, err error) {
+	bins, berr := claudeBinsFromPanes(api, out)
 	if berr == nil && len(bins) == 1 {
 		return bins[0], "稼働中の claude pane の argv[0]", nil
 	}
@@ -135,7 +163,7 @@ func runClaudeUpdate(ctx context.Context, bin string) (string, error) {
 // 共有する（経路ごとに別ロジックを持たない）。戻り値は監査用の 1 行要約。
 func updateClaudeAndRestart(ctx context.Context, api *herdrapi.Client, opt restartOptions,
 	out io.Writer) (string, error) {
-	bin, source, err := resolveClaudeBin(api)
+	bin, source, err := resolveClaudeBin(api, out)
 	if err != nil {
 		return "", err
 	}

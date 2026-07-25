@@ -173,7 +173,7 @@ func TestSelectRestartTargets(t *testing.T) {
 	}
 
 	t.Run("sid 空は全ローカル claude pane", func(t *testing.T) {
-		got, err := selectRestartTargets(agents, "")
+		got, _, err := selectRestartTargets(agents, "")
 		if err != nil {
 			t.Fatalf("err: %v", err)
 		}
@@ -189,7 +189,7 @@ func TestSelectRestartTargets(t *testing.T) {
 	})
 
 	t.Run("注入 pane は token で構造的に除外", func(t *testing.T) {
-		got, _ := selectRestartTargets(agents, "")
+		got, _, _ := selectRestartTargets(agents, "")
 		for _, g := range got {
 			if g.PaneID == "w1:p4" || g.PaneID == "w1:p5" {
 				t.Fatalf("↗窓 注入 pane %s が対象に入った（token 除外が効いていない）: %+v", g.PaneID, got)
@@ -198,7 +198,7 @@ func TestSelectRestartTargets(t *testing.T) {
 	})
 
 	t.Run("sid 指定はその 1 枚だけ", func(t *testing.T) {
-		got, err := selectRestartTargets(agents, "w1:p2")
+		got, _, err := selectRestartTargets(agents, "w1:p2")
 		if err != nil {
 			t.Fatalf("err: %v", err)
 		}
@@ -209,7 +209,7 @@ func TestSelectRestartTargets(t *testing.T) {
 
 	t.Run("対象外 sid は loud に error（黙って 0 件にしない）", func(t *testing.T) {
 		for _, sid := range []string{"w1:p3", "w1:p4", "w1:p5", "w1:pZZ"} {
-			if _, err := selectRestartTargets(agents, sid); err == nil {
+			if _, _, err := selectRestartTargets(agents, sid); err == nil {
 				t.Fatalf("sid %q が error にならなかった", sid)
 			}
 		}
@@ -261,9 +261,14 @@ func TestSummarizeRestart(t *testing.T) {
 
 // writeStubClaude は生存し続ける stub を作って**絶対パスだけ**返す（PATH には
 // 置かない＝PATH 解決に退行したらこの e2e が落ちる）。
+// ⚠stub の**ファイル名は "claude" でなければならない**。restart/update は
+// isDirectAgentInvocation（argv[0] の basename）で「claude の直接起動か」を
+// 確認するため、別名の stub は本番と違う経路（skip）に落ちてテストが本番を
+// 担保しなくなる。各呼び出しは t.TempDir() で別ディレクトリになるので、
+// 同名でも「別バイナリ」を作れる（曖昧判定のテストが成立する）。
 func writeStubClaude(t *testing.T) string {
 	t.Helper()
-	stub := filepath.Join(t.TempDir(), "claude-stub")
+	stub := filepath.Join(t.TempDir(), "claude")
 	if err := os.WriteFile(stub, []byte("#!/bin/sh\nexec sleep 300\n"), 0o755); err != nil {
 		t.Fatalf("stub 作成: %v", err)
 	}
@@ -274,7 +279,7 @@ func writeStubClaude(t *testing.T) string {
 // ＝会話 jsonl が消えている claude の実挙動（"No conversation found"）の再現。
 func writeResumeRejectingStub(t *testing.T) string {
 	t.Helper()
-	stub := filepath.Join(t.TempDir(), "claude-stub")
+	stub := filepath.Join(t.TempDir(), "claude")
 	script := "#!/bin/sh\n" +
 		"for a in \"$@\"; do\n" +
 		"  if [ \"$a\" = \"--resume\" ]; then echo 'No conversation found' >&2; exit 1; fi\n" +
@@ -703,7 +708,72 @@ func TestAgentListCarriesTokensAndSession(t *testing.T) {
 		t.Fatalf("agent.list と pane.list が食い違う: agent=%+v pane=%+v", got, p)
 	}
 	// この状態なら注入 pane として除外されること。
-	if targets, _ := selectRestartTargets(agents, ""); len(targets) != 0 {
+	if targets, _, _ := selectRestartTargets(agents, ""); len(targets) != 0 {
 		t.Fatalf("token 付き pane が対象に入った: %+v", targets)
+	}
+}
+
+// herdr UI から直接起動された（drover が命名していない）claude pane は、
+// P1 の identity 一元化で restart 対象に入るようになった。その際に
+// **勝手に agent 名を付けない**こと＝herdr ネイティブの pane を drover 管理下の
+// 名前に変えてしまわないこと（ユーザーが頼んでいない identity 変更の防止）。
+//
+// 命名しなくても次回以降は herdr の検出値で拾えるので取りこぼさない。
+func TestRestartClaudeKeepsUnnamedPaneUnnamed(t *testing.T) {
+	sock := startHerdrForTest(t)
+	api := herdrapi.New(sock)
+	stub := writeStubClaude(t)
+	cwd := t.TempDir()
+
+	wsID, err := currentWorkspaceID(api)
+	if err != nil {
+		t.Fatalf("currentWorkspaceID: %v", err)
+	}
+	pane, err := applyClaudeTab(api, wsID, "native", []string{stub}, cwd)
+	if err != nil {
+		t.Fatalf("layout.apply: %v", err)
+	}
+	// agent.rename は**しない**（herdr UI 直接起動を模す）。代わりに herdr の
+	// 検出値だけを立てる＝identity は系統 3（検出値）で決まる。
+	if err := api.ReportAgent(pane, "test-native", "claude", "idle"); err != nil {
+		t.Fatalf("report_agent: %v", err)
+	}
+
+	agents, err := api.AgentList()
+	if err != nil {
+		t.Fatalf("agent.list: %v", err)
+	}
+	targets, conflicts, err := selectRestartTargets(agents, "")
+	if err != nil {
+		t.Fatalf("selectRestartTargets: %v（conflicts=%v）", err, conflicts)
+	}
+	if len(targets) != 1 || targets[0].PaneID != pane {
+		t.Fatalf("未命名の検出 pane が対象に入っていない: targets=%+v conflicts=%v", targets, conflicts)
+	}
+	if targets[0].AgentName != "" {
+		t.Fatalf("未命名のはずが AgentName=%q", targets[0].AgentName)
+	}
+
+	var log bytes.Buffer
+	results, err := restartClaudePanes(api, restartOptions{SID: pane}, &log)
+	if err != nil {
+		t.Fatalf("restartClaudePanes: %v（log=%s）", err, log.String())
+	}
+	if len(results) != 1 || results[0].Status != "done" {
+		t.Fatalf("results = %+v（log=%s）", results, log.String())
+	}
+
+	// 作り直した pane に agent 名が付いていないこと。
+	agents, err = api.AgentList()
+	if err != nil {
+		t.Fatalf("agent.list(2): %v", err)
+	}
+	for _, a := range agents {
+		if a.Name != "" {
+			t.Fatalf("未命名 pane を再起動したのに agent 名 %q が付いた（herdr ネイティブ pane の identity を変えている）", a.Name)
+		}
+	}
+	if !strings.Contains(log.String(), "未命名のため agent 名を付けない") {
+		t.Fatalf("命名しなかったことが報告されていない: %s", log.String())
 	}
 }

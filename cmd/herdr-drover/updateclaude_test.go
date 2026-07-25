@@ -6,6 +6,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,7 +25,7 @@ func writeUpdatableStub(t *testing.T, dir, from, to string) (bin, verFile string
 	if err := os.WriteFile(verFile, []byte(from), 0o644); err != nil {
 		t.Fatalf("version.txt: %v", err)
 	}
-	bin = filepath.Join(dir, "claude-stub")
+	bin = filepath.Join(dir, "claude")
 	script := "#!/bin/sh\n" +
 		"VF=" + verFile + "\n" +
 		"case \"$1\" in\n" +
@@ -158,7 +159,7 @@ func TestResolveClaudeBin(t *testing.T) {
 	if _, err := renameClaudePaneTo(api, paneA, "claude"); err != nil {
 		t.Fatalf("agent.rename(a): %v", err)
 	}
-	got, source, err := resolveClaudeBin(api)
+	got, source, err := resolveClaudeBin(api, io.Discard)
 	if err != nil {
 		t.Fatalf("resolveClaudeBin: %v", err)
 	}
@@ -177,11 +178,11 @@ func TestResolveClaudeBin(t *testing.T) {
 	if _, err := renameClaudePaneTo(api, paneB, "claude-2"); err != nil {
 		t.Fatalf("agent.rename(b): %v", err)
 	}
-	bins, berr := claudeBinsFromPanes(api)
+	bins, berr := claudeBinsFromPanes(api, io.Discard)
 	if berr != nil || len(bins) != 2 {
 		t.Fatalf("前提が崩れている（2 種類が同時に稼働しているはず）: bins=%v err=%v", bins, berr)
 	}
-	if _, _, err = resolveClaudeBin(api); err == nil {
+	if _, _, err = resolveClaudeBin(api, io.Discard); err == nil {
 		t.Fatalf("2 種類のバイナリが混在しているのに error にならなかった")
 	} else if !strings.Contains(err.Error(), "一意に決められない") {
 		t.Fatalf("error 文面が曖昧さを説明していない: %v", err)
@@ -192,7 +193,7 @@ func TestResolveClaudeBin(t *testing.T) {
 // （実測 2026-07-25: ノート PC の遅い回線で 5 分上限に当たり、生エラーからは
 // 回線が遅いのか claude が壊れたのか判別できなかった）。
 func TestRunClaudeUpdateReportsTimeoutReason(t *testing.T) {
-	bin := filepath.Join(t.TempDir(), "claude-stub")
+	bin := filepath.Join(t.TempDir(), "claude")
 	if err := os.WriteFile(bin, []byte("#!/bin/sh\nsleep 30\n"), 0o755); err != nil {
 		t.Fatalf("stub 作成: %v", err)
 	}
@@ -213,7 +214,7 @@ func TestUpdateClaudeDoesNotRestartWhenUpdateFails(t *testing.T) {
 	sock := startHerdrForTest(t)
 	api := herdrapi.New(sock)
 	work := t.TempDir()
-	bin := filepath.Join(work, "claude-stub")
+	bin := filepath.Join(work, "claude")
 	script := "#!/bin/sh\n" +
 		"case \"$1\" in\n" +
 		"  --version) echo '2.1.214'; exit 0 ;;\n" +
@@ -244,5 +245,100 @@ func TestUpdateClaudeDoesNotRestartWhenUpdateFails(t *testing.T) {
 	// pane はそのまま（作り直していない）。
 	if p, gerr := api.PaneGet(pane); gerr != nil || p.PaneID != pane {
 		t.Fatalf("更新失敗なのに pane が作り直された: %v %+v", gerr, p)
+	}
+}
+
+// identity を herdr の検出値まで広げた（P1）結果、drover が起動していない pane も
+// バイナリ特定に流れ込む。相対名 argv[0] や wrapper 起動を候補に入れると:
+//   - 「2 種類＝曖昧」error が恒常発火して update-claude / update-all が丸ごと止まる
+//   - 単独なら相対名が採用され、launchd daemon（PATH に ~/.local/bin 無し）で exec 失敗
+//     ＝updateclaude.go 冒頭で禁じた PATH 依存の再導入になる
+//
+// DESIGN_MULTI_AGENT.md §4-6 が「identity 拡大と同時に対処すること」と名指しした箇所。
+func TestClaudeBinsIgnoresRelativeAndWrapperArgv(t *testing.T) {
+	sock := startHerdrForTest(t)
+	api := herdrapi.New(sock)
+	stub := writeStubClaude(t) // 絶対パス（drover シムと同じ形）
+	cwd := t.TempDir()
+
+	wsID, err := currentWorkspaceID(api)
+	if err != nil {
+		t.Fatalf("currentWorkspaceID: %v", err)
+	}
+	// (a) drover シム相当＝絶対パスの直接起動
+	paneAbs, err := applyClaudeTab(api, wsID, "shim", []string{stub}, cwd)
+	if err != nil {
+		t.Fatalf("layout.apply(abs): %v", err)
+	}
+	if _, err := renameClaudePaneTo(api, paneAbs, "claude"); err != nil {
+		t.Fatalf("agent.rename: %v", err)
+	}
+	// (b) herdr 側で wrapper 起動された pane（argv[0] が claude ではない）
+	paneWrap, err := applyClaudeTab(api, wsID, "wrap", []string{"/bin/sh", "-c", stub}, cwd)
+	if err != nil {
+		t.Fatalf("layout.apply(wrapper): %v", err)
+	}
+	if err := api.ReportAgent(paneWrap, "test-native", "claude", "idle"); err != nil {
+		t.Fatalf("report_agent: %v", err)
+	}
+
+	var log bytes.Buffer
+	bins, err := claudeBinsFromPanes(api, &log)
+	if err != nil {
+		t.Fatalf("claudeBinsFromPanes: %v", err)
+	}
+	if len(bins) != 1 || bins[0] != stub {
+		t.Fatalf("bins = %v, want [%s]（wrapper pane の argv[0] を根拠にしてはいけない）\nlog=%s",
+			bins, stub, log.String())
+	}
+	if !strings.Contains(log.String(), "直接起動でない") {
+		t.Fatalf("除外理由が報告されていない（silent skip 禁止）: %s", log.String())
+	}
+
+	// bin が一意に決まる＝update が曖昧 error で止まらない。
+	got, source, err := resolveClaudeBin(api, io.Discard)
+	if err != nil {
+		t.Fatalf("resolveClaudeBin: %v（identity 拡大で曖昧 error が恒常発火している）", err)
+	}
+	if got != stub {
+		t.Fatalf("bin = %q（source=%s）, want %q", got, source, stub)
+	}
+}
+
+// wrapper 起動 pane は restart 対象に見えても**作り直さない**。
+// argv 末尾に --resume を足しても claude には届かず、会話を失ったまま
+// 「done」と報告してしまう（誤報告＝最悪の失敗）。
+func TestRestartSkipsWrapperInvocation(t *testing.T) {
+	sock := startHerdrForTest(t)
+	api := herdrapi.New(sock)
+	stub := writeStubClaude(t)
+	cwd := t.TempDir()
+
+	wsID, err := currentWorkspaceID(api)
+	if err != nil {
+		t.Fatalf("currentWorkspaceID: %v", err)
+	}
+	pane, err := applyClaudeTab(api, wsID, "wrap", []string{"/bin/sh", "-c", stub}, cwd)
+	if err != nil {
+		t.Fatalf("layout.apply: %v", err)
+	}
+	if err := api.ReportAgent(pane, "test-native", "claude", "idle"); err != nil {
+		t.Fatalf("report_agent: %v", err)
+	}
+
+	var log bytes.Buffer
+	results, err := restartClaudePanes(api, restartOptions{SID: pane}, &log)
+	if err != nil {
+		t.Fatalf("restartClaudePanes: %v", err)
+	}
+	if len(results) != 1 || results[0].Status != "skip" {
+		t.Fatalf("results = %+v, want skip 1 件（log=%s）", results, log.String())
+	}
+	if !strings.Contains(results[0].Detail, "直接起動でない") {
+		t.Fatalf("skip 理由が不明瞭: %q", results[0].Detail)
+	}
+	// pane が生き残っていること（＝作り直していない）。
+	if paneGone(api, pane) {
+		t.Fatal("skip のはずが pane が消えた（wrapper pane を作り直してしまった）")
 	}
 }
