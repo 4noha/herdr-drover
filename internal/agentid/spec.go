@@ -131,6 +131,12 @@ type InstallSpec struct {
 var installSpecs = map[string]InstallSpec{
 	"claude": {BinNames: []string{"claude"}, WellKnownPaths: []string{"~/.local/bin/claude"}},
 	"codex":  {BinNames: []string{"codex"}},
+	// cursor の実行ファイル名は cursor-agent（canonical label と異なる唯一の例。
+	// ResumeSpec.Argv0="cursor-agent" と同源）。公式インストーラは
+	// ~/.local/bin/cursor-agent と ~/.local/bin/agent の 2 本の symlink を張るが、
+	// `agent` は汎用名で衝突を招く（Grok の /.grok/bin/agent と実際に衝突した）ため
+	// 解決先の候補は cursor-agent のみに絞る。
+	"cursor": {BinNames: []string{"cursor-agent"}, WellKnownPaths: []string{"~/.local/bin/cursor-agent"}},
 }
 
 // Install は agent の InstallSpec と、載っているかを返す。
