@@ -10,10 +10,8 @@ cloud.google.com/go/firestore v1.22.0 h1:avooeboIq37vKXobrbPUFhFBxS/c3FqmWoX0xs8
 cloud.google.com/go/firestore v1.22.0/go.mod h1:PaM4i7i7ruALSKmlpHXXZaPObcZw0W7ie5UOPr72iTU=
 cloud.google.com/go/longrunning v0.9.0 h1:0EzbDEGsAvOZNbqXopgniY0w0a1phvu5IdUFq8grmqY=
 cloud.google.com/go/longrunning v0.9.0/go.mod h1:pkTz846W7bF4o2SzdWJ40Hu0Re+UoNT6Q5t+igIcb8E=
-github.com/4noha/drover-cloud v0.1.10 h1:BHJnB3hc9ueif+PVZvyIODnQLZ9f8KRj7q65ePRGl8E=
-github.com/4noha/drover-cloud v0.1.10/go.mod h1:85BVxsKi8luKSWwCmndtQvXIXdMHXwGduqZLiapyzRs=
-github.com/4noha/drover-cloud v0.1.11 h1:URTndB9BzWIhKS00BVEojHb3oSMK/OVwZTkRlnPzxGQ=
-github.com/4noha/drover-cloud v0.1.11/go.mod h1:85BVxsKi8luKSWwCmndtQvXIXdMHXwGduqZLiapyzRs=
+github.com/4noha/drover-cloud v0.1.13 h1:22qfxlrnL8re2QnWQDdz5GdRzXo1kSAj8gZKB53UyZU=
+github.com/4noha/drover-cloud v0.1.13/go.mod h1:85BVxsKi8luKSWwCmndtQvXIXdMHXwGduqZLiapyzRs=
 github.com/Microsoft/go-winio v0.6.2 h1:F2VQgta7ecxGYO8k3ZZz3RS8fVIXVxONVUPlNERoyfY=
 github.com/Microsoft/go-winio v0.6.2/go.mod h1:yd8OoFMLzJbo9gZq8j5qaps8bJ9aShtEA8Ipt1oGCvU=
 github.com/cespare/xxhash/v2 v2.3.0 h1:UL815xU9SqsFlibzuggzjXhog7bL6oX9BbNZnL2UFvs=

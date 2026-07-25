@@ -4,7 +4,7 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 PKG     := ./cmd/herdr-drover
 BIN     := herdr-drover
 
-.PHONY: build test vet dist install clean
+.PHONY: build test vet check-windows dist install clean
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags '$(LDFLAGS)' -o $(BIN) $(PKG)
@@ -14,6 +14,20 @@ test:
 
 vet:
 	go vet ./...
+
+# Windows クロス検証（**Windows 実機なしで Mac/Linux から実行できる**）。
+#
+# 目的はドリフト検出: OS 依存部は platform_{unix,windows}.go 等の build-tag
+# 分割で、Windows 側は attach/ssh-forward/localview の**スタブ**を持つ。unix 側の
+# シグネチャを変えるとスタブだけが取り残され、**Windows でビルドした人だけが
+# 気づく**壊れ方をする（実例: runRemoteInject に引数が増えた）。共通ソースで
+# Windows を維持する以上、この検査を CI/手元の常用ゲートに入れること。
+#
+# cgo 不使用なのでクロスビルドで十分。テスト側のコンパイルまで見るため
+# `go vet`（test ファイルも型検査する）を含める。
+check-windows:
+	GOOS=windows GOARCH=amd64 go build ./...
+	GOOS=windows GOARCH=amd64 go vet ./...
 
 # 配布物（Release 発行用）。asset 名 herdr-drover_<os>_<arch> は install.sh /
 # scripts/build.sh の将来 DL 経路と一致させること。Windows は out-of-scope
