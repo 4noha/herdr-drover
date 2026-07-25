@@ -36,7 +36,12 @@ import (
 
 // claudeUpdateTimeout は `claude update`（ダウンロード込み）の上限。遠隔命令は
 // この呼び出しの間ブロックするので無限には待たない。
-const claudeUpdateTimeout = 5 * time.Minute
+//
+// ⚠実測 2026-07-25 で 5 分は**短すぎた**: claude 本体は ~250MB あり、ノート PC の
+// Wi-Fi では 5 分を超えて `signal: killed`（＝この上限による中断）になった。
+// 有線/高速回線の 2 台は 4 分以内に完了しており、回線差が素直に出る。上限は
+// 「暴走を止める backstop」であって「普通は間に合う値」であるべきなので 15 分。
+const claudeUpdateTimeout = 15 * time.Minute
 
 // claudeBinsFromPanes は稼働中のローカル claude pane が実際に起動している argv[0]
 // を重複なく集める（restart-claude と同じ exact な権威＝PATH を引かない）。
@@ -117,7 +122,15 @@ func claudeVersion(ctx context.Context, bin string) (string, error) {
 // 「更新された/されていない」は判定できないので、版の前後比較を権威にする。
 func runClaudeUpdate(ctx context.Context, bin string) (string, error) {
 	out, err := exec.CommandContext(ctx, bin, "update").CombinedOutput()
-	return strings.TrimSpace(string(out)), err
+	text := strings.TrimSpace(string(out))
+	// 上限で kill したときの生エラーは "signal: killed" で**原因が読み取れない**
+	// （実測 2026-07-25: ユーザーからは回線が遅いのか claude が壊れたのか区別が
+	// つかなかった）。ctx の期限切れなら理由と対処を明示して返す。
+	if err != nil && ctx.Err() != nil {
+		return text, fmt.Errorf("%v の上限内に終わらず中断した"+
+			"（回線が遅い/更新が大きい。claude 本体は数百 MB ある）: %w", claudeUpdateTimeout, ctx.Err())
+	}
+	return text, err
 }
 
 // updateClaudeAndRestart は「claude 更新 → セッションへ反映」の芯。CLI と遠隔命令が

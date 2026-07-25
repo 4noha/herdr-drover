@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/4noha/herdr-drover/internal/herdrapi"
 )
@@ -184,6 +185,25 @@ func TestResolveClaudeBin(t *testing.T) {
 		t.Fatalf("2 種類のバイナリが混在しているのに error にならなかった")
 	} else if !strings.Contains(err.Error(), "一意に決められない") {
 		t.Fatalf("error 文面が曖昧さを説明していない: %v", err)
+	}
+}
+
+// 上限で中断したときは「signal: killed」ではなく**理由の分かる**エラーを返す
+// （実測 2026-07-25: ノート PC の遅い回線で 5 分上限に当たり、生エラーからは
+// 回線が遅いのか claude が壊れたのか判別できなかった）。
+func TestRunClaudeUpdateReportsTimeoutReason(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "claude-stub")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nsleep 30\n"), 0o755); err != nil {
+		t.Fatalf("stub 作成: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	_, err := runClaudeUpdate(ctx, bin)
+	if err == nil {
+		t.Fatalf("上限超過が error にならなかった")
+	}
+	if !strings.Contains(err.Error(), "上限内に終わらず中断") {
+		t.Fatalf("エラーが理由を説明していない（signal: killed のまま?）: %v", err)
 	}
 }
 
