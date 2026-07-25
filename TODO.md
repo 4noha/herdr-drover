@@ -15,9 +15,21 @@ FAIL 確認・exact-match・AGPL 衛生・silent 変更禁止・対外操作は�
 |---|---|---|
 | `mac-studio-herdr`（owner/本作業機） | **v0.5.23** | 配信済（手動 rm→cp＋kickstart） |
 | `d24wt27c3j-herdr`（master） | **v0.5.23** | 配信済（遠隔 `update-all`・5 セッション再起動） |
-| `lph77xyyc7-herdr`（slave） | v0.5.22 | **未配信**（14:32 以降オフライン） |
-| `n9htqcr6g0-herdr`（slave） | v0.5.22 | **未配信**（14:32 以降オフライン） |
-| `desktop-djb9pfr-herdr`（Windows） | dev | **未配信**（7/20 以降オフライン・selfupdate は unix-only） |
+| `lph77xyyc7-herdr`（slave） | **v0.5.23** | 配信済（遠隔 `update-all`・1 セッション再起動） |
+| `n9htqcr6g0-herdr`（slave） | **v0.5.23** | 配信済（遠隔 `update-all`・2 セッション再起動） |
+| `desktop-djb9pfr-herdr` | dev | **未配信**（7/25 14:25 以降オフライン）。`update-all` を **pending で投入済**＝次回オンライン時に自動適用（古い pending の破棄処理は無い） |
+
+✅ **slave への遠隔 self-update が実機で確認できた**（TODO の長年の未検証項目）。
+`/slave/commands` の long-poll は `commands/{pc}/q` を relay 経由で読む同一経路で、
+**`updated_at` が 6 時間古くても命令は即座に届いた**（＝producer の state push が
+止まっていても命令経路は生きている＝`updated_at` は死活監視に使えない）。
+「remote self-update は slave 非到達＝各機で `herdr-drover update` 要」という
+**旧記述は誤り**（v0.5.9 以降は到達する）。
+
+✅ **P2 の window_name 改善が実データで効いた**。slave の `w1:p5` / `w1:p9` は
+更新前 `window_name` が pane_id（`w1:p5`）だったが、更新後は `claude` になった
+＝herdr UI から直接起動され drover が命名していないセッション。これらは P1 の
+穴塞ぎにより **restart/update の対象にもなった**（従来は organize だけが拾っていた）。
 
 Cloud Run `claude-master-relay` = **rev 00049**（drover-cloud v0.1.11・環境変数 7 個
 の生存を確認済み）。
