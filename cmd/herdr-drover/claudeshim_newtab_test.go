@@ -117,7 +117,7 @@ func focusedWorkspaceID(t *testing.T, api *herdrapi.Client) string {
 func TestClaudeShimNewSessionCreatesNewTabNotSplit(t *testing.T) {
 	sock := startHerdrForTest(t)
 	t.Setenv("HERDR_SOCKET_PATH", sock)
-	t.Setenv("HOME", t.TempDir()) // ルールファイル無し＝「ルール無し→現 workspace」経路
+	setTestHome(t, t.TempDir()) // ルールファイル無し＝「ルール無し→現 workspace」経路
 	installStubClaude(t)
 	work := chdirPhysical(t)
 	swapSeams(t, false, nil)
@@ -171,7 +171,7 @@ func TestClaudeShimRuleLandsNewTabInLabeledWorkspace(t *testing.T) {
 	sock := startHerdrForTest(t)
 	t.Setenv("HERDR_SOCKET_PATH", sock)
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	installStubClaude(t)
 	work := chdirPhysical(t)
 	swapSeams(t, false, nil)
@@ -215,7 +215,7 @@ func TestClaudeShimRuleAutoCreatesWorkspace(t *testing.T) {
 	sock := startHerdrForTest(t)
 	t.Setenv("HERDR_SOCKET_PATH", sock)
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	installStubClaude(t)
 	work := chdirPhysical(t)
 	swapSeams(t, false, nil)
@@ -261,7 +261,7 @@ func TestClaudeShimBrokenRulesFileLoudError(t *testing.T) {
 	sock := startHerdrForTest(t)
 	t.Setenv("HERDR_SOCKET_PATH", sock)
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	installStubClaude(t)
 	work := chdirPhysical(t)
 	swapSeams(t, false, nil)

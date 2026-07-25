@@ -14,7 +14,7 @@ import (
 func cloudsTestHome(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	return home
 }
 

@@ -7,6 +7,9 @@ require (
 	golang.org/x/sys v0.43.0
 )
 
+// Windows の herdr API 接続（named pipe）用。unix ビルドでは未使用。
+require github.com/Microsoft/go-winio v0.6.2
+
 require (
 	cloud.google.com/go/firestore v1.22.0 // indirect
 	google.golang.org/api v0.279.0 // indirect
@@ -18,7 +21,7 @@ require (
 	cloud.google.com/go/auth/oauth2adapt v0.2.8 // indirect
 	cloud.google.com/go/compute/metadata v0.9.0 // indirect
 	cloud.google.com/go/longrunning v0.9.0 // indirect
-	github.com/4noha/drover-cloud v0.1.11
+	github.com/4noha/drover-cloud v0.1.13
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect

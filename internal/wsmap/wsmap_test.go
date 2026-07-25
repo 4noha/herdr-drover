@@ -15,6 +15,24 @@ import (
 	"testing"
 )
 
+// setTestHome は HOME を dir へ隔離する（Load/Save が触る
+// ~/.herdr-drover/workspaces.json を実ユーザーのものと分離する必須ゲート）。
+//
+// ⚠ **t.Setenv("HOME", dir) だけでは Windows で隔離が効かない**: os.UserHomeDir()
+// は unix で $HOME、Windows では **%USERPROFILE%** を読む。実際に実ユーザーの
+// workspaces.json を壊した（2026-07-25）。両方を設定し、os.UserHomeDir() が dir
+// を返すことをその場で検証する＝隔離が破れたら書き込む前に落ちる。
+// cmd/herdr-drover/main_test.go の同名ヘルパと対（パッケージが違うため二重定義）。
+func setTestHome(t *testing.T, dir string) {
+	t.Helper()
+	t.Setenv("HOME", dir)
+	t.Setenv("USERPROFILE", dir) // Windows の os.UserHomeDir 実ソース
+	got, err := os.UserHomeDir()
+	if err != nil || got != dir {
+		t.Fatalf("HOME 隔離が効いていない（実 HOME を汚す危険）: os.UserHomeDir()=%q err=%v want %q", got, err, dir)
+	}
+}
+
 // ============ 純関数: Resolve（exact > 最長 prefix > default > ""） ============
 
 func TestResolveTable(t *testing.T) {
@@ -154,7 +172,7 @@ func TestParseValid(t *testing.T) {
 // ============ 実ファイル: Load/Save（temp-HOME 隔離） ============
 
 func TestLoadMissingFileIsEmptyMap(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setTestHome(t, t.TempDir())
 	m, err := Load()
 	if err != nil {
 		t.Fatalf("ファイル不在は「ルール無し」で正常のはず: %v", err)
@@ -166,7 +184,7 @@ func TestLoadMissingFileIsEmptyMap(t *testing.T) {
 
 func TestLoadBrokenFileLoudWithPath(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	dir := filepath.Join(home, ".herdr-drover")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
@@ -185,7 +203,7 @@ func TestLoadBrokenFileLoudWithPath(t *testing.T) {
 }
 
 func TestSaveLoadRoundTrip(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setTestHome(t, t.TempDir())
 	orig := &Map{
 		Exact:   map[string]string{"/w/proj": "a", "~/works/x": "b"},
 		Rules:   []Rule{{Prefix: "~/works", Workspace: "c"}, {Prefix: "/opt", Workspace: "d"}},
@@ -222,7 +240,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 // （lost update 防止の要。flock は open file description 単位＝同一プロセス
 // 内の別 fd でも相互排除される＝実プロセス間と同じ経路を踏む）。
 func TestUpdateConcurrentWritersKeepAllKeys(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setTestHome(t, t.TempDir())
 	const n = 8
 	var wg sync.WaitGroup
 	errs := make(chan error, n)
@@ -258,7 +276,7 @@ func TestUpdateConcurrentWritersKeepAllKeys(t *testing.T) {
 // changed=false / mutate エラー時は Save しない（既存内容が不変のまま）。
 func TestUpdateNoSaveOnUnchangedOrError(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	seed := `{"exact":{"/a":"x"}}`
 	dir := filepath.Join(home, ".herdr-drover")
 	if err := os.MkdirAll(dir, 0o755); err != nil {

@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net"
 	"time"
 )
 
@@ -83,7 +82,7 @@ func (c *Client) subscribeOnce(ctx context.Context, events []string, ch chan<- E
 		subs = append(subs, subscription{Type: e})
 	}
 
-	conn, err := net.DialTimeout("unix", c.SocketPath, defaultDialTimeout)
+	conn, err := dialHerdr(c.SocketPath, defaultDialTimeout)
 	if err != nil {
 		return false, fmt.Errorf("herdr dial %s: %w", c.SocketPath, err)
 	}

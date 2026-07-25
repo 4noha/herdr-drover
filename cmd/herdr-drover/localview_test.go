@@ -229,15 +229,6 @@ func TestLocalViewControlShrinksGridWhenLocalSmaller(t *testing.T) {
 	gen.stop()
 }
 
-// waitCond は fn が true になるまで poll（実 herdr の非同期反映を待つ）。
-func waitCond(t *testing.T, timeout time.Duration, desc string, fn func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if fn() {
-			return
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	t.Fatalf("timeout: %s", desc)
-}
+// waitCond は main_test.go（OS 非依存の共有ヘルパ）へ移動した。この
+// ファイルは //go:build unix のため、ここに置くと untagged な利用側
+//（claudeshim_resume_test.go）が Windows でコンパイルできない。

@@ -5,6 +5,7 @@ package main
 
 import (
 	"bytes"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +18,42 @@ func runCapture(t *testing.T, args ...string) (code int, stdout, stderr string) 
 	var out, errb bytes.Buffer
 	code = run(args, &out, &errb)
 	return code, out.String(), errb.String()
+}
+
+// setTestHome は HOME を dir へ隔離する（~/.herdr-drover を実ユーザーのものと
+// 分離するための必須ゲート）。
+//
+// ⚠ **t.Setenv("HOME", dir) だけでは Windows で隔離が効かない**: os.UserHomeDir()
+// は unix で $HOME、Windows では **%USERPROFILE%** を読む。HOME だけ差し替えた
+// テストを Windows で走らせると実ユーザーの ~/.herdr-drover を書き換え、
+// enroll(slave) の残骸掃除（enroll.go の os.Remove(sa.json/clouds.json)）が
+// **実 SA 鍵を消す**（2026-07-25 に実害発生）。
+//
+// 両方を設定したうえで os.UserHomeDir() が実際に dir を返すことをその場で
+// 検証する＝隔離が破れたら書き込む前に必ず落ちる（silent に実 HOME を汚さない）。
+func setTestHome(t *testing.T, dir string) {
+	t.Helper()
+	t.Setenv("HOME", dir)        // unix の os.UserHomeDir 実ソース
+	t.Setenv("USERPROFILE", dir) // Windows の os.UserHomeDir 実ソース
+	got, err := os.UserHomeDir()
+	if err != nil || got != dir {
+		t.Fatalf("HOME 隔離が効いていない（実 HOME を汚す危険）: os.UserHomeDir()=%q err=%v want %q", got, err, dir)
+	}
+}
+
+// waitCond は fn が true になるまで poll（実 herdr の非同期反映を待つ）。
+// OS 非依存＝ここ（untagged）に置く。unix 専用ファイルへ置くと untagged な
+// 利用側が Windows でコンパイルできない。
+func waitCond(t *testing.T, timeout time.Duration, desc string, fn func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if fn() {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("timeout: %s", desc)
 }
 
 func TestDispatchVersion(t *testing.T) {
@@ -102,7 +139,7 @@ func clearDroverEnv(t *testing.T) {
 	} {
 		t.Setenv(k, "")
 	}
-	t.Setenv("HOME", t.TempDir())
+	setTestHome(t, t.TempDir())
 }
 
 func TestResolveConfigDefaults(t *testing.T) {

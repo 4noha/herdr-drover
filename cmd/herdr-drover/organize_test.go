@@ -248,7 +248,7 @@ func TestComputeCaptureDuplicateLabelSkips(t *testing.T) {
 // （learn 側の書込は handleLearnEvent と同じファイル往復＝実書込）。
 func TestCaptureSaveKeepsConcurrentWrite(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	orgWriteRules(t, home, `{"exact":{"/proj/a":"src"}}`)
 	m, err := wsmap.Load() // cmdOrganize と同じ「先読み」snapshot
 	if err != nil {
@@ -284,7 +284,7 @@ func TestCaptureSaveKeepsConcurrentWrite(t *testing.T) {
 
 func TestFindExactKeyTildePreserved(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	m := &wsmap.Map{Exact: map[string]string{"~/proj": "alpha", "/other": "beta"}}
 	// "~/proj" キーは home 展開で同一パス＝既存キーの書式を保って上書き対象
 	old, existed, key := findExactKey(m, filepath.Join(home, "proj"))
@@ -300,7 +300,7 @@ func TestFindExactKeyTildePreserved(t *testing.T) {
 
 func TestReadLearnMovesTable(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	// ファイル不在 → false（挙動完全不変の既定）
 	if on, err := readLearnMoves(); err != nil || on {
 		t.Fatalf("不在: on=%v err=%v", on, err)
@@ -499,7 +499,7 @@ func TestOrganizeRealHerdrMoveTabKeepDryRun(t *testing.T) {
 	sock := startHerdrForTest(t)
 	t.Setenv("HERDR_SOCKET_PATH", sock)
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	api := herdrapi.New(sock)
 	claude := orgFakeClaude(t)
 
@@ -627,7 +627,7 @@ func TestOrganizeCaptureRealHerdrRoundTrip(t *testing.T) {
 	sock := startHerdrForTest(t)
 	t.Setenv("HERDR_SOCKET_PATH", sock)
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	api := herdrapi.New(sock)
 	claude := orgFakeClaude(t)
 
@@ -724,7 +724,7 @@ func TestLearnMovesRealEventsAndBacklogDedup(t *testing.T) {
 	sock := startHerdrForTest(t)
 	t.Setenv("HERDR_SOCKET_PATH", sock)
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	api := herdrapi.New(sock)
 	claude := orgFakeClaude(t)
 
@@ -803,7 +803,7 @@ func TestLearnRestartDoesNotResurrectDeletedRule(t *testing.T) {
 	sock := startHerdrForTest(t)
 	t.Setenv("HERDR_SOCKET_PATH", sock)
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	api := herdrapi.New(sock)
 	claude := orgFakeClaude(t)
 
@@ -865,7 +865,7 @@ func TestLearnSkipsDuplicateLabelWorkspace(t *testing.T) {
 	sock := startHerdrForTest(t)
 	t.Setenv("HERDR_SOCKET_PATH", sock)
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	api := herdrapi.New(sock)
 	claude := orgFakeClaude(t)
 

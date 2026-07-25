@@ -427,6 +427,120 @@ TODO の out-of-scope 宣言どおりで、対応するなら移植作業が要�
 
 ## 進行中 / 保留（再開ポイント）
 
+### 0. Windows 移植（**コード本体は main 済**・2026-07-26）
+
+作業機は **`desktop-djb9pfr-herdr`（Windows 11・herdr 0.7.4-preview）**。
+
+**ブランチ構造（重要）**:
+- **`main`**: Windows 移植のコード本体が入っている（`019d051 feat(windows)` /
+  `8f831c6 fix(test)` / docs 3 本 / `41ce39e build(windows)`）。**未 push**。
+- **`windows-port`**: main ＋ **`herdr-plugin.toml` の 1 commit だけ**。
+  main へ merge しないこと（理由は当該 commit メッセージ＝events 削除は
+  macOS/Linux の即時 re-scan を殺す・platforms への windows 追加はできない約束）。
+- `windows-port-backup-2026-07-26`: 分割前の旧ブランチ（不要になったら削除可）。
+
+なぜ共通ソースに入れてよいと判断したか:
+- 移植は **build-tag 分割＋seam 化**で unix 側はバイト等価。対話系
+  （attach/ssh-forward/localview）は Windows 非対応スタブ。
+- 唯一の実コストは **スタブのドリフト**（unix 側シグネチャ変更に追従できず
+  Windows でだけ壊れる。実例: pull で `runRemoteInject` に引数が増えた）。
+  → **`make check-windows`（`GOOS=windows` の build＋vet）を常設**して検出する。
+  Windows 実機不要（cgo 不使用）。`cmdSSHForward` のスタブ引数を削ると
+  `too many arguments in call to cmdSSHForward` で落ちることを**実証済**。
+- 前提だった「公開タグだけで Windows がビルドできる」は解決:
+  **drover-cloud v0.1.13**（`selfupdate/place_windows.go`）を発行し go.mod を更新。
+  `go.work` は不要になったので削除。⚠ **go.mod に replace を書かないこと**
+  （`GOWORK=off make dist` の規律が壊れる）。
+  ⚠ 発行時に上流で **v0.1.12 が別マシンから先に出ていた**ため本件は v0.1.13。
+  タグを切る前に必ず `git fetch --tags` すること。
+
+🔴 **実害（2026-07-25・恒久教訓）**: Windows で `go test ./...` を走らせると
+**実ユーザーの `~/.herdr-drover` が test fixture で上書きされ、`enroll(slave)` の
+残骸掃除（`enroll.go` の `os.Remove(sa.json/clouds.json)`）で実 SA 鍵が消えた**。
+真因は `os.UserHomeDir()` が unix=`$HOME` / **Windows=`%USERPROFILE%`** を読むこと＝
+`t.Setenv("HOME", tmp)` だけの隔離が Windows で **silent に無効**だった。
+対処は `setTestHome(t, dir)`（HOME＋USERPROFILE を設定し `os.UserHomeDir()` が
+実際に dir を返すことをその場で検証＝破れたら書き込む前に落ちる）。既存 55 箇所を置換。
+**他 OS の隔離テストを新 OS で走らせる前に、隔離が実際に効くかを確かめること。**
+
+- ✅ **この PC の `~/.herdr-drover` は復旧済み**（2026-07-25 23:25）。被害後の状態は
+  `~/.herdr-drover.bak-2026-07-25` に保全。復旧内容:
+  - `config.json` を daemon ログ（`agent.err.log` 冒頭）由来の実値へ書き戻し
+    （`gcp_project=claude-master-4noha` / `cloud_relay_url=wss://claude-master-relay-
+    nkzxa3hxma-an.a.run.app` / `learn_moves=true`。role なし＝master。
+    `pc_id` は hostname 由来で `desktop-djb9pfr-herdr` に一致するので書かない）。
+  - `clouds.json` は**置かない**（`LoadClouds` は不在なら config.json から単一
+    クラウドを導出＝ログの `clouds=1` と一致。SAKeyPath は既定 `~/.herdr-drover/sa.json`）。
+  - fixture ゴミ（`slave.json`・`sa-proj-*.json`・fixture `workspaces.json`）を削除。
+    workspaces.json は**実内容が失われた**＝不在＝「ルール無し」から再学習
+    （`learn_moves=true`／`organize --capture`）。
+  - `sa.json` は同一 GCP プロジェクトの既存鍵 `~/.claude-master/sa.json`
+    （`cm-agent@claude-master-4noha`）から復元し、ACL を本人のみへ制限（600 相当）。
+  - `herdr-drover status` で project/relay/pc_id/tick が被害前ログと**一致**を確認。
+  - ✅ **SA 鍵の認証も実機で検証済み**（23:56 の再起動）。この PC に ADC は無い
+    （`application_default_credentials.json` 不在・env 未設定＝実測）ので、
+    `state.NewWithCredentials` が成功して「クラウド開始」まで進んだ時点で
+    **鍵ファイルが使われた**ことが確定し、その後 tick（5s 周期の Firestore push）が
+    **エラー 0 で継続**＝RPC も認可されている。
+  - 🔍 **`google_application_credentials` は元々明示設定されていた**（推定ではなく
+    証拠あり）: `⚠ GOOGLE_APPLICATION_CREDENTIALS 未設定` の警告は**旧コード
+    （dab5a6a の config.go）にも存在**するのに、被害前 14:25 の起動ログには
+    出ていない＝当時 `cfg.Credentials` は非空だった。よって復元も明示設定に
+    合わせた（`C:\\Users\\nokki\\.herdr-drover\\sa.json`）。起動ログは被害前と
+    同じ形（警告なし）に戻っている。
+    ⚠ JSON なのでパス区切りは `\\`（heredoc で単一 `\` を書くと `\U`/`\n` が
+    不正エスケープになり config が壊れる。一度やらかして書き直した）。
+- ✅ **この PC へ反映済み（2026-07-25 23:56・`v0.5.24-4-g2793307`）**。Windows の
+  反映手順は macOS の rm→cp＋launchctl とは別＝以下が実測レシピ:
+  1. `CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$(git describe
+     --tags --always --dirty)" -o bin/herdr-drover.exe ./cmd/herdr-drover`
+  2. ⚠ **先に `./bin/herdr-drover.exe version` を実行して SAC を通るか試す**
+     （新規ビルド exe はブロックされ得る＝稼働バイナリを差し替えた後に判明すると
+     daemon が起動不能になる。ブロックされたら差し替えないこと）
+  3. `~/.herdr-drover/agent.pid` の pid **だけ** を `Stop-Process`（プロセス名が
+     herdr-drover であることを確認してから。裸の `pkill herdr` は恒久禁止）
+  4. 稼働 exe を**上書きせず rename 退避**（`herdr-drover.exe.old-<date>`＝
+     ロールバック用）→ 新 exe を copy
+  5. `Start-ScheduledTask -TaskName herdr-drover-agent`（タスクは logon トリガ・
+     `bin/start-agent.ps1` が herdr server 起動＋`agent` を Start-Process）
+  6. `agent.err.log` で起動 6 行＋`tick エラー` 0 を確認
+  - ⚠ `start-agent.ps1` は `-RedirectStandardError` で **`agent.err.log` を切り詰める**
+    ＝再起動前に必要なら退避する（今回の復旧根拠はこのログだった。被害前ログは
+    `~/.herdr-drover.bak-2026-07-25/agent.err.log.pre-restart` に保全）。
+  - ロールバック: 4 の `.old-2026-07-25` を戻して 5 を再実行。
+- 🔴 **Windows は self-update できない**（follow-up）: `make dist` の対象は
+  linux/{amd64,arm64}・darwin/{amd64,arm64} のみで **windows を作っていない**のに、
+  `selfupdate` は `herdr-drover_windows_amd64.exe` を探す（`selfupdate.go`）＝
+  release に asset が無く必ず失敗する。**この PC 宛の pending `update-all` は
+  受信しても update 部分が失敗する**（23:58 時点で未受信）。Windows PC を
+  正式運用するなら `make dist` に windows/amd64 を足すのが先。
+- ⏳ **残る Windows テスト赤**（実害なし・いずれも移植の未了）:
+  - `internal/wsmap`: fixture が POSIX パス（`/w/proj` は Windows で非絶対）＝
+    Parse/Resolve が落ちる。**実運用キーは `C:\...` で絶対＝production は通る**が、
+    セパレータ/大文字小文字（Windows は case-insensitive）の正規化は未検討。
+  - `internal/herdrapi`: 実 herdr harness が `/tmp` 前提（Windows は temp dir＋
+    named pipe へ要移植）。`TestSocketPathResolution` は既定パスが OS 依存に
+    なった（`%APPDATA%\herdr\herdr.sock`）＝期待値を OS 分割すること。
+  - `internal/injectindex`: `perm=0600` 判定（Windows に POSIX perm 無し）。
+  - `internal/agentfwd`: unix socket＋`/tmp`（SSH 転送＝Windows out-of-scope）。
+  - `cmd/herdr-drover`（実行できた回の内訳・**製品バグは 0・全て harness**）:
+    ①`startHerdrForTest` が `/tmp` 前提（macOS の `sun_path` 104B 対策）＝
+    Windows に `/tmp` が無く**実 herdr テスト約 15 本が setup で落ちる**。
+    Windows 用 temp dir＋named pipe パスへ要移植（ここを直すと一番効く）。
+    ②`TestStdinIsTTYRealDevices` は POSIX pty 前提（Windows は ConPTY）。
+    ③`TestLookupAgentBinSkipsShimItself` は `os.Symlink` に開発者モード/管理者
+    権限が要る（`A required privilege is not held by the client`）＝skip 条件が要る。
+  - ⚠ **Smart App Control**（`VerifiedAndReputablePolicyState=1`）が**新しく
+    ビルドした未署名 exe** をブロックする（`An Application Control policy has
+    blocked this file`／bash 越しは `Permission denied`）。`*.test.exe` は
+    間欠的にブロックされ、`go run`/`go build` した使い捨てバイナリは実測で
+    毎回ブロックされた（古い `~/.herdr-drover/bin/herdr-drover.exe` は動く＝
+    レピュテーションで枯れた実行体は通る）。`GOTMPDIR` 変更では回避不可。
+    **SAC は一度切ると Windows 再インストールでしか戻せない＝切らない**。
+    テストが赤/緑どちらとも言えない回はこれを疑い、まず再実行する。
+  - `install`/`update` は launchd/inode 前提＝`//go:build unix` にした。**Windows の
+    常駐化（タスクスケジューラ）と update の Windows 経路はテスト未整備**。
+
 ### A. SSH エージェント転送 — Phase 3（実機 e2e）保留中
 
 共用 slave 上で owner の SSH 鍵を**ディスクに置かず**一時的に git/gh 認証する
@@ -539,7 +653,9 @@ launchctl kickstart -k gui/$(id -u)/com.4noha.herdr-drover
    （**対外操作＝ユーザー明示確認後**）。※herdr-drover は既に GitHub 公開済み
    （release 発行運用中）。marketplace topic 付与が残。
 6. 複数クラウド実 GCP e2e: 2 つ目の GCP プロジェクト/SA 鍵が要る（要 Mac canonical）。
-7. Windows 対応（out-of-scope 宣言済・将来。現状 wsmap/selfupdate が unix-only）。
+7. **Windows 対応** → **in-flight**（上記 0・branch `windows-port`）。build/vet は
+   3 OS 緑。残: この PC の設定復旧・drover-cloud v0.1.12（place_windows.go）・
+   Windows テストの移植・常駐化（タスクスケジューラ）。
 
 ---
 

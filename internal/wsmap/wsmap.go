@@ -25,7 +25,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"syscall"
 
 	"github.com/4noha/herdr-drover/internal/herdrapi"
 )
@@ -206,8 +205,8 @@ func Update(mutate func(*Map) (changed bool, err error)) error {
 	if err != nil {
 		return fmt.Errorf("workspaces.json lock: %w", err)
 	}
-	defer lf.Close() // close で flock も解放される
-	if err := syscall.Flock(int(lf.Fd()), syscall.LOCK_EX); err != nil {
+	defer lf.Close() // close でロックも解放される
+	if err := flockExclusive(lf); err != nil {
 		return fmt.Errorf("workspaces.json flock: %w", err)
 	}
 	m, err := Load()

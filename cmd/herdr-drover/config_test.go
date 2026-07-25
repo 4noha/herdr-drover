@@ -22,7 +22,7 @@ func writeConfigJSON(t *testing.T, home, body string) {
 
 func TestResolveConfigMirrorAgents(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home) // configFilePath は os.UserHomeDir()=$HOME を使う
+	setTestHome(t, home) // configFilePath は os.UserHomeDir()=$HOME を使う
 
 	// 既定 OFF（env も file も無し）。
 	t.Setenv("DROVER_MIRROR_AGENTS", "")
