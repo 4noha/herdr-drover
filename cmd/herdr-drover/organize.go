@@ -277,6 +277,18 @@ func claudeNamesByPane(agents []herdrapi.AgentInfo) map[string]string {
 // exact-match で判定する（ファイル冒頭コメントの根拠参照）。
 // conflict が非空なら「機械確定不能」＝対象外＋報告（推測で動かさない）。
 func classifyClaudePane(p orgPane, names map[string]string) (isClaude bool, conflict string) {
+	// ↗窓 注入 pane は**常に対象外**（reconcile が inject_placement で配置を
+	// 管理する領分＝organize が動かすと両者が取り合う）。identity token での
+	// exact-match 除外は restart-claude と同じ規律。
+	//
+	// ⚠これが無いと実害が出る（実測 2026-07-25・organize --dry-run で確認）:
+	// mirror_agents(v0.5.8) が注入 pane の herdr 検出値 `agent` にリモート側の
+	// agent 名を転記するため、リモートが claude なら detected が真になる。
+	// さらに注入 pane の cwd は herdr が同一 workspace の既存 pane 値を継承する
+	// （v0.5.12 で判明した quirk）ので、**でたらめな cwd で誤ルーティング**される。
+	if p.Tokens[injTokPC] != "" || p.Tokens[injTokSID] != "" {
+		return false, ""
+	}
 	name := names[p.PaneID]
 	named := isClaudeAgentName(name)
 	detected := p.Agent == "claude"

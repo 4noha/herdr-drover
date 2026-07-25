@@ -48,6 +48,22 @@ func TestClassifyClaudePaneTable(t *testing.T) {
 		{orgPane{PaneID: "w1:p6", Agent: "codex"}, false, false}, // 別 agent 検出＝非 claude が機械確定
 		{orgPane{PaneID: "w1:p4", Agent: "codex"}, false, true},  // 矛盾＝対象外＋報告
 		{orgPane{PaneID: "w1:p3", Agent: "claude"}, true, false}, // 名は別だが検出が claude → 対象
+
+		// ↗窓 注入 pane は identity token で**常に対象外**。
+		// mirror_agents(v0.5.8) がリモートの agent 名を検出値 `agent` へ転記する
+		// ため、除外が無いと detected=true になって organize が動かしてしまう
+		// （実測 2026-07-25: organize --dry-run が注入 pane 2 枚の MOVE を計画。
+		// しかも注入 pane の cwd は herdr が同 workspace の既存値を継承する
+		// quirk があるので、でたらめな cwd で誤ルーティングされる）。
+		{orgPane{PaneID: "w1:p7", Agent: "claude",
+			Tokens: map[string]string{injTokPC: "other-herdr", injTokSID: "w1:p9"}}, false, false},
+		// 片方の token だけでも注入 pane として扱う（token 付与は 2 キー同時だが、
+		// 部分的に読めた場合に「ローカル claude」へ倒さない＝安全側）。
+		{orgPane{PaneID: "w1:p8", Agent: "claude",
+			Tokens: map[string]string{injTokPC: "other-herdr"}}, false, false},
+		// シム命名まで一致していても注入 pane なら対象外。
+		{orgPane{PaneID: "w1:p1", Agent: "claude",
+			Tokens: map[string]string{injTokSID: "w1:p3"}}, false, false},
 	}
 	for i, c := range cases {
 		got, conflict := classifyClaudePane(c.pane, names)
