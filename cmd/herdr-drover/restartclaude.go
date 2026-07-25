@@ -172,31 +172,6 @@ func selectRestartTargets(agents []herdrapi.AgentInfo, sid, agentFilter string) 
 		"（claude と判定できない・↗窓 注入 pane・既に消滅、のいずれか）", sid)
 }
 
-// stripModelArgv は argv から `--model <値>` / `--model=<値>` を取り除く純関数。
-// claude の model 指定に短縮形は無い（実測 2.1.220 の --help）＝`-m` は扱わない
-// （勝手に別フラグを食べない）。
-func stripModelArgv(argv []string) []string {
-	if len(argv) == 0 {
-		return nil
-	}
-	out := make([]string, 0, len(argv))
-	out = append(out, argv[0])
-	for i := 1; i < len(argv); i++ {
-		a := argv[i]
-		if a == "--model" {
-			if i+1 < len(argv) {
-				i++ // 値も一緒に落とす
-			}
-			continue
-		}
-		if strings.HasPrefix(a, "--model=") {
-			continue
-		}
-		out = append(out, a)
-	}
-	return out
-}
-
 // stripResumeArgv は argv から resume 指定だけを取り除く純関数
 // （argv[0] と resume 以外のフラグは順序ごとそのまま）。
 // rebuildResumeArgv は argv に会話 resume と --model を張り直す。
@@ -210,10 +185,10 @@ func rebuildResumeArgv(kind string, argv []string, sess herdrapi.AgentSession, m
 	if len(argv) == 0 {
 		return nil
 	}
-	out := append([]string(nil), argv...)
-	if model != "" {
-		out = append(stripModelArgv(out), "--model", model)
-	}
+	// モデル指定も Spec 駆動（フラグ名・短縮形が agent ごとに違う。codex の
+	// `-m` を剥がし損ねると二重指定になる）。Spec を持たない agent では
+	// **argv を一切いじらない**＝知らないエージェントに勝手なフラグを足さない。
+	out := agentid.BuildModel(kind, argv, model)
 	if sess.Value != "" {
 		out = agentid.BuildResume(kind, out, sess.Value)
 	}
@@ -529,9 +504,7 @@ func restartOneClaudePane(api *herdrapi.Client, t restartTarget, opt restartOpti
 		tabLabel = filepath.Base(cwd)
 	}
 	fbArgv := agentid.StripResume(t.AgentKind, leaf.Command)
-	if opt.Model != "" {
-		fbArgv = append(stripModelArgv(fbArgv), "--model", opt.Model)
-	}
+	fbArgv = agentid.BuildModel(t.AgentKind, fbArgv, opt.Model)
 	fbPaneID, err := applyClaudeTab(api, t.WorkspaceID, tabLabel, fbArgv, cwd)
 	if err != nil {
 		return "error", fmt.Sprintf("%s で即終了し、resume 無しの作り直しにも失敗"+
@@ -634,7 +607,11 @@ func summarizeRestart(results []restartOutcome) string {
 }
 
 // cmdRestartClaude は CLI 入口。
-func cmdRestartClaude(args []string, stdout, stderr io.Writer) error {
+// cmdRestartClaude は restart-agent-session / 旧名 restart-claude の入口。
+// legacyClaudeName=true（旧名で呼ばれた）なら **agent は claude 固定**として扱う
+// ＝旧名は claude 専用だったので、既存の手順書（`restart-claude --model opus`）を
+// そのまま通す。新名では --model に --agent を要求する（モデル名が種別固有のため）。
+func cmdRestartClaudeNamed(args []string, stdout, stderr io.Writer, legacyClaudeName bool) error {
 	fs := flag.NewFlagSet("restart-claude", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	force := fs.Bool("force", false, "既定の安全網を外す（作業中 pane・会話 ref が取れない pane も再起動する＝実行中タスクや会話が失われる）")
@@ -649,6 +626,22 @@ func cmdRestartClaude(args []string, stdout, stderr io.Writer) error {
 	if *agent != "" && !agentid.IsCanonical(*agent) {
 		return fmt.Errorf("%w: 未知のエージェント種別 %q（canonical label 21 種のいずれか）",
 			errUsage, *agent)
+	}
+	// ⚠**モデル名は agent 固有**（claude=opus / codex=gpt-5 / cursor=sonnet-4-thinking）。
+	// 種別を絞らずに渡すと、値が通らないエージェントの pane を壊す（作り直しに
+	// 失敗して会話を失う）。旧名 restart-claude 経由は claude 固定なので許す。
+	if legacyClaudeName && *agent == "" {
+		*agent = "claude"
+	}
+	if *model != "" && *agent == "" {
+		return fmt.Errorf("%w: --model はモデル名が種別ごとに違うため --agent と併用が必要"+
+			"（例: --agent claude --model opus）", errUsage)
+	}
+	if *model != "" && *agent != "" {
+		if _, ok := agentid.Model(*agent); !ok {
+			return fmt.Errorf("%w: %s のモデル指定方法が未登録＝推測でフラグを足さない"+
+				"（internal/agentid の modelSpecs に追加が要る）", errUsage, *agent)
+		}
 	}
 	rest := fs.Args()
 	if len(rest) > 1 {
@@ -670,4 +663,9 @@ func cmdRestartClaude(args []string, stdout, stderr io.Writer) error {
 	}
 	fmt.Fprintf(stdout, "restart-agent-session: %s\n", summarizeRestart(results))
 	return nil
+}
+
+// cmdRestartClaude は後方互換の薄いラッパ（新名の既定入口）。
+func cmdRestartClaude(args []string, stdout, stderr io.Writer) error {
+	return cmdRestartClaudeNamed(args, stdout, stderr, false)
 }

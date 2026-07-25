@@ -320,6 +320,13 @@ organize / producer が共有）。権威は強い順に:
   （herdr が `agent_session` を出さない）＝素起動へ落として loud に報告。
 - **UpdaterSpec** — `VersionArgv`（nil=版比較 skip）／`UpdateArgv`（nil=更新口なし＝
   再起動のみ）／`Timeout`（**per-agent 予算**。全体に 1 本掛けない）。
+  実 CLI の `--help` で確認した 3 種（claude / codex / cursor。いずれも
+  `<bin> update` と `--version`）。**推測で書かない**。
+- **ModelSpec** — 起動時のモデル指定。`Flag` と `Aliases`（strip 対象の短縮形）。
+  ⚠**フラグ名が同じでもモデル名は互換でない**（claude=`opus` / codex=`gpt-5` /
+  cursor=`sonnet-4-thinking`）。よって `--model` は **`--agent` と併用が必須**
+  （旧名 `restart-claude` 経由のみ claude 固定として許す＝既存手順書の互換）。
+  codex だけ短縮形 `-m` を持つので、**剥がし損ねると二重指定になる**。
 - **InstallSpec** — `BinNames` / `WellKnownPaths`。⚠**`BinNames` は herdr の
   `lookup_agent` alias 表の要素でなければならない**。表に無い basename で起動すると
   herdr の検出（前景プロセス名基準）に**一切載らず**、`pane.agent` も

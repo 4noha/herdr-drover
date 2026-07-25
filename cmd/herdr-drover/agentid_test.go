@@ -7,6 +7,8 @@ package main
 
 import (
 	"bytes"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -257,5 +259,39 @@ func TestRestartAllowsResumeIncapableAgents(t *testing.T) {
 	if len(results) != 1 || results[0].Status != "done" {
 		t.Fatalf("resume 非対応が再起動できない（恒常的に ref が無いだけ）: %+v\nlog=%s",
 			results, log.String())
+	}
+}
+
+// **モデル名は agent 固有**（claude=opus / codex=gpt-5 / cursor=sonnet-4-thinking）。
+// 種別を絞らずに --model を渡すと、値が通らないエージェントの pane を壊す
+// （作り直しに失敗して会話を失う）。CLI で撥ねる。
+func TestModelRequiresAgentUnlessLegacyName(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		args    []string
+		legacy  bool
+		wantErr string
+	}{
+		{"新名で --model のみ＝撥ねる", []string{"--model", "opus", "--dry-run"}, false, "--agent と併用"},
+		{"新名でも --agent があれば通る", []string{"--model", "opus", "--agent", "claude", "--dry-run"}, false, ""},
+		{"旧名 restart-claude は claude 固定＝通る", []string{"--model", "opus", "--dry-run"}, true, ""},
+		{"モデル指定方法が未登録の種別は撥ねる",
+			[]string{"--model", "x", "--agent", "gemini", "--dry-run"}, false, "未登録"},
+		{"未知の種別は撥ねる", []string{"--agent", "nosuch", "--dry-run"}, false, "未知のエージェント種別"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := cmdRestartClaudeNamed(tc.args, io.Discard, io.Discard, tc.legacy)
+			if tc.wantErr == "" {
+				// herdr に繋がらない環境では実行時エラーになるが、**使い方エラーでは
+				// ない**ことだけを見る（ここで検証したいのは引数の受理可否）。
+				if err != nil && errors.Is(err, errUsage) {
+					t.Fatalf("使い方エラーで撥ねられた: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("err = %v, want に %q を含む", err, tc.wantErr)
+			}
+		})
 	}
 }

@@ -165,7 +165,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		// エージェントセッションを会話ごと作り直して新バイナリを掴ませる
 		// （restartclaude.go）。--force/--dry-run/--agent と任意の sid を取る。
 		// 旧名 restart-claude は alias（既存の手順書・スクリプトを壊さない）。
-		if err := cmdRestartClaude(rest, stdout, stderr); err != nil {
+		if err := cmdRestartClaudeNamed(rest, stdout, stderr, cmd == "restart-claude"); err != nil {
 			fmt.Fprintf(stderr, "herdr-drover %s: %v\n", cmd, err)
 			if errors.Is(err, errUsage) {
 				return 2

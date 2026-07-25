@@ -107,7 +107,14 @@ type UpdaterSpec struct {
 var updaterSpecs = map[string]UpdaterSpec{
 	// claude: `claude update`。~250MB の DL があり 5 分では足りない（実測で
 	// timeout し `signal: killed` になった）＝15 分。
+	// 版の出力: "2.1.220 (Claude Code)"
 	"claude": {VersionArgv: []string{"--version"}, UpdateArgv: []string{"update"}, Timeout: 15 * time.Minute},
+	// codex: `codex update`（--help に "Update Codex to the latest version"）。
+	// 版の出力: "codex-cli 0.145.0"
+	"codex": {VersionArgv: []string{"--version"}, UpdateArgv: []string{"update"}, Timeout: 15 * time.Minute},
+	// cursor: `cursor-agent update`（--help に "Update Cursor Agent to the latest version"）。
+	// 版の出力: "2026.07.23-e383d2b"
+	"cursor": {VersionArgv: []string{"--version"}, UpdateArgv: []string{"update"}, Timeout: 15 * time.Minute},
 }
 
 // Updater は agent の UpdaterSpec と、載っているかを返す。
@@ -141,6 +148,81 @@ var installSpecs = map[string]InstallSpec{
 
 // Install は agent の InstallSpec と、載っているかを返す。
 func Install(agent string) (InstallSpec, bool) { s, ok := installSpecs[agent]; return s, ok }
+
+// ModelSpec は「起動時のモデル指定」の差分。
+//
+// ⚠**モデル名は agent 固有**（claude=`opus`/`sonnet`、codex=`gpt-5`、
+// cursor=`sonnet-4-thinking`）。フラグ名がたまたま同じでも**値は互換でない**ので、
+// 種別を跨いで同じ値を渡してはいけない。呼び手は `--model` を使うとき
+// **必ず対象種別を 1 つに絞る**こと。
+type ModelSpec struct {
+	Flag string // "--model"
+	// Aliases は strip 対象の別表記。**落とすときだけ広く、付けるときは Flag に
+	// 統一する**（残すと二重指定になる。codex の `-m` で実際に起きうる）。
+	Aliases []string
+}
+
+// modelSpecs — 実 CLI の --help で確認した agent のみ載せる（推測で書かない）。
+// ここに無い agent に `--model` を渡してはいけない（呼び手が loud に撥ねる）。
+var modelSpecs = map[string]ModelSpec{
+	"claude": {Flag: "--model"},                          // 短縮形なし（実測 2.1.220）
+	"codex":  {Flag: "--model", Aliases: []string{"-m"}}, // `-m, --model <MODEL>`
+	"cursor": {Flag: "--model"},                          // `--model <model>`
+}
+
+// Model は agent の ModelSpec と、載っているかを返す。
+func Model(agent string) (ModelSpec, bool) { s, ok := modelSpecs[agent]; return s, ok }
+
+// StripModel は argv からモデル指定を取り除く（Flag と Aliases の両方・
+// `--model=<v>` 形も含む）。Spec が無い agent では argv を触らない。
+func StripModel(agent string, argv []string) []string {
+	if len(argv) == 0 {
+		return nil
+	}
+	sp, ok := modelSpecs[agent]
+	if !ok {
+		return append([]string(nil), argv...)
+	}
+	flags := append([]string{sp.Flag}, sp.Aliases...)
+	out := make([]string, 0, len(argv))
+	out = append(out, argv[0])
+	for i := 1; i < len(argv); i++ {
+		a := argv[i]
+		hit := false
+		for _, f := range flags {
+			if a == f {
+				// 値を取るフラグ。次がフラグ形でなければ値も落とす。
+				if i+1 < len(argv) && !strings.HasPrefix(argv[i+1], "-") {
+					i++
+				}
+				hit = true
+				break
+			}
+			if strings.HasPrefix(a, f+"=") {
+				hit = true
+				break
+			}
+		}
+		if !hit {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// BuildModel は argv のモデル指定を model へ張り替える。
+// model が空、または agent が ModelSpec を持たなければ **argv を一切いじらない**
+// （知らないエージェントに勝手なフラグを足さない）。
+func BuildModel(agent string, argv []string, model string) []string {
+	if len(argv) == 0 {
+		return nil
+	}
+	sp, ok := modelSpecs[agent]
+	if !ok || model == "" {
+		return append([]string(nil), argv...)
+	}
+	return append(StripModel(agent, argv), sp.Flag, model)
+}
 
 // herdrExecAliases は herdr `lookup_agent` の alias 表（実ソース抽出）。
 // 「この basename で起動すれば herdr がその agent として検出する」の権威。

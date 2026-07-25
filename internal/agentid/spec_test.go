@@ -194,3 +194,76 @@ func TestIsDirectInvocationCoversAllAgents(t *testing.T) {
 		t.Error("未知 kind を直接起動と判定した")
 	}
 }
+
+// ModelSpec は**実 CLI の --help で確認した agent のみ**（推測で書かない）。
+// フラグ名が同じでも**モデル名は互換でない**ので、種別を跨いで同じ値を
+// 渡してはいけない（呼び手が --agent を要求する）。
+func TestModelSpec(t *testing.T) {
+	for _, a := range []string{"claude", "codex", "cursor"} {
+		sp, ok := Model(a)
+		if !ok || sp.Flag != "--model" {
+			t.Errorf("%s: ModelSpec = %+v ok=%v", a, sp, ok)
+		}
+	}
+	// codex だけ短縮形 -m を持つ（実測 `-m, --model <MODEL>`）。
+	if sp, _ := Model("codex"); len(sp.Aliases) != 1 || sp.Aliases[0] != "-m" {
+		t.Errorf("codex の Aliases = %v（-m のはず）", sp.Aliases)
+	}
+	if sp, _ := Model("claude"); len(sp.Aliases) != 0 {
+		t.Errorf("claude に短縮形は無い（実測 2.1.220）: %v", sp.Aliases)
+	}
+	if _, ok := Model("gemini"); ok {
+		t.Error("未確認の agent に ModelSpec を書いてはいけない")
+	}
+}
+
+// モデル指定の張り替えは Spec 駆動。**短縮形を剥がし損ねると二重指定になる**
+// （codex の -m で実際に起きうる）。
+func TestBuildModel(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		agent string
+		argv  []string
+		model string
+		want  []string
+	}{
+		{"新規付与", "claude", []string{"/p/claude"}, "opus",
+			[]string{"/p/claude", "--model", "opus"}},
+		{"既存を張り替え", "claude", []string{"/p/claude", "--model", "sonnet"}, "opus",
+			[]string{"/p/claude", "--model", "opus"}},
+		{"= 形も剥がす", "claude", []string{"/p/claude", "--model=sonnet"}, "opus",
+			[]string{"/p/claude", "--model", "opus"}},
+		{"codex の短縮形 -m を剥がす（二重指定の防止）", "codex",
+			[]string{"/p/codex", "-m", "gpt-5", "--full-auto"}, "gpt-5-codex",
+			[]string{"/p/codex", "--full-auto", "--model", "gpt-5-codex"}},
+		{"model 空なら触らない", "claude", []string{"/p/claude", "--model", "sonnet"}, "",
+			[]string{"/p/claude", "--model", "sonnet"}},
+		{"Spec 無しは触らない（勝手なフラグを足さない）", "gemini",
+			[]string{"/p/gemini", "--foo"}, "x", []string{"/p/gemini", "--foo"}},
+		{"無関係な引数は順序ごと保つ", "claude",
+			[]string{"/p/claude", "--verbose", "--resume", "u"}, "opus",
+			[]string{"/p/claude", "--verbose", "--resume", "u", "--model", "opus"}},
+	} {
+		got := BuildModel(tc.agent, tc.argv, tc.model)
+		if !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%s: BuildModel(%s, %v, %q) = %v, want %v",
+				tc.name, tc.agent, tc.argv, tc.model, got, tc.want)
+		}
+	}
+}
+
+// 更新口は実 CLI で確認した 3 種（いずれも `<bin> update` と `--version`）。
+func TestUpdaterSpecCoversVerifiedAgents(t *testing.T) {
+	for _, a := range []string{"claude", "codex", "cursor"} {
+		sp, ok := Updater(a)
+		if !ok || len(sp.UpdateArgv) != 1 || sp.UpdateArgv[0] != "update" {
+			t.Errorf("%s: UpdaterSpec = %+v ok=%v", a, sp, ok)
+		}
+		if len(sp.VersionArgv) != 1 || sp.VersionArgv[0] != "--version" {
+			t.Errorf("%s: VersionArgv = %v", a, sp.VersionArgv)
+		}
+	}
+	if _, ok := Updater("gemini"); ok {
+		t.Error("未確認の agent に UpdaterSpec を書いてはいけない")
+	}
+}
