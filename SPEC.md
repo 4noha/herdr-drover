@@ -340,7 +340,9 @@ organize / producer が共有）。権威は強い順に:
 ⚠ **`agent_session` は herdr が自力で見つけるのではなく、各エージェントの hook が
 報告する**（`herdr integration install <agent>` で設置。`herdr integration status`
 で確認）。**integration 未設置のエージェントは resume が原理的に不可能**
-（drover 側は正しく素起動へ落として loud に報告する）。
+（drover 側は正しく素起動へ落として loud に報告する）。設置状況は**環境ごとに
+違う**ので、`agent_session` が付かないときは status を確認する — ただし
+**未設置は原因の候補の 1 つにすぎない**（下の trust ダイアログの例を参照）。
 
 ⚠ **初回起動時の同意ダイアログに注意**。cursor-agent は新しい cwd で
 `Workspace Trust Required` を出して**入力を全て吸う**。通過するまで会話が始まらず、

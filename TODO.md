@@ -341,10 +341,15 @@ DESIGN_MULTI_AGENT.md の着手順序を**全段完了**。**現行仕様の正�
 **マルチエージェント対応を実エージェントで検証**した。`.zshrc` に alias を配線
 （`codex` → `shim codex`／`cursor-agent` → `shim cursor`。claude と同じ方式）。
 
-**最大の発見**: `agent_session` は herdr が自力で見つけるのではなく、
-**各エージェントの hook が報告する**（`herdr integration install <agent>`）。
-codex/cursor には未設置だったので、入れるまで resume は原理的に不可能だった。
-`herdr integration status` で確認できる（claude/copilot は導入済だった）。
+**仕組みの要点**: `agent_session` は herdr が自力で見つけるのではなく、
+**各エージェントの hook が報告する**（`herdr integration install <agent>`／
+`herdr integration status` で確認）。**未設置なら resume は原理的に不可能**。
+
+⚠ このPCでの実施記録: install 前の `status` は claude=current(v7) /
+copilot=current(v2) / codex・cursor=not installed と表示したので install した。
+**ただし「未設置だったから動かなかった」は言い過ぎ**（cursor が動かなかった
+真因は下記の Workspace Trust ダイアログで、integration ではない）。他機では
+既に設置済みの場合がある＝**環境ごとに status で確認すること**。
 
 | | 検出 | agent_session | resume argv | 再起動 |
 |---|---|---|---|---|
