@@ -469,12 +469,43 @@ main（v0.5.23 相当 e3314d3）へ rebase 済みの 2 commit が branch `window
   - `sa.json` は同一 GCP プロジェクトの既存鍵 `~/.claude-master/sa.json`
     （`cm-agent@claude-master-4noha`）から復元し、ACL を本人のみへ制限（600 相当）。
   - `herdr-drover status` で project/relay/pc_id/tick が被害前ログと**一致**を確認。
-  - ⚠ **未検証**: SA 鍵が実際に Firestore 認証を通るかは**次回 daemon 再起動まで
-    未確認**（`status` はクラウド接続を見ない・gcloud 不在・使い捨て検証バイナリは
-    SAC にブロックされる）。稼働中 daemon（pid 12124・14:25 起動）は旧設定を
-    メモリに保持して正常動作中（tick エラー 0）。⚠ タスクスケジューラ
-    `herdr-drover-agent`（Ready）と**この PC 宛 pending `update-all`** のどちらでも
-    再起動が起きる＝**その時が実質の検証**。失敗したら `enroll` からやり直す。
+  - ✅ **SA 鍵の認証も実機で検証済み**（23:56 の再起動）。この PC に ADC は無い
+    （`application_default_credentials.json` 不在・env 未設定＝実測）ので、
+    `state.NewWithCredentials` が成功して「クラウド開始」まで進んだ時点で
+    **鍵ファイルが使われた**ことが確定し、その後 tick（5s 周期の Firestore push）が
+    **エラー 0 で継続**＝RPC も認可されている。
+  - 🔍 **`google_application_credentials` は元々明示設定されていた**（推定ではなく
+    証拠あり）: `⚠ GOOGLE_APPLICATION_CREDENTIALS 未設定` の警告は**旧コード
+    （dab5a6a の config.go）にも存在**するのに、被害前 14:25 の起動ログには
+    出ていない＝当時 `cfg.Credentials` は非空だった。よって復元も明示設定に
+    合わせた（`C:\\Users\\nokki\\.herdr-drover\\sa.json`）。起動ログは被害前と
+    同じ形（警告なし）に戻っている。
+    ⚠ JSON なのでパス区切りは `\\`（heredoc で単一 `\` を書くと `\U`/`\n` が
+    不正エスケープになり config が壊れる。一度やらかして書き直した）。
+- ✅ **この PC へ反映済み（2026-07-25 23:56・`v0.5.24-4-g2793307`）**。Windows の
+  反映手順は macOS の rm→cp＋launchctl とは別＝以下が実測レシピ:
+  1. `CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$(git describe
+     --tags --always --dirty)" -o bin/herdr-drover.exe ./cmd/herdr-drover`
+  2. ⚠ **先に `./bin/herdr-drover.exe version` を実行して SAC を通るか試す**
+     （新規ビルド exe はブロックされ得る＝稼働バイナリを差し替えた後に判明すると
+     daemon が起動不能になる。ブロックされたら差し替えないこと）
+  3. `~/.herdr-drover/agent.pid` の pid **だけ** を `Stop-Process`（プロセス名が
+     herdr-drover であることを確認してから。裸の `pkill herdr` は恒久禁止）
+  4. 稼働 exe を**上書きせず rename 退避**（`herdr-drover.exe.old-<date>`＝
+     ロールバック用）→ 新 exe を copy
+  5. `Start-ScheduledTask -TaskName herdr-drover-agent`（タスクは logon トリガ・
+     `bin/start-agent.ps1` が herdr server 起動＋`agent` を Start-Process）
+  6. `agent.err.log` で起動 6 行＋`tick エラー` 0 を確認
+  - ⚠ `start-agent.ps1` は `-RedirectStandardError` で **`agent.err.log` を切り詰める**
+    ＝再起動前に必要なら退避する（今回の復旧根拠はこのログだった。被害前ログは
+    `~/.herdr-drover.bak-2026-07-25/agent.err.log.pre-restart` に保全）。
+  - ロールバック: 4 の `.old-2026-07-25` を戻して 5 を再実行。
+- 🔴 **Windows は self-update できない**（follow-up）: `make dist` の対象は
+  linux/{amd64,arm64}・darwin/{amd64,arm64} のみで **windows を作っていない**のに、
+  `selfupdate` は `herdr-drover_windows_amd64.exe` を探す（`selfupdate.go`）＝
+  release に asset が無く必ず失敗する。**この PC 宛の pending `update-all` は
+  受信しても update 部分が失敗する**（23:58 時点で未受信）。Windows PC を
+  正式運用するなら `make dist` に windows/amd64 を足すのが先。
 - ⏳ **残る Windows テスト赤**（実害なし・いずれも移植の未了）:
   - `internal/wsmap`: fixture が POSIX パス（`/w/proj` は Windows で非絶対）＝
     Parse/Resolve が落ちる。**実運用キーは `C:\...` で絶対＝production は通る**が、
