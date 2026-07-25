@@ -331,18 +331,26 @@ organize / producer が共有）。権威は強い順に:
 | 事項 | claude | codex | cursor |
 |---|---|---|---|
 | herdr の検出 | ✅ | ✅（0.6 秒） | ✅ |
-| `agent_session` の発火契機 | **起動時**（TUI 立ち上げ） | **初回の発話時**（起動だけでは付かない） | ❌ 付かない（未解明） |
-| resume argv | `--resume <uuid>` | `codex resume <uuid>` | 未検証 |
-| resume 後の再報告 | ✅ | ❌ **hook が再発火しない** | — |
+| `agent_session` の発火契機 | **起動時** | **初回の発話時** | **初回の発話時**（要 trust 通過） |
+| 会話 ref の形 | uuid v4 | uuid v7 系 | uuid v4 |
+| resume argv | `--resume <id>` | `codex resume <id>` | `--resume <id>`（argv[0]=`cursor-agent`） |
+| restart 実機 | ✅ | ✅ | ✅ |
+| resume 後の hook 再発火 | ✅ | ❌ **しない** | 未計測 |
 
 ⚠ **`agent_session` は herdr が自力で見つけるのではなく、各エージェントの hook が
-報告する**（`herdr integration install <agent>` で設置）。**integration 未設置の
-エージェントは resume が原理的に不可能**（drover 側は正しく素起動へ落として報告する）。
+報告する**（`herdr integration install <agent>` で設置。`herdr integration status`
+で確認）。**integration 未設置のエージェントは resume が原理的に不可能**
+（drover 側は正しく素起動へ落として loud に報告する）。
 
-⚠ **codex は resume 後に hook が再発火しない**（実測: hook 呼び出しログで確認）。
-つまり「1 回目の restart は会話 ref を使えるが、その後 herdr は ref を再学習しない」
-＝**同じ pane の 2 回目の restart は素起動になる**。drover 側の不具合ではなく
-codex / herdr integration 側の挙動。
+⚠ **初回起動時の同意ダイアログに注意**。cursor-agent は新しい cwd で
+`Workspace Trust Required` を出して**入力を全て吸う**。通過するまで会話が始まらず、
+`agent_session` も付かない（＝resume 不可）。自動化から見ると「検出はされるのに
+永久に idle」という分かりにくい状態になる。**画面を読む手段（`herdr pane read`）
+を持っておくこと** — これが無いと原因に辿り着けない（実際に辿り着けなかった）。
+
+⚠ **codex は resume 後に hook が再発火しない**（hook 呼び出しログで実測）。
+「1 回目の restart は会話 ref を使えるが、herdr は ref を再学習しない」＝
+**同じ pane の 2 回目の restart は素起動になる**。drover 側の不具合ではない。
 
 ⚠ resume 引数の抽出は **Spec 駆動**（「そのフラグが値を取るか」で決める）。
 **値の書式で判定しない** — claude の会話 ref はたまたま uuid だが pi/omp は path も

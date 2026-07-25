@@ -348,18 +348,20 @@ codex/cursor には未設置だったので、入れるまで resume は原理�
 
 | | 検出 | agent_session | resume argv | 再起動 |
 |---|---|---|---|---|
-| claude | ✅ | ✅ 起動時 | `--resume <uuid>` | ✅ |
-| codex | ✅ | ✅ **初回発話時** | `codex resume <uuid>` | ✅ 実行できる |
-| cursor | ✅ | ❌ 付かない（未解明） | 未検証 | — |
+| claude | ✅ | ✅ 起動時 | `--resume <id>` | ✅ |
+| codex | ✅ | ✅ **初回発話時** | `codex resume <id>` | ✅ |
+| cursor | ✅ | ✅ **初回発話時**（要 trust 通過） | `--resume <id>` | ✅ |
 
-- **codex の restart は実地で成功**（`pane w1:p2→w1:p3 [resume <id>]`）。herdr の
-  `plan()` から写経した ResumeSpec（`FormSubcommand`）が実データで正しい argv を
-  組み立てた＝**Spec 抽象が claude 以外でも機能する**ことの実証。
-- ⚠**codex は resume 後に hook が再発火しない**（hook 呼び出しログで確認）。
+**3 種すべて restart を実機で成功**。herdr の `plan()` から写経した ResumeSpec が
+3 形（`--resume <v>` / 位置引数サブコマンド / argv[0] 差異）とも実データで正しい
+argv を組み立てた＝**Spec 抽象が claude 以外でも機能する**ことの実証。
+
+- ⚠**cursor は初回 cwd で `Workspace Trust Required` ダイアログが出て入力を全部
+  吸う**。ここを `[a]` で通すまで会話が始まらず agent_session も付かない。
+  自動化からは「検出されるのに永久に idle」に見える。**`herdr pane read <pane>` で
+  画面を読んで初めて分かった**（それまで hook の不具合を疑って空振りしていた）。
+- ⚠**codex は resume 後に hook が再発火しない**（hook 呼び出しログで実測）。
   同じ pane の 2 回目の restart は素起動になる。drover 側の問題ではない。
-- ⚠**cursor は `sessionStart` hook を登録済・認証済・検出 OK でも agent_session が
-  付かない**。プロンプト送信後も status=idle のままで入力が TUI に届いていない
-  可能性がある。**未解明＝要調査**。
 
 #### この検証で見つけた実バグ（v0.5.24 で修正）
 
