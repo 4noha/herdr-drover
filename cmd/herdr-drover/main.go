@@ -146,6 +146,16 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		return 0
+	case "update-all":
+		// Web のワンボタン相当（claude 更新→自己更新）。updateclaude.go。
+		if err := cmdUpdateAll(rest, stdout, stderr); err != nil {
+			fmt.Fprintf(stderr, "herdr-drover update-all: %v\n", err)
+			if errors.Is(err, errUsage) {
+				return 2
+			}
+			return 1
+		}
+		return 0
 	case "update-claude":
 		// claude 本体の更新＋セッション反映を 1 コマンドで（updateclaude.go）。
 		if err := cmdUpdateClaude(rest, stdout, stderr); err != nil {
@@ -233,6 +243,11 @@ func usage(w io.Writer) {
                           更新が無くても再起動する＝「ディスクは最新だがセッションは
                           旧版」を直すのが目的。対象バイナリは稼働中 claude pane の
                           argv[0] を権威に決め、根拠を出力する
+  herdr-drover update-all [--force] [--model <alias>]
+                          claude 本体の更新＋セッション反映 → herdr-drover 自身の
+                          更新、を逐次実行（Web のワンボタンと同じ）。⚠自身の
+                          再起動は exit でしか反映できずハンドラが終わるため必ず
+                          最後＝この順序は入れ替えられない
   herdr-drover update     selfupdate（GitHub Releases・sha256 検証・原子置換）
                           ⚠これは **herdr-drover 自身**の更新（claude 本体は
                           update-claude）

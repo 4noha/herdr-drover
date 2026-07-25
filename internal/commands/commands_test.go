@@ -134,7 +134,8 @@ func TestCommandRunnerDispatchAndRevocation(t *testing.T) {
 	st := newState(t, pc)
 
 	var restarts, updates, exits, respawns atomic.Int32
-	var claudeRestarts, claudeUpdates atomic.Int32
+	var claudeRestarts, claudeUpdates, updateAlls atomic.Int32
+	var ackBeforeUpdateAllExit atomic.Bool
 	var claudeSid atomic.Value // 最後に渡された sid（"" 込みで検証したいので Value）
 	claudeSid.Store("")
 	var revoked atomic.Bool
@@ -174,6 +175,9 @@ func TestCommandRunnerDispatchAndRevocation(t *testing.T) {
 			if statusOfCmd("self-update") == "done" {
 				ackBeforeExit.Store(true)
 			}
+			if statusOfCmd("update-all") == "done" {
+				ackBeforeUpdateAllExit.Store(true)
+			}
 			exits.Add(1)
 		},
 		// respawn 写像: 稼働 bridge がある sid だけ成功（webterm.respawn の
@@ -195,6 +199,12 @@ func TestCommandRunnerDispatchAndRevocation(t *testing.T) {
 			}
 			claudeRestarts.Add(1)
 			return "再起動 2 件: claude,claude-2 / skip claude-3(working)", nil
+		},
+		// update-all 写像: 逐次実行の要約を返し、成功時は restart=true。
+		// 呼び手（handle）は Ack を打ってから DoExit する契約。
+		DoUpdateAll: func(context.Context) (string, bool, error) {
+			updateAlls.Add(1)
+			return "claude: 更新 2.1.219 → 2.1.220 / 再起動 1 件: claude / drover: 更新 v9.9.9", true, nil
 		},
 		// update-claude 写像: claude 本体更新＋再起動の要約が detail に載る。
 		DoUpdateClaude: func(_ context.Context, sid string) (string, error) {
@@ -298,6 +308,24 @@ func TestCommandRunnerDispatchAndRevocation(t *testing.T) {
 		t.Fatalf("update-claude が restart-claude seam を二重に呼んだ: %d", claudeRestarts.Load())
 	}
 
+	// update-all: 両段の要約が監査に残り、**Ack が exit より先**（後 Ack だと
+	// プロセスが死んで running のまま滞留する＝既存の破壊的命令と同じ規律）。
+	exitsBefore := exits.Load()
+	c = waitCmdStatus(t, st, pc, push("update-all", ""), 12*time.Second)
+	if c.Status != "done" || updateAlls.Load() != 1 {
+		t.Fatalf("update-all: %+v updateAlls=%d", c, updateAlls.Load())
+	}
+	if !strings.Contains(c.Detail, "claude:") || !strings.Contains(c.Detail, "drover:") ||
+		!strings.Contains(c.Detail, "再起動（exit）を実行") {
+		t.Fatalf("update-all の detail が両段＋再起動を示していない: %+v", c)
+	}
+	if exits.Load() != exitsBefore+1 {
+		t.Fatalf("update-all が exit を呼んでいない: %d→%d", exitsBefore, exits.Load())
+	}
+	if !ackBeforeUpdateAllExit.Load() {
+		t.Fatalf("update-all の Ack が exit に先行していない")
+	}
+
 	// revocation: 失効中は実行拒否（DoRestart 増えない・error revoked）
 	revoked.Store(true)
 	c = waitCmdStatus(t, st, pc, push("restart-agent", ""), 8*time.Second)
@@ -330,6 +358,7 @@ func TestCommandRunnerUnwiredAcksError(t *testing.T) {
 		"restart-proxy":  "restart-proxy 未配線",
 		"restart-claude": "restart-claude 未配線",
 		"update-claude":  "update-claude 未配線",
+		"update-all":     "update-all 未配線",
 	} {
 		id, err := st.PushCommand(ctx, pc, cmd, "w1:p1", "owner@example.com")
 		if err != nil {

@@ -27,10 +27,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"flag"
 
+	"github.com/4noha/drover-cloud/selfupdate"
 	"github.com/4noha/herdr-drover/internal/herdrapi"
 )
 
@@ -223,5 +225,111 @@ func cmdUpdateClaude(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	fmt.Fprintf(stdout, "update-claude: %s\n", summary)
+	return nil
+}
+
+// ===== update-all（Web のワンボタン: claude 更新 → 自己更新 → 再起動） =====
+
+// updateAllRunning は update-all の同時実行ガード。遠隔命令の watcher は逐次
+// 呼び出しだが、CLI 併用や将来の並列化で二重に走ると「claude 更新中に自分を
+// 置換して exit」のような順序崩れが起きる。**逐次実行は本機能の正しさの前提**
+// なので、重なりは黙って直列化せず loud に拒否する。
+var updateAllRunning atomic.Bool
+
+// updateAllResult は各段の結果（監査 detail の組み立て用）。
+type updateAllResult struct {
+	Claude string // claude 本体＋セッション反映の要約
+	Self   string // herdr-drover 自身の更新結果
+}
+
+// runUpdateAll は「claude 本体更新＋セッション反映 → herdr-drover 自身の更新」を
+// **この順で逐次**実行する。CLI と遠隔命令が共有する芯。
+//
+// ⚠**順序は入れ替えられない**: 自分自身の更新を反映するにはプロセスを終了して
+// launchd に再起動させるしかなく、exit した時点でハンドラは終わる＝それ以降の段は
+// 実行されない。よって「自分の再起動」は必ず最後に置き、claude 側を先に完了させる。
+// （自己更新を先にしても、走っているプロセスは旧 inode のままなので新コードでは
+// 動かない＝先にやる利点が無い。実行順を単純に保つ方が正しい。）
+//
+// 戻り値の restart は「呼び手が exit すべきか」。selfupdate が更新した/しないに
+// 関わらず true を返す＝Web の「再起動」ボタンを本コマンドが**包含**する
+// （3 ボタンを 1 つに集約するという要件）。err 時は false（原因調査のため状態を保つ）。
+func runUpdateAll(ctx context.Context, api *herdrapi.Client, opt restartOptions,
+	selfUpdate func() (string, bool, error), out io.Writer) (updateAllResult, bool, error) {
+	if !updateAllRunning.CompareAndSwap(false, true) {
+		return updateAllResult{}, false, fmt.Errorf("update-all が既に実行中（逐次実行が前提のため二重起動は拒否）")
+	}
+	defer updateAllRunning.Store(false)
+
+	var res updateAllResult
+
+	// 段 1: claude 本体＋セッション反映。失敗したらここで止める（自己更新まで
+	// 進めて再起動すると、claude が古いまま daemon だけ新しくなり原因が霞む）。
+	fmt.Fprintf(out, "update-all: [1/2] claude 本体の更新とセッション反映\n")
+	claudeSummary, cerr := updateClaudeAndRestart(ctx, api, opt, out)
+	res.Claude = claudeSummary
+	if cerr != nil {
+		return res, false, fmt.Errorf("claude 更新: %w", cerr)
+	}
+
+	// 段 2: herdr-drover 自身。バイナリはディスク上で置換されるだけで、走っている
+	// プロセスは旧 inode のまま＝反映は次段の再起動で行う。
+	fmt.Fprintf(out, "update-all: [2/2] herdr-drover 自身の更新\n")
+	tag, updated, serr := selfUpdate()
+	if serr != nil {
+		res.Self = "失敗"
+		return res, false, fmt.Errorf("herdr-drover 更新: %w", serr)
+	}
+	if updated {
+		res.Self = "更新 " + tag
+	} else {
+		res.Self = "既に最新 " + tag
+	}
+	fmt.Fprintf(out, "update-all: herdr-drover %s\n", res.Self)
+	return res, true, nil
+}
+
+// summarizeUpdateAll は監査 detail の 1 行要約（純関数）。
+func summarizeUpdateAll(res updateAllResult) string {
+	parts := make([]string, 0, 2)
+	if res.Claude != "" {
+		parts = append(parts, "claude: "+res.Claude)
+	}
+	if res.Self != "" {
+		parts = append(parts, "drover: "+res.Self)
+	}
+	if len(parts) == 0 {
+		return "実行結果なし"
+	}
+	return strings.Join(parts, " / ")
+}
+
+// cmdUpdateAll は CLI 入口。CLI では自プロセスを exit しても意味が無いので、
+// 常駐 daemon への反映手段（kickstart）を案内して終わる。
+func cmdUpdateAll(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("update-all", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	force := fs.Bool("force", false, "agent_status=working の pane も再起動する")
+	model := fs.String("model", "", "再起動時に claude へ渡すモデル（例 opus）")
+	if err := fs.Parse(args); err != nil {
+		return fmt.Errorf("%w: %v", errUsage, err)
+	}
+	if rest := fs.Args(); len(rest) > 0 {
+		return fmt.Errorf("%w: 余分な引数 %v（update-all は sid を取らない＝PC 全体が対象）", errUsage, rest)
+	}
+
+	api := herdrapi.New("")
+	if _, err := api.Ping(); err != nil {
+		return fmt.Errorf("herdr server に繋がらない（socket=%s）: %w", api.SocketPath, err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), claudeUpdateTimeout)
+	defer cancel()
+	res, _, err := runUpdateAll(ctx, api, restartOptions{Force: *force, Model: *model},
+		func() (string, bool, error) { return selfupdate.Update(version) }, stdout)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "update-all: %s\n", summarizeUpdateAll(res))
+	fmt.Fprintf(stdout, "常駐 agent への反映は再起動後: launchctl kickstart -k gui/$UID/%s\n", launchdLabel)
 	return nil
 }

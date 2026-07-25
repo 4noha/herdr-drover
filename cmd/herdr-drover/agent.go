@@ -300,6 +300,15 @@ func runOneCloud(ctx context.Context, cfg Config, cl Cloud, primary bool, hcli *
 		// DoUpdateClaude は claude 本体の更新まで含む＝ダウンロード時間の上限を
 		// 自前で切る（親 ctx はプロセス寿命なので、ここで縛らないと命令制御線が
 		// 長時間ブロックし得る）。
+		// DoUpdateAll は Web のワンボタン。claude 更新→自己更新→（呼び手が）exit。
+		// 上限は claude のダウンロードを含むので update-claude と同じ枠を使う。
+		DoUpdateAll: func(parent context.Context) (string, bool, error) {
+			uctx, cancel := context.WithTimeout(parent, claudeUpdateTimeout)
+			defer cancel()
+			res, restart, err := runUpdateAll(uctx, hcli, restartOptions{},
+				func() (string, bool, error) { return selfupdate.Update(version) }, lg.Writer())
+			return summarizeUpdateAll(res), restart, err
+		},
 		DoUpdateClaude: func(parent context.Context, sid string) (string, error) {
 			uctx, cancel := context.WithTimeout(parent, claudeUpdateTimeout)
 			defer cancel()

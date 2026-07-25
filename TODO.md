@@ -104,6 +104,25 @@ v0.5.18 と rebase 統合済＝2026-07-25）。稼働 launchd `com.4noha.herdr-d
   - テスト: fake now/tickCh/fpFn を DI seam から注入して実 sleep なしで検証（7 本、
     -race 緑）。
 
+### 2026-07-25 追加: update-all（Web のワンボタン集約）
+
+Web の「更新(self-update)／claude 更新(update-claude)／再起動(restart-agent)」が
+冗長だったので 1 ボタン `update-all` に集約（3 命令は allowlist に残す＝CLI や
+トラブルシュートから引き続き投げられる）。CLI は `herdr-drover update-all`。
+
+- **順序は入れ替え不可**: (1) claude 本体更新＋セッション反映 → (2) herdr-drover
+  自己更新 → (3) 自身の再起動。⚠**自分の再起動は exit でしか反映できず、exit した
+  時点でハンドラが終わる＝それ以降の段は実行されない**。よって再起動は必ず最後。
+  自己更新を先にしても走っているプロセスは旧 inode のままで新コードにならない＝
+  先にやる利点が無い（順序を単純に保つ方が正しい）。
+- **Ack は exit の前**（既存の破壊的命令と同じ規律。後 Ack だと running 滞留）。
+- **claude 段が失敗したら自己更新へ進まず restart も返さない**（古い claude のまま
+  daemon だけ新しくして再起動すると原因が霞む）。
+- **二重起動は loud に拒否**（`updateAllRunning` の CAS）。逐次実行が正しさの前提
+  なので黙って直列化しない。
+- テスト: 段の順序／claude 段失敗で self へ進まないこと／同時実行拒否（実 herdr）
+  ＋遠隔命令の Ack 先行→exit 順（実 Firestore エミュレータ）。
+
 ### 2026-07-25 追加: モデル切替（restart-claude --model / update-claude --model）
 
 - ⚠**`--resume` した会話は settings.json の既定モデルを無視し、会話に紐づいたモデルで
@@ -277,8 +296,12 @@ launchctl kickstart -k gui/$(id -u)/com.4noha.herdr-drover
 - ⚠**rm→cp の際に稼働 daemon が codesigning トラップで SIGKILL され KeepAlive が
   新バイナリで再起動する**（実測 2026-07-19）＝kickstart 省略でも daemon は新版に
   なるが、明示 kickstart が確実。attach（↗窓）子プロセスは daemon 再起動を跨いで
-  生存＝新版にしたければ `pkill -f 'herdr-drover attach'`→reconcile 再生成
-  （ただし attach.go 無変更のリリースでは機能差ゼロ＝不要）。
+  生存＝**attach.go を変えたリリースでは明示的に作り直す**:
+  `pkill -f 'herdr-drover attach'` → **その後に `launchctl kickstart -k`**。
+  ⚠**pkill だけでは復旧しない**（実測 2026-07-25）: reconcile は Firestore snapshot
+  駆動でローカル pane の消滅を契機にしないため、注入 pane が 11→0 のまま放置される。
+  daemon の起動時 reconcile が唯一の確実な再生成契機なので kickstart が必須。
+  （attach.go 無変更のリリースでは機能差ゼロ＝この手順自体が不要）。
 - ⚠バイナリ/設定はプロセス起動時のみ反映＝各セッションは新規起動で新版。
 - ⚠**リリースビルドは GOWORK=off**（go.work のローカル drover-cloud でなく go.mod
   宣言の公開タグで解決）。usage() は backtick raw string＝**中に `` ` `` を入れない**
