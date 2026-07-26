@@ -277,8 +277,14 @@ func runOneCloud(ctx context.Context, cfg Config, cl Cloud, primary bool, hcli *
 	// 注入 pane 内の attach viewer（cmdAttach）が非対応＝注入すると即死→再生成の
 	// スラッシングになるため常に無効化する（producer/Web 閲覧は下で動く）。
 	if remoteInjectSupported && cfg.Role != "slave" && primary && cl.RelayURL != "" {
-		go runRemoteInject(ctx, hcli, scConcrete, cl, idx, lg, cfg.MirrorAgents, restartSelf)
-		lg.Printf("%sリモート pane 注入 起動（他 PC のセッションを↗注入・primary）", tag)
+		// injectRemote=false でも goroutine は起こす（既存の注入 pane を撤去するため。
+		// 撤去後は desired=∅ を保つだけで新規注入はしない＝BUG-2）。
+		go runRemoteInject(ctx, hcli, scConcrete, cl, idx, lg, cfg.MirrorAgents, cfg.InjectRemotePanes, restartSelf)
+		if cfg.InjectRemotePanes {
+			lg.Printf("%sリモート pane 注入 起動（他 PC のセッションを↗注入・primary）", tag)
+		} else {
+			lg.Printf("%sリモート pane 注入 無効（DROVER_INJECT_REMOTE=off・既存注入は撤去・primary）", tag)
+		}
 	} else if !remoteInjectSupported && primary && cl.RelayURL != "" {
 		lg.Printf("%sリモート pane 注入は Windows 非対応のため無効（producer/Web 閲覧のみ）", tag)
 	}

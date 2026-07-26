@@ -175,6 +175,20 @@ type remoteSource interface {
 	ListSessions(ctx context.Context, pc string) ([]map[string]any, error)
 }
 
+// emptyRemoteSource は「リモート session が 1 件も無い」remoteSource。
+// DROVER_INJECT_REMOTE=off（注入無効）時に runRemoteInject が st の代わりに渡すと、
+// reconcileRemote の desired が常に空になり、既存の注入 pane は close ロジックで
+// 撤去され、新規は作られない（注入の gate を desired=∅ に落とすだけで、既存の
+// self-heal / index 掃除 / 暴走ガードをそのまま流用する＝BUG-2 の最小介入）。
+// ⚠ nil,nil を返す＝abort（全 kill 破壊）とは区別される: reconcileRemote の abort は
+// error を返した時だけで、「PC が 0 件」は正常な空 desired（撤去に働く）。
+type emptyRemoteSource struct{}
+
+func (emptyRemoteSource) DroverPCs(context.Context) ([]string, error) { return nil, nil }
+func (emptyRemoteSource) ListSessions(context.Context, string) ([]map[string]any, error) {
+	return nil, nil
+}
+
 // injPaneEnv は注入 pane（attach プロセス）へ渡すクラウド設定 env。attach は
 // daemon の launchd env を継承せず config.json も無いことがあるため、reconcile が
 // primary クラウドの設定を pane env で明示注入する（これが無いと attach が
@@ -580,7 +594,7 @@ func (w *reconcileWatchdog) reset() { w.consecutive = 0 }
 // restartFn は remoteInjectMaxConsecutiveFailures 連続で reconcileRemote が abort
 // した時に呼ぶプロセス再起動関数（既定 restartSelf。agent.go 呼び出しで注入）。
 func runRemoteInject(ctx context.Context, api *herdrapi.Client, st *state.Client,
-	cl Cloud, idx *injectindex.Index, lg *log.Logger, mirrorAgents bool, restartFn func() error) {
+	cl Cloud, idx *injectindex.Index, lg *log.Logger, mirrorAgents, injectRemote bool, restartFn func() error) {
 
 	selfExe, err := os.Executable()
 	if err != nil {
@@ -590,6 +604,17 @@ func runRemoteInject(ctx context.Context, api *herdrapi.Client, st *state.Client
 	if restartFn == nil {
 		restartFn = func() error { return nil } // no-op（テスト等の未注入時は watchdog 無効化）
 	}
+
+	// injectRemote=false（DROVER_INJECT_REMOTE=off）は「リモート session が 1 件も
+	// 無い」ことにして reconcile を回す＝desired=∅ → 既存の注入 pane は close ロジック
+	// で撤去され、新規注入は作られない（BUG-2: 注入を止める gate）。producer（自 PC の
+	// セッションをクラウドへ push する側）は別経路なので止めない＝Web/スマホ閲覧は残る。
+	var src remoteSource = st
+	if !injectRemote {
+		src = emptyRemoteSource{}
+		lg.Printf("[reconcile] リモート pane 注入 無効（DROVER_INJECT_REMOTE=off）＝既存注入 pane を撤去し新規注入はしない")
+	}
+
 	trigger := make(chan struct{}, 1)
 	kick := func() {
 		select {
@@ -599,21 +624,26 @@ func runRemoteInject(ctx context.Context, api *herdrapi.Client, st *state.Client
 	}
 	kick() // 起動時 1 回
 
-	go func() {
-		for {
-			if ctx.Err() != nil {
-				return
-			}
-			if werr := st.WatchSessions(ctx, kick); werr != nil && ctx.Err() == nil {
-				lg.Printf("[reconcile] WatchSessions 終了（再購読）: %v", werr)
-				select {
-				case <-ctx.Done():
+	// WatchSessions（リモート session の push 購読）は注入する時だけ張る。無効時は
+	// 購読しても desired=∅ で使い道が無く、Firestore ストリームを無駄に開くだけ。
+	// 撤去（既存注入 pane の close）は下の backstop ticker + 起動時 kick で回る。
+	if injectRemote {
+		go func() {
+			for {
+				if ctx.Err() != nil {
 					return
-				case <-time.After(time.Second):
+				}
+				if werr := st.WatchSessions(ctx, kick); werr != nil && ctx.Err() == nil {
+					lg.Printf("[reconcile] WatchSessions 終了（再購読）: %v", werr)
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(time.Second):
+					}
 				}
 			}
-		}
-	}()
+		}()
+	}
 
 	go func() {
 		t := time.NewTicker(remoteInjectBackstopPoll)
@@ -658,7 +688,7 @@ func runRemoteInject(ctx context.Context, api *herdrapi.Client, st *state.Client
 			// 効かない。1 周のタイムアウトで確実にループへ戻す）。ctx（親）が先に
 			// Done なら Done を優先。
 			rctx, rcancel := context.WithTimeout(ctx, remoteInjectTimeout)
-			ok := reconcileRemote(rctx, api, st, cl, selfExe, idx, lg, reported)
+			ok := reconcileRemote(rctx, api, src, cl, selfExe, idx, lg, reported)
 			rcancel()
 			if !watchdog.observe(ok) {
 				continue

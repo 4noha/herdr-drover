@@ -149,6 +149,51 @@ func TestReconcileRemoteInjectAndSelfHeal(t *testing.T) {
 	})
 }
 
+// TestReconcileTeardownWithEmptyRemoteSource は BUG-2 の gate 機構の検証。
+// DROVER_INJECT_REMOTE=off のとき runRemoteInject は st の代わりに emptyRemoteSource
+// を渡す＝desired=∅ になり、**既存の注入 pane が全撤去され、新規は作られない**。
+// 「注入を止める設定が無い（reconcile が desired を維持して貼り直す）」という
+// BUG-2 の症状に対し、空 source を渡すだけで撤去まで一貫することを機械確認する。
+func TestReconcileTeardownWithEmptyRemoteSource(t *testing.T) {
+	sock := startHerdrForTest(t)
+	api := herdrapi.New(sock)
+	lg := log.New(io.Discard, "", 0)
+	stub := reconcileStub(t)
+	ctx := context.Background()
+	idx := newTestIndex(t) // create と teardown で同一 index を持ち回る（daemon 相当）
+
+	fr := &fakeRemote{
+		pcs: []string{"self-herdr", "remoteA"},
+		sessions: map[string][]map[string]any{
+			"remoteA": {fakeSess("w9:pA", "projA"), fakeSess("w9:pB", "projB")},
+		},
+	}
+	const selfPC = "self-herdr"
+
+	// 注入 ON 相当: 他 PC の 2 セッションが注入 pane として出現。
+	reconcileRemote(ctx, api, fr, Cloud{PCName: selfPC}, stub, idx, lg)
+	waitCond(t, 15*time.Second, "注入 pane 2 枚出現", func() bool {
+		inj := injectedPanes(t, api)
+		return len(inj) == 2 && hasInj(inj, "remoteA", "w9:pA") && hasInj(inj, "remoteA", "w9:pB")
+	})
+
+	// 注入 OFF 相当（DROVER_INJECT_REMOTE=off で runRemoteInject が渡す source）:
+	// リモート session が 1 件も無い扱い → desired=∅ → 既存注入 pane が全 close される。
+	// ⚠fr は依然 2 セッションを返す（＝リモートは消えていない）。それでも撤去される
+	// ことが「注入を止める」の要（BUG-2）。
+	reconcileRemote(ctx, api, emptyRemoteSource{}, Cloud{PCName: selfPC}, stub, idx, lg)
+	waitCond(t, 15*time.Second, "注入無効化で既存注入 pane が全撤去（リモートは健在でも）", func() bool {
+		return len(injectedPanes(t, api)) == 0
+	})
+
+	// 撤去後も無効のまま回し続けても再注入されない（desired=∅ を保つ＝冪等）。
+	reconcileRemote(ctx, api, emptyRemoteSource{}, Cloud{PCName: selfPC}, stub, idx, lg)
+	time.Sleep(700 * time.Millisecond)
+	if got := len(injectedPanes(t, api)); got != 0 {
+		t.Fatalf("無効時に再注入された（注入 pane %d 枚）", got)
+	}
+}
+
 // fakeSessAgent は agent_status / window_name 付きの session 行（producer が同期
 // する生値の部分集合）。agent を持つリモート pane の転記経路を検証するのに使う。
 func fakeSessAgent(sid, dir, name, status string) map[string]any {

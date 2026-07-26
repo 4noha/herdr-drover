@@ -63,3 +63,50 @@ func TestResolveConfigMirrorAgents(t *testing.T) {
 		t.Fatal("env=false が file=true を上書きするはず")
 	}
 }
+
+// TestResolveConfigInjectRemotePanes は DROVER_INJECT_REMOTE / inject_remote_panes の
+// 解決を検証する（BUG-2）。MirrorAgents と違い **既定 true=opt-out**（既存挙動＝注入
+// 継続を変えない・false で明示的に止める）。
+func TestResolveConfigInjectRemotePanes(t *testing.T) {
+	home := t.TempDir()
+	setTestHome(t, home)
+
+	// 既定 ON（env も file も無し）＝注入は既定で継続（後方互換）。
+	t.Setenv("DROVER_INJECT_REMOTE", "")
+	if cfg, err := resolveConfig(); err != nil {
+		t.Fatalf("resolveConfig: %v", err)
+	} else if !cfg.InjectRemotePanes {
+		t.Fatal("既定は true のはず（opt-out）")
+	}
+
+	// env=false → OFF（注入停止）。
+	t.Setenv("DROVER_INJECT_REMOTE", "false")
+	if cfg, _ := resolveConfig(); cfg.InjectRemotePanes {
+		t.Fatal("DROVER_INJECT_REMOTE=false で OFF のはず")
+	}
+
+	// env=0 → OFF。
+	t.Setenv("DROVER_INJECT_REMOTE", "0")
+	if cfg, _ := resolveConfig(); cfg.InjectRemotePanes {
+		t.Fatal("DROVER_INJECT_REMOTE=0 で OFF のはず")
+	}
+
+	// 不正値 → error（silent に既定へ倒さない）。
+	t.Setenv("DROVER_INJECT_REMOTE", "maybe")
+	if _, err := resolveConfig(); err == nil {
+		t.Fatal("不正値でエラーになるはず")
+	}
+
+	// file=false・env 無し → OFF（file を採用）。
+	t.Setenv("DROVER_INJECT_REMOTE", "")
+	writeConfigJSON(t, home, `{"inject_remote_panes": false}`)
+	if cfg, _ := resolveConfig(); cfg.InjectRemotePanes {
+		t.Fatal("inject_remote_panes:false(file) で OFF のはず")
+	}
+
+	// env=true が file=false を上書き（env > file）。
+	t.Setenv("DROVER_INJECT_REMOTE", "true")
+	if cfg, _ := resolveConfig(); !cfg.InjectRemotePanes {
+		t.Fatal("env=true が file=false を上書きするはず")
+	}
+}

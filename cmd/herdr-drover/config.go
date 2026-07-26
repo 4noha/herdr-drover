@@ -40,6 +40,16 @@ type Config struct {
 	// 露出せず owner 本人のクラウドアカウント内でのみ見えるため role 別の既定
 	// 差は無い）。
 	ShareLocalIPs bool
+	// InjectRemotePanes は DROVER_INJECT_REMOTE（他 PC の agent セッションを
+	// ローカル herdr へ ↗窓 pane として注入するか）。既定 true=opt-out。
+	// false にすると runRemoteInject が「リモート session 無し」扱いで reconcile を
+	// 回す＝**既存の注入 pane を撤去し新規注入を作らない**。
+	//
+	// ⚠BUG-2 の対処: `MirrorAgents`（mirror_agents）は注入 pane への **agent メタ
+	// データ転記**の gate であって、**注入そのものの gate ではない**（false でも
+	// inject-index＋reconcile が desired を維持して注入が続く）。注入を止める独立
+	// フラグとしてこれを新設した。優先順位 env > file(inject_remote_panes) > 既定。
+	InjectRemotePanes bool
 }
 
 // resolveConfig は Config を解決する。優先順位はキー単位で
@@ -66,6 +76,7 @@ func resolveConfig() (Config, error) {
 	var fileErr error
 	var fcMirror *bool  // mirror_agents の file 値（env 未設定なら採用）
 	var fcShareIP *bool // share_local_ips の file 値（env 未設定なら採用）
+	var fcInject *bool  // inject_remote_panes の file 値（env 未設定なら採用）
 	if path, perr := configFilePath(); perr == nil {
 		fc, ferr := readFileConfig(path)
 		if ferr != nil {
@@ -88,6 +99,7 @@ func resolveConfig() (Config, error) {
 		}
 		fcMirror = fc.MirrorAgents
 		fcShareIP = fc.ShareLocalIPs
+		fcInject = fc.InjectRemotePanes
 	}
 	if cfg.PCID == "" {
 		host, err := os.Hostname()
@@ -152,6 +164,22 @@ func resolveConfig() (Config, error) {
 		}
 		cfg.ShareLocalIPs = b
 	}
+	// DROVER_INJECT_REMOTE: 他 PC の agent セッションをローカル herdr へ ↗窓 pane
+	// として注入するか。既定 true=opt-out（既存挙動を変えない）。false で注入停止＋
+	// 既存注入 pane の撤去（runRemoteInject が空 source で reconcile を回す）。
+	// 優先順位 env > file(inject_remote_panes) > 既定。⚠これは MirrorAgents とは独立
+	// （mirror は metadata 転記の gate であって注入の gate ではない＝BUG-2）。
+	cfg.InjectRemotePanes = true
+	if fcInject != nil {
+		cfg.InjectRemotePanes = *fcInject
+	}
+	if v := os.Getenv("DROVER_INJECT_REMOTE"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return cfg, fmt.Errorf("DROVER_INJECT_REMOTE が不正（true/false/1/0 等）: %q: %w", v, err)
+		}
+		cfg.InjectRemotePanes = b
+	}
 	return cfg, fileErr
 }
 
@@ -176,6 +204,8 @@ type fileConfig struct {
 	MirrorAgents *bool `json:"mirror_agents,omitempty"`
 	// ShareLocalIPs も同じくポインタ（未設定=nil で env>file>既定の合成）。
 	ShareLocalIPs *bool `json:"share_local_ips,omitempty"`
+	// InjectRemotePanes も同じくポインタ（未設定=nil で env>file>既定 true の合成）。
+	InjectRemotePanes *bool `json:"inject_remote_panes,omitempty"`
 }
 
 // readFileConfig は設定ファイルを読む。不在はゼロ値＋nil（enroll 前の
