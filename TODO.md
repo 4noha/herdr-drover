@@ -599,12 +599,19 @@ TODO の out-of-scope 宣言どおりで、対応するなら移植作業が要�
 作業機は **`desktop-djb9pfr-herdr`（Windows 11・herdr 0.7.4-preview）**。
 
 **ブランチ構造（重要）**:
-- **`main`**: Windows 移植のコード本体が入っている（`019d051 feat(windows)` /
-  `8f831c6 fix(test)` / docs 3 本 / `41ce39e build(windows)`）。**未 push**。
-- **`windows-port`**: main ＋ **`herdr-plugin.toml` の 1 commit だけ**。
-  main へ merge しないこと（理由は当該 commit メッセージ＝events 削除は
-  macOS/Linux の即時 re-scan を殺す・platforms への windows 追加はできない約束）。
-- `windows-port-backup-2026-07-26`: 分割前の旧ブランチ（不要になったら削除可）。
+- **`main`**: Windows 移植のコード本体は **PR #1 でマージ済＝`v0.5.26` として
+  リリース済**（`6037981`）。
+- **`windows-port`**: main ＋ **`herdr-plugin.toml` の 1 commit だけ**（この
+  Windows 機の作業ブランチ）。main へ merge しないこと（理由は当該 commit
+  メッセージ＝events 削除は macOS/Linux の即時 re-scan を殺す・platforms への
+  windows 追加はできない約束）。main が進んだら作り直して cherry-pick する。
+
+⚠ **検証の教訓（PR #1 で実際にやらかした）**: `setTestHome` を導入した一括 sed が
+**関数自身の中の `t.Setenv("HOME", dir)` まで書き換えて自己呼び出しにし**、全
+呼び出しが stack overflow していた（`8e6fb09` で修正）。`go vet` は再帰を検出せず、
+こちらは**パッケージ単位の FAIL 一致だけを見て「回帰なし」と判断**して見逃した。
+**FAIL の集合ではなく、失敗の中身を読むこと**。しかもこの関数は SA 鍵消失事故の
+再発防止そのもの＝動いていなければ守りが無い。
 
 なぜ共通ソースに入れてよいと判断したか:
 - 移植は **build-tag 分割＋seam 化**で unix 側はバイト等価。対話系
@@ -675,12 +682,75 @@ TODO の out-of-scope 宣言どおりで、対応するなら移植作業が要�
     ＝再起動前に必要なら退避する（今回の復旧根拠はこのログだった。被害前ログは
     `~/.herdr-drover.bak-2026-07-25/agent.err.log.pre-restart` に保全）。
   - ロールバック: 4 の `.old-2026-07-25` を戻して 5 を再実行。
-- 🔴 **Windows は self-update できない**（follow-up）: `make dist` の対象は
-  linux/{amd64,arm64}・darwin/{amd64,arm64} のみで **windows を作っていない**のに、
-  `selfupdate` は `herdr-drover_windows_amd64.exe` を探す（`selfupdate.go`）＝
-  release に asset が無く必ず失敗する。**この PC 宛の pending `update-all` は
-  受信しても update 部分が失敗する**（23:58 時点で未受信）。Windows PC を
-  正式運用するなら `make dist` に windows/amd64 を足すのが先。
+- 🔴🔴 **self-update は Windows で daemon を落とす（実際に落ちた・2026-07-26 00:52）**。
+  `make dist` の windows 追加（`e9bab96`）で v0.5.26 は
+  `herdr-drover_windows_amd64.exe` を配布するようになり、**pending だった
+  `update-all` がこの PC に届いて実行された**。結果:
+  - ✅ ダウンロード・sha256 検証・**`place_windows.go` の退避 rename（実行中 exe の
+    差し替え）まで成功**した。`.old` が残っていることで確認＝ユニットテストでは
+    踏めない「実行中 exe」ケースが**実機で初めて検証できた**。
+  - 🔴 しかし **Smart App Control が新しいファイルの実行を一時的にブロック**する
+    ため、差し替わった新 exe が起動できず daemon が消えた。**MOTW ではない**
+    （`Zone.Identifier` 無し・`Unblock-File` も無効＝SAC 本体の判断）。
+    ⚠ **SAC の判定は恒久ではなく時間依存**（後述）＝「配布ビルドは永久に通らない」
+    という当初の理解は**誤り**だった。
+  - 🔴 さらに タスクスケジューラは **logon トリガのみ・`RestartCount=0`** ＝
+    launchd の KeepAlive 相当が無く、**誰も復帰させない**（次回ログオンまで停止）。
+  - **復旧手順（実施済）**: `go build -ldflags "-X main.version=<配布と同じタグ>"`
+    でローカルビルド → `version` で SAC を通ることを確認 → 退避 rename で差し替え
+    → `Start-ScheduledTask`。⚠ version を配布タグと同じに stamp すること
+    （dev 版数のままだと「最新でない」と判定され update-all が再発＝再度落ちる）。
+    SAC に弾かれた配布バイナリは `bin/herdr-drover.exe.sac-blocked-v0.5.26-release`
+    に証拠として残してある。
+  - **恒久対策**:
+    1. ✅ **置換前の実行可否チェック**（drover-cloud **v0.1.15** `selfupdate`）:
+       tmp を 1 回起動して exit 0 のときだけ place する。失敗したら中止＝
+       稼働中バイナリは無傷。⚠ tmp 名に Windows だけ `.exe` が要る
+       （os/exec の lookExtensions。無いとチェック自体が偽陽性）。
+    2. ✅ **自己修復**（`scripts/windows/{start-agent.ps1,install-task.ps1}`）:
+       タスクへ **ログオン時＋5 分ごと**のトリガを登録し、起動側で多重起動を弾く。
+       Task Scheduler の「失敗時に再起動」は**無力**（Start-Process で投げて即
+       exit 0＝常に成功扱い）＝周期トリガが Windows の KeepAlive 相当。
+       実測: kill から **37 秒で自動復帰**。
+    3. ⏳ 配布バイナリに Authenticode 署名（SAC の本筋の解・未着手）。
+    4. ⏳ SAC 有効機では `update` を最初から拒否して案内する（今は「置換直前に
+       気づいて中止」＝毎回ダウンロードは走る・未着手）。
+  - 🔬 **SAC の判定は「恒久ブロック」ではなく「未評価の間だけ弾く」（実測・
+    2026-07-26 15:05〜15:16）**。同じファイルが時間経過で許可へ転じる:
+
+    | ファイル | ブロック期間 | 解除後 |
+    |---|---|---|
+    | 新規ビルドの exe（未署名） | 数分〜十数分 | ✅ 実行可 |
+    | 配布バイナリ v0.5.26 | 00:52 → 15:14 の間に解除 | ✅ 実行可 |
+    | `herdr.exe`（7/21 から不変） | 14:58 → 15:16（約 18 分） | ✅ 実行可 |
+
+    - **こちらから許可する手段は無い**（SmartScreen の「詳細情報→実行」に相当する
+      導線が SAC には無く、ブロックは無音＋イベントログのみ）。待つしかない。
+    - 自己署名は無意味（署名前の時点で既に許可されていた＝効果を証明できない。
+      そもそも SAC は machine の Trusted Root ではなく MS 署名のポリシーで判定）。
+    - **7/21 から 1 バイトも変わっていない `herdr.exe` が 14:58 に突然弾かれた**
+      ＝ファイル側の変化ではなく SAC の再評価。この間 `observe spawn` が全滅し
+      **Web 閲覧が壊れた**が、daemon の backoff リトライが解除後に自力で拾って復旧した。
+    - 従って **SAC を切る必要は無い**（当初「切るのが唯一の実用解」と判断したのは
+      早計だった）。ただし**新しく置いたバイナリは直後は起動できない**前提で
+      配置手順を組むこと＝1. の probe はこのウィンドウを安全に受け流すためにある
+      （中止して稼働中を守り、時間をおいて再実行すれば成功する）。
+  - ⚠ **この機の稼働バイナリは v0.5.31 / drover-cloud v0.1.13＝probe 無し**
+    （14:58 に別経路で配置された）。**PR #2 がマージされて probe 入りを配置する
+    までは `update` を実行しないこと**（評価待ちウィンドウに当たると起動不能な
+    バイナリで上書きされる）。`go version -m <exe>` で dep を確認できる。
+- ✅ **スリープを跨いでも daemon は生き残る（実測・2026-07-26）**。09:55:07 sleep →
+  09:55:20 resume（Kernel-Power 42/107）を挟んで、pid 5436（01:55:30 起動）は
+  **起動行が 1 回だけ**＝再起動していない。5 時間後の 14:58 に Web からの wake を
+  受けて bridge を開始しており、復帰後も機能していた。tick エラーも 0。
+  - ⚠ **ログの無音＝停止ではない**: bridge のログは Web 閲覧側の駆動なので、
+    誰も見ていなければ何時間でも無ログになる。死活は起動行の数／pid で見ること。
+  - 5 分周期の自己修復は 15:04:20 の復帰でも効いた可能性が高い（14:58 に
+    daemon が落ち、次の tick に一致するタイミングで v0.5.31 が起動している）。
+  - タスクは `StartWhenAvailable=True`（スリープ中に飛んだ実行は復帰後に取り戻す）・
+    `WakeToRun=False`（タスクのために PC を起こさない）。
+  - なお PC のアイドルスリープはこの機では無効化した（AC/DC とも
+    `standby-timeout=0`）。戻すなら `powercfg /change standby-timeout-dc 120`。
 - ⏳ **残る Windows テスト赤**（実害なし・いずれも移植の未了）:
   - `internal/wsmap`: fixture が POSIX パス（`/w/proj` は Windows で非絶対）＝
     Parse/Resolve が落ちる。**実運用キーは `C:\...` で絶対＝production は通る**が、
@@ -706,7 +776,8 @@ TODO の out-of-scope 宣言どおりで、対応するなら移植作業が要�
     **SAC は一度切ると Windows 再インストールでしか戻せない＝切らない**。
     テストが赤/緑どちらとも言えない回はこれを疑い、まず再実行する。
   - `install`/`update` は launchd/inode 前提＝`//go:build unix` にした。**Windows の
-    常駐化（タスクスケジューラ）と update の Windows 経路はテスト未整備**。
+    update の Windows 経路はテスト未整備**。常駐化は `scripts/windows/install-task.ps1`
+    へ移した（install.go の Windows 移植は未了＝当面この PowerShell が正）。
 
 ### A. SSH エージェント転送 — Phase 3（実機 e2e）保留中
 
