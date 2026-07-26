@@ -50,6 +50,8 @@ func cmdMemvault(args []string, stdout, stderr io.Writer) int {
 		err = memvaultRelease(rest, stdout, stderr)
 	case "issue-inherit-token":
 		err = memvaultIssueInheritToken(rest, stdout, stderr)
+	case "job":
+		err = memvaultJob(rest, stdout, stderr)
 	case "-h", "--help", "help":
 		fmt.Fprint(stdout, memvaultHelp)
 		return 0
@@ -75,6 +77,11 @@ Usage:
   herdr-drover memvault claim   [--operator NAME] [--force] [--inherit --token T]
   herdr-drover memvault release [--operator NAME] [--force]
   herdr-drover memvault issue-inherit-token --owner NAME [--for OP] [--ttl 8h]
+  herdr-drover memvault job {register|end} [--owner NAME] [--job-id ID] [--ttl 4h]
+                                                            長時間 job (docker build 等) の
+                                                            寿命を memvault の retention に
+                                                            告げる。--job-id 省略時は
+                                                            HERDR_PANE_ID を使う。
 
 Environment:
   MEMVAULT_SOCKET   memvault daemon の UNIX socket path（既定 $HOME/.memvault.sock）
@@ -206,6 +213,87 @@ func memvaultIssueInheritToken(args []string, stdout, stderr io.Writer) error {
 	}
 	c := memvaultclient.New("")
 	buf, err := c.IssueInheritToken(*owner, *forOp, *ttl)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(stdout, prettyJSONOrRaw(buf))
+	return nil
+}
+
+// memvaultJob dispatches `job register|end` — the drover-side hook that
+// tells memvault "this pane has a long-running job holding onto minted
+// tokens, keep the slot alive until then". Especially matters when the
+// caller-visible TTL of a kind (`inject --ttl 30m`) is shorter than the
+// SDK-side cached STS lifetime (~55min). See memvault docs §Phase 2.
+func memvaultJob(args []string, stdout, stderr io.Writer) error {
+	if len(args) == 0 {
+		return errors.New("usage: memvault job {register|end} [--owner NAME] [--job-id ID] [--ttl 4h]")
+	}
+	sub, rest := args[0], args[1:]
+	switch sub {
+	case "register":
+		return memvaultJobRegister(rest, stdout, stderr)
+	case "end":
+		return memvaultJobEnd(rest, stdout, stderr)
+	default:
+		return fmt.Errorf("unknown job subcommand %q (want register|end)", sub)
+	}
+}
+
+// jobIDDefault returns --job-id if given, else HERDR_PANE_ID (the natural
+// per-pane identifier drover already uses everywhere else), else "".
+func jobIDDefault(explicit string) string {
+	if explicit != "" {
+		return explicit
+	}
+	return os.Getenv("HERDR_PANE_ID")
+}
+
+func memvaultJobRegister(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("job register", flag.ContinueOnError)
+	owner := fs.String("owner", "", "slot owner (省略時 $MEMVAULT_OPERATOR → $USER → \"\"＝default slot)")
+	jobID := fs.String("job-id", "", "job id (省略時 $HERDR_PANE_ID)")
+	ttl := fs.String("ttl", "", "declared job lifetime (empty = daemon default 4h)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	id := jobIDDefault(*jobID)
+	if id == "" {
+		return errors.New("--job-id が空で $HERDR_PANE_ID も未設定")
+	}
+	// Owner is optional (empty = default slot). If the caller didn't set
+	// one explicitly, prefer $MEMVAULT_OPERATOR / $USER for parity with
+	// claim/release; passing "" is legitimate for the classic 1-tenant case.
+	ownerVal := *owner
+	if ownerVal == "" {
+		ownerVal = operatorDefault()
+	}
+	c := memvaultclient.New("")
+	buf, err := c.JobRegister(ownerVal, id, *ttl)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(stdout, prettyJSONOrRaw(buf))
+	return nil
+}
+
+func memvaultJobEnd(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("job end", flag.ContinueOnError)
+	owner := fs.String("owner", "", "slot owner (省略時 $MEMVAULT_OPERATOR → $USER → \"\"＝default slot)")
+	jobID := fs.String("job-id", "", "job id (省略時 $HERDR_PANE_ID)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	id := jobIDDefault(*jobID)
+	if id == "" {
+		return errors.New("--job-id が空で $HERDR_PANE_ID も未設定")
+	}
+	ownerVal := *owner
+	if ownerVal == "" {
+		ownerVal = operatorDefault()
+	}
+	c := memvaultclient.New("")
+	buf, err := c.JobEnd(ownerVal, id)
 	if err != nil {
 		return err
 	}

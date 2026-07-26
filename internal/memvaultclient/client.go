@@ -221,6 +221,53 @@ func (c *Client) Release(operator string, force bool) ([]byte, error) {
 // doesn't match the current active operator (and Force wasn't set).
 var ErrReleaseConflict = errors.New("memvault release conflict")
 
+// JobRegister pins a slot alive while an external caller has an in-flight
+// job. See memvault's phase-2 design note for the semantics.
+//
+//	owner:  slot to pin ("" = default slot)
+//	jobID:  unique per job (drover uses pane_id)
+//	ttl:    declared job lifetime (empty = daemon default)
+func (c *Client) JobRegister(owner, jobID, ttl string) ([]byte, error) {
+	if jobID == "" {
+		return nil, errors.New("JobRegister: jobID required")
+	}
+	q := "job_id=" + urlEscape(jobID)
+	if owner != "" {
+		q += "&owner=" + urlEscape(owner)
+	}
+	if ttl != "" {
+		q += "&ttl=" + urlEscape(ttl)
+	}
+	buf, code, err := c.doJSON("POST", "/job/register?"+q, nil)
+	if err != nil {
+		return nil, err
+	}
+	if code/100 != 2 {
+		return buf, fmt.Errorf("memvault /job/register returned %d: %s", code, strings.TrimSpace(string(buf)))
+	}
+	return buf, nil
+}
+
+// JobEnd removes a job registration. Idempotent — safe to call for an
+// unknown jobID.
+func (c *Client) JobEnd(owner, jobID string) ([]byte, error) {
+	if jobID == "" {
+		return nil, errors.New("JobEnd: jobID required")
+	}
+	q := "job_id=" + urlEscape(jobID)
+	if owner != "" {
+		q += "&owner=" + urlEscape(owner)
+	}
+	buf, code, err := c.doJSON("POST", "/job/end?"+q, nil)
+	if err != nil {
+		return nil, err
+	}
+	if code/100 != 2 {
+		return buf, fmt.Errorf("memvault /job/end returned %d: %s", code, strings.TrimSpace(string(buf)))
+	}
+	return buf, nil
+}
+
 // IssueInheritToken calls POST /issue-inherit-token.
 // ttl "" leaves the daemon's default.
 func (c *Client) IssueInheritToken(owner, forOp, ttl string) ([]byte, error) {
