@@ -42,7 +42,11 @@ if (-not (Get-Process -Name herdr -ErrorAction SilentlyContinue)) {
 # --- ログを 1 世代退避してから起動 ---------------------------------------
 # Start-Process のリダイレクトは追記でなく truncate なので、退避しないと
 # 「なぜ落ちたか」が再起動のたびに消える（復旧調査の一次情報を失う）。
-if (Test-Path $errLog) { Move-Item -Path $errLog -Destination "$errLog.1" -Force }
+# ⚠ **空ログは退避しない**: 起動自体が失敗し続ける状況（例 SAC が新バイナリを
+# 評価するまで弾く間）では、この関数が 5 分ごとに呼ばれて「空ログを .1 へ退避」
+# を繰り返し、**本当の死因が入った .1 を数分で上書きしてしまう**。
+$fi = Get-Item $errLog -ErrorAction SilentlyContinue
+if ($fi -and $fi.Length -gt 0) { Move-Item -Path $errLog -Destination "$errLog.1" -Force }
 
 Start-Process -FilePath $drover -ArgumentList 'agent' -WindowStyle Hidden `
     -RedirectStandardOutput $outLog -RedirectStandardError $errLog
