@@ -701,16 +701,33 @@ func findClaudePaneByResumeUUID(api *herdrapi.Client, uuid string) (*herdrapi.Pa
 	return findAgentPaneByResumeRef(api, "claude", uuid)
 }
 
-// findAgentPaneByResumeRef は ref の会話を実行中の live pane を返す（無ければ nil,nil）。
-// 判定は herdr の agent_session の exact-match のみ。
+// findAgentPaneByResumeRef は ref の会話を実行中の **live** pane を返す（無ければ nil,nil）。
+// 判定は herdr の agent_session の exact-match ＋ **liveness** の 2 段。
 //
 // ⚠**種別も一致させる**こと。ref だけで探すと、別エージェントがたまたま同じ
 // 文字列の会話 ref を持っていたときに他人の pane へ attach してしまう。
+//
+// ⚠**「live pane」の契約を実装で担保する**（BUG-1 の根治）。agent_session は
+// herdr 再起動のレイアウト復元を跨いで **古い uuid を保持したまま残る**が、実
+// claude は走っていない（前景は復元された `herdr-drover claude --resume <uuid>`
+// シム自身）。この「ゾンビ pane」を返すと呼び手（resume backstop）が attach＝
+// observe を張り、**復元 pane 上で走るシムが自分自身の pane を observe** して
+// 自己デッドロック＝空 pane 化する（実測 2026-07-26・v0.5.27）。よって:
+//
+//	(a) 自 pane（HERDR_PANE_ID env が指す pane）は除外する。復元 pane 上でシムが
+//	    走るとき ref 一致するのは自分自身になり得るため。HERDR_PANE_ID は herdr が
+//	    各 pane env に入れる権威値（attach.go も自己 identity 再表明に使う）。
+//	(b) live agent の居ない pane（agent_status="unknown"）は除外する。agent_status は
+//	    前景プロセス基準で復元されるので、実 claude が走っていないゾンビは "unknown"。
+//	    ⚠live claude の起動直後（status 報告 hook 発火前）の一瞬も "unknown" になり
+//	    得る＝その窓では dup（--resume 2 本）を作るが、これは同 cwd の既知許容 race と
+//	    同型（可視・silent 破壊でない）で、ゾンビへ誤 attach するより害が小さい。
 func findAgentPaneByResumeRef(api *herdrapi.Client, agent, ref string) (*herdrapi.PaneInfo, error) {
 	panes, err := api.PaneList()
 	if err != nil {
 		return nil, err
 	}
+	selfPane := os.Getenv("HERDR_PANE_ID") // 空なら herdr pane 外からの起動＝除外なし
 	for i := range panes {
 		p := &panes[i]
 		if p.AgentSession.Value != ref || !agentid.SupportsKind(agent, p.AgentSession.Kind) {
@@ -718,6 +735,12 @@ func findAgentPaneByResumeRef(api *herdrapi.Client, agent, ref string) (*herdrap
 		}
 		if kind, conflict := agentid.Resolve(agentid.OfPane(*p, "")); conflict != "" || kind != agent {
 			continue
+		}
+		if selfPane != "" && p.PaneID == selfPane {
+			continue // (a) 自 pane＝自己 observe デッドロックになる（BUG-1）
+		}
+		if p.AgentStatus == "" || p.AgentStatus == "unknown" {
+			continue // (b) live agent が居ない（ゾンビ pane）＝attach 先にしない（BUG-1）
 		}
 		return p, nil
 	}

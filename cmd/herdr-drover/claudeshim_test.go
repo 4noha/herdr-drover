@@ -684,6 +684,11 @@ func TestShimDoesNotCrossAgentKinds(t *testing.T) {
 	if _, err := renameClaudePaneTo(api, pane, "claude"); err != nil {
 		t.Fatalf("agent.rename: %v", err)
 	}
+	// resume backstop は live pane だけを返す（BUG-1）。状態→session の順で live 化
+	// してから agent_session を付ける（herdr 0.7.4 実測契約・逆順だと status=unknown）。
+	if err := api.ReportAgent(pane, "test-native", "claude", "idle"); err != nil {
+		t.Fatalf("report_agent: %v", err)
+	}
 	if err := api.ReportAgentSession(pane, "herdr:claude", "claude",
 		"11111111-2222-4333-8444-555555555555"); err != nil {
 		t.Fatalf("report_agent_session: %v", err)
