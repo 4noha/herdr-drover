@@ -1,22 +1,79 @@
-# 実装手順メモ / 引き継ぎ（2026-07-25 更新）
+# 実装手順メモ / 引き継ぎ（2026-07-26 更新）
 
 **開発の鉄則は [CLAUDE.md](CLAUDE.md) / DESIGN.md 末尾**（実テスト担保・旧コード
 FAIL 確認・exact-match・AGPL 衛生・silent 変更禁止・対外操作はユーザー確認後）。
 **再開時はまずこの TODO.md を通読**（in-flight・残課題・デプロイ手順の正）。
-**既知バグ 3 件は [BUGS.md](BUGS.md) で修正済み**（2026-07-26: BUG-1 shim 再入ゾンビ化
-【P0・claudeshim.go findAgentPaneByResumeRef に自 pane 除外＋live 検証】／ BUG-2
-リモート注入 off 設定を新設【`DROVER_INJECT_REMOTE`/`inject_remote_panes`・config.go・
-reconcile.go emptyRemoteSource】／ BUG-3 `#inj` bridge thrash【attach.go の viewer 側
-再 Wake が真因・idleClosed 伝播＋backoff 非リセット】。いずれも実 herdr テストで担保・
-全 test 緑）。**BUG-3 は BUGS.md 旧記述の推定真因（source 側 tick）が誤りだった点も訂正済み**。
+**既知バグ 3 件は [BUGS.md](BUGS.md) で修正済み＝v0.5.28 で fleet 配信済み**
+（2026-07-26: BUG-1 shim 再入ゾンビ化【P0・claudeshim.go findAgentPaneByResumeRef に
+自 pane 除外＋live 検証】／ BUG-2 リモート注入 off 設定を新設
+【`DROVER_INJECT_REMOTE`/`inject_remote_panes`・config.go・reconcile.go
+emptyRemoteSource】／ BUG-3 `#inj` bridge thrash【attach.go の viewer 側 再 Wake が
+真因・idleClosed 伝播＋backoff 非リセット】。いずれも実 herdr テストで担保・全 test 緑）。
+**BUG-3 は BUGS.md 旧記述の推定真因（source 側 tick）が誤りだった点も訂正済み**。
 
 ---
 
 > ⚠ **この TODO の本文は v0.5.24 時点で止まっている**（2026-07-26 時点の実状: main =
-> **v0.5.27** / drover-cloud **v0.1.14**・いずれも push・release 済み・working tree clean）。
-> v0.5.25〜v0.5.27 の内容は **各 tag のメッセージが実質の正**（`git tag -l -n20 v0.5.27`）。
+> **v0.5.28** / drover-cloud **v0.1.14**・いずれも push・release 済み・working tree clean。
+> ⚠go.mod は drover-cloud **v0.1.13** 固定のままで正しい＝v0.1.14 の差分は
+> `web/static/devices.js` のみ＝drover バイナリに無関係）。
+> v0.5.25〜v0.5.28 の内容は **各 tag のメッセージが実質の正**（`git tag -l -n30 v0.5.28`）。
 > 下記「0. Windows 移植」の *未 push* / *branch `windows-port`* / *Windows は self-update
-> できない* の記述は**すべて解消済み**（PR #1 merge・`e9bab96` で release に windows 資産）。
+> できない* の記述は**すべて解消済み**（PR #1 merge・`e9bab96` で release に windows 資産。
+> Windows 機の self-update 成功を 7/25 15:52 の Ack で実確認）。
+
+### 2026-07-26: v0.5.28 の fleet 配信記録
+
+| PC | 版数 | 経路 |
+|---|---|---|
+| `mac-studio-herdr`（owner/本作業機） | **v0.5.28** | 手動 rm→cp＋codesign＋kickstart。CLI(`~/.local/bin`) も同時に v0.5.22→v0.5.28 へ同期 |
+| `d24wt27c3j-herdr`（master） | **v0.5.28** | 遠隔 `self-update` → `update-all` |
+| `lph77xyyc7-herdr`（slave） | **v0.5.28** | 同上 |
+| `n9htqcr6g0-herdr`（slave） | **v0.5.28** | 同上 |
+| `desktop-djb9pfr-herdr`（Windows） | v0.5.26 | **オフライン**＝`self-update` を pending で投入済（次回オンライン時に自動適用） |
+
+- **投入順序は `self-update` → `update-all`**（この順にした理由: `update-all` の第 1 段
+  ＝エージェント本体更新＋セッション再起動は**まだ旧版の drover で走る**。BUG-1 は
+  まさに shim の resume 経路なので、**先に self-update で新コードを載せてから**
+  セッションを触る段を走らせた）。
+- ⚠**遠隔命令を投げる CLI サブコマンドは無い**（投入経路は Web UI か
+  `drover-cloud/state.PushCommand`）。今回は後者を叩く使い捨てツールを scratchpad に
+  書いて投入した。恒常運用するなら CLI に口を足すのが筋（残バックログへ）。
+- `update-all` は 3 台とも **セッション再起動 0 件**（全 pane が「会話 ref
+  （agent_session）が取れない」で skip）。7/25 の再起動でセッションが作り直され、
+  **まだ発話していない＝jsonl も agent_session も無い**状態のため。これは既知の
+  正常挙動（claude は初回発話まで jsonl を書かない）。
+- d24wt27c3j では **codex / cursor も更新対象**として動いた（`update-all` 一般化の実証。
+  codex-cli 0.145.0 / cursor 2026.07.23-e383d2b とも既に最新）。
+
+#### 🔴 この配信で判明: **遠隔 self-update は attach.go の変更を配れない**
+
+配信後に mac-studio の source 側 `observe spawn` 間隔を実測したところ、**BUG-3 修正後も
+~31s のまま**だった（修正前と同じ）。
+
+```
+sid="w1:p15#inj": 11:52:17 11:52:48 … 11:57:19 11:57:50 11:58:20   ← 全機 v0.5.28 後も 31s 周期
+```
+
+真因は**測っている側の非対称**: `w1:p15#inj` は **mac-studio が source**（自分の claude
+pane を他 PC の ↗窓 へ配信している）で、再 Wake しているのは**他 PC の viewer**。
+そして **viewer の実体である `herdr-drover attach` 子プロセスは herdr の pane 内で
+走るので、daemon が exit/再起動しても死なない**（＝ローカル配信手順に
+`pkill -f 'herdr-drover attach'` が要る理由と同じ）。
+
+**`self-update` / `update-all` のハンドラは attach 子プロセスに一切触らない**
+（`internal/commands/commands.go:120` → `selfupdate.Update` → `DoExit`＝launchd 再起動
+だけ）。よって **attach.go の変更は遠隔更新では永久に反映されない**。BUG-1（shim）と
+BUG-2（daemon/reconcile）は新プロセスなので配信済みだが、**BUG-3 は mac-studio でしか
+効いていない**（このマシンだけ手順どおり pkill→kickstart した）。
+
+- 対処案 A: `self-update` / `restart-daemon` の実行前に自 PC の attach 子プロセスを
+  終了させる（reconcile の起動時 kick が新バイナリで貼り直す＝ローカル手順の自動化）。
+  ⚠ pane が単独 Tab だと**プロセス終了で Tab ごと消える**ので、reconcile が確実に
+  作り直すことを実機で確かめてから入れること（restart-claude の二段構えと同じ論点）。
+- 対処案 B: 遠隔命令に「注入 pane 作り直し」を新設する（`restart-inject` 等）。
+- ⚠ どちらもやるまでは、**attach.go を触ったリリースは各機で手動の
+  `pkill -f 'herdr-drover attach'` → `launchctl kickstart -k` が要る**。
 
 ## 最新状態（2026-07-25・最新タグ v0.5.23 / drover-cloud v0.1.11）
 
@@ -659,15 +716,29 @@ launchctl kickstart -k gui/$(id -u)/com.4noha.herdr-drover
   駆動でローカル pane の消滅を契機にしないため、注入 pane が 11→0 のまま放置される。
   daemon の起動時 reconcile が唯一の確実な再生成契機なので kickstart が必須。
   （attach.go 無変更のリリースでは機能差ゼロ＝この手順自体が不要）。
+- 🔴**遠隔（`self-update`/`update-all`）はこの pkill をしない**＝**attach.go の変更は
+  遠隔更新では他機に届かない**（2026-07-26 の v0.5.28 配信で実測。上記
+  「遠隔 self-update は attach.go の変更を配れない」）。当面は各機で手動が要る。
 - ⚠バイナリ/設定はプロセス起動時のみ反映＝各セッションは新規起動で新版。
 - ⚠**リリースビルドは GOWORK=off**（go.work のローカル drover-cloud でなく go.mod
-  宣言の公開タグで解決）。usage() は backtick raw string＝**中に `` ` `` を入れない**
-  （文字列が途中で閉じてビルド破壊。v0.5.0 で実際にやらかして amend 修正）。
+  宣言の公開タグで解決）。⚠go.work は**このリポではなく `~/works/tools/go.work`**
+  （親ディレクトリの workspace が drover-cloud をローカル解決している）。
+  ⇒ `go build`/`go test` はローカル drover-cloud、`GOWORK=off make dist` は公開タグ、
+  という**非対称が常時ある**ことを意識すること。usage() は backtick raw string＝
+  **中に `` ` `` を入れない**（文字列が途中で閉じてビルド破壊。v0.5.0 で実際に
+  やらかして amend 修正）。
 
 ---
 
 ## 残バックログ（優先順）
 
+0. 🔴 **遠隔更新が attach 子プロセスを作り直さない**（2026-07-26 実測・上記デプロイ節）。
+   これがある限り **attach.go の変更は fleet に配れない**（BUG-3 修正が mac-studio
+   以外で効いていない実害が出ている）。対処案 A（self-update/restart-daemon の前に
+   自 PC の attach を終了）か B（`restart-inject` 命令の新設）。
+0b. **遠隔命令を投げる CLI が無い**（Web UI か `state.PushCommand` を直に叩くしかない）。
+   v0.5.28 の配信は scratchpad の使い捨てツールで投入した＝`herdr-drover push-command
+   <pc> <cmd>` 相当を CLI に足すのが筋（allowlist 検証は state 側が持っている）。
 1. **SSH 転送 Phase 3 実機 e2e**（上記 A・保留中＝ユーザー都合の良い時）。
 2. **organize/claudeshim の空 root pane 掃除**（上記 D・reconcile は v0.5.8 で修正済＝
    同経路の残り。稀だが同種ゴミ）。
