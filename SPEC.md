@@ -362,17 +362,33 @@ organize / producer が共有）。権威は強い順に:
 | restart 実機 | ✅ | ✅ | ✅ |
 | resume 後の hook 再発火 | ✅ | ❌ **しない** | 未計測 |
 
-#### copilot / devin（2026-07-26 追加・CLI 実測。⚠**会話 e2e は未検証**）
+#### copilot / devin（2026-07-26 追加・**会話 e2e まで実機検証済み**）
 
 | 事項 | copilot 1.0.75 | devin 3000.2.17 |
 |---|---|---|
 | 導入 | `npm i -g @github/copilot`（要 Node 22+） | `brew install --cask devin-cli` |
 | 実行ファイル | `copilot` | `devin` |
 | 版の出力 | `GitHub Copilot CLI 1.0.75.` ＋ 更新案内の 2 行目 | `devin 3000.2.17 (2c489dfc)` |
+| 認証 | `copilot login`（OAuth device flow・Keychain 保存。<br>`COPILOT_GITHUB_TOKEN`>`GH_TOKEN`>`GITHUB_TOKEN` も可） | `devin auth login`<br>（`~/.local/share/devin/credentials.toml`） |
+| herdr の検出 | ✅ | ✅ |
+| `agent_session` の発火契機 | 初回発話時までに付与（起動時かは未計測） | 同左 |
+| **会話 ref の形** | uuid v4 | ⚠**単語スラッグ**（実測 `resolute-lynx`） |
 | resume argv | `--resume=<id>`（`-r` 短縮形あり） | `--resume <id>`（`-r` 短縮形あり） |
+| **restart 実機（会話復元）** | ✅ | ✅ |
+| **resume 後の hook 再発火** | ❌ **しない**（codex と同型） | ✅ **する** |
 | 自己更新 | `copilot update` ✅ 非対話で完走 | ❌ **非対話で完走しない**（rc=130）＝Spec に載せない |
 | `--model` | ✅（短縮形なし） | ✅（短縮形なし・env `DEVIN_MODEL`） |
-| `agent_session` / restart | ⏳ **未検証**（`/login` が要る） | ⏳ **未検証**（認証が要る） |
+
+⚠ **devin の会話 ref は UUID ではない**（`resolute-lynx`）。`ValidSessionRef` が
+「非空・512B 以下・制御文字なし」しか見ない設計だからそのまま通った。
+**値の書式で判定するヒューリスティックを入れると devin が resume 不能になる**
+（`-r report.md` の一件で書式判定を排した判断が、別種別で実際に効いた事例）。
+
+⚠ **copilot の実バイナリは VS Code 拡張の同梱版に解決されうる**（実測:
+`~/Library/Application Support/Code/User/globalStorage/github.copilot-chat/copilotCli/copilot`）。
+「稼働 pane の argv[0] が権威・PATH 非依存」という設計どおりの動作だが、
+`update-agent-cli copilot` はその同梱版を更新対象にするので VS Code 側の管理と
+食い違いうる。npm 版と同版（1.0.75）であることは確認済み。
 
 ⚠ **devin の resume は「値が任意」形**（clap の `-r, --resume [<SESSION_ID>]`）。
 optional value はスペース区切りで値を拾わない実装がありうるので実測した:

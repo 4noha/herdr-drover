@@ -40,6 +40,77 @@
 [SPEC.md](SPEC.md)**、**他のコーディングエージェント対応は
 [DESIGN_MULTI_AGENT.md](DESIGN_MULTI_AGENT.md)**。
 
+## 対応エージェント
+
+**検出（pane にどのエージェントが居るか）は herdr がネイティブに 21 種すべてを
+見る**ので、Web/スマホ閲覧・↗窓 注入・organize は最初から全種で動く。差が出るのは
+**「drover が argv を組み立て直す機能」**（resume / 更新 / モデル切替 / シムからの
+新規起動）で、これは `internal/agentid` の Spec を持つ種別だけが対象になる。
+
+### 実機で検証済み（5 種）
+
+| | 会話 resume | restart<br>-agent-session | update<br>-agent-cli | `--model` | シムから<br>新規起動 |
+|---|---|---|---|---|---|
+| **claude** | `--resume <id>`（`-r`） | ✅ | ✅ `claude update` | ✅ | ✅ |
+| **codex** | `codex resume <id>` | ✅ | ✅ `codex update` | ✅（`-m` も） | ✅ |
+| **cursor** | `--resume <id>`<br>（実行名 `cursor-agent`） | ✅ | ✅ `cursor-agent update` | ✅ | ✅ |
+| **copilot** | `--resume=<id>`（`-r`） | ✅ | ✅ `copilot update` | ✅ | ✅ |
+| **devin** | `--resume <id>`（`-r`） | ✅ | ⚠ **版取得のみ** | ✅ | ✅ |
+
+⚠ **devin の自己更新は意図的に載せていない。** `devin update` は存在するが
+**非対話で完走しない**（stdin を閉じると rc=130）うえ Homebrew cask 管理と食い違う。
+更新は `brew upgrade --cask devin-cli` を人が行い、drover は**セッション再起動だけ**
+担当する。`update-agent-cli devin` は版を報告して再起動のみ行う。
+
+#### 実測した差（会話の再開まわり）
+
+| 事項 | claude | codex | cursor | copilot | devin |
+|---|---|---|---|---|---|
+| `agent_session` の発火契機 | 起動時 | 初回発話時 | 初回発話時<br>（要 trust 通過） | 初回発話時まで<br>には付与 | 初回発話時まで<br>には付与 |
+| 会話 ref の形 | uuid v4 | uuid v7 系 | uuid v4 | uuid v4 | **単語スラッグ**<br>（例 `resolute-lynx`） |
+| resume で会話復元 | ✅ | ✅ | ✅ | ✅ | ✅ |
+| resume 後の hook 再発火 | ✅ | ❌ | 未計測 | ❌ | ✅ |
+
+⚠ **「resume 後の hook 再発火」が ❌ の種別は、同じ pane を 2 回目に restart すると
+素起動になる**（会話が失われる）。herdr / 各エージェント側の性質で drover では
+埋められない。dry-run で ref が出るか確認してから実行するのが安全。
+
+⚠ **会話 ref は UUID とは限らない**（devin は単語スラッグ）。drover は値の書式で
+判定せず「非空・512B 以下・制御文字なし」しか見ない＝**書式ヒューリスティックを
+入れてはいけない**。
+
+### Spec はあるが実機未検証（9 種）
+
+resume の argv 形だけ herdr のソースから写経してある。更新 / モデル切替 / シムからの
+新規起動は**推測で書かない方針**のため未対応（実 CLI を入れて実測すれば足せる）。
+
+| resume の形 | 該当 |
+|---|---|
+| `--resume <id>` | droid / hermes / qodercli |
+| `--session <id>` | kimi / opencode / kilo / pi（`path` kind も） |
+| `--thread <id>` | mastracode |
+| `--resume=<id>` | omp（`-r`・`path` kind も） |
+
+### resume が原理的に不可能（7 種）
+
+**agy / amp / cline / gemini / grok / kiro / maki** — herdr が `agent_session` を
+出さないため、会話 ref が存在しない。restart は**素起動へ落として loud に報告する**
+（黙って会話を失わない）。検出・閲覧・↗窓 注入は他と同じように効く。
+
+### 共通の前提
+
+- ⚠ **resume には herdr の integration hook が必須**。`agent_session` は herdr が
+  自力で見つけるのではなく**各エージェントの hook が報告する**。
+  `herdr integration install <agent>` で設置し、`herdr integration status` で確認する。
+  **未設置だと検出はされるのに resume だけ永久に効かない**。
+- ⚠ **新しいエージェントを足すのは `internal/agentid/spec.go` に Spec を書くだけ**。
+  ただし `InstallSpec.BinNames` は **herdr の `lookup_agent` alias 表の要素**でなければ
+  ならない（表に無い名前で起動すると herdr の検出に一切載らない）。`ValidateSpecs()`
+  が起動時に静的検証する。
+- ⚠ **モデル名は種別ごとに互換でない**（claude=`opus` / codex=`gpt-5` /
+  cursor=`sonnet-4-thinking` / devin=`claude-sonnet-4`）。`--model` は `--agent` と
+  併用する。
+
 ## 使い方
 
 ### エージェントシム（cwd 自動 attach / 新規起動）
