@@ -206,13 +206,16 @@ func runClaudeUpdate(ctx context.Context, agent, bin string) (string, error) {
 func updateClaudeAndRestart(ctx context.Context, api *herdrapi.Client, opt restartOptions,
 	out io.Writer) (string, error) {
 	// opt.Agent 空は「全エージェント」だが、更新は**種別ごと**に本体が違う。
-	// 現状 UpdaterSpec を持つのは claude のみ＝空なら claude を既定にする
-	// （どの種別を更新したかは必ず 1 行出す）。
+	// 空なら claude を既定にする（どの種別を更新したかは必ず 1 行出す）。
+	// ⚠選べる種別は **UpdaterSpec の表から導出**する。以前は「更新口を持つのは
+	// 現状これのみ」と文言に焼いてあり、codex/cursor を足した後も直っておらず
+	// 利用者に嘘を表示していた（agentid.UpdaterAgents の doc 参照）。
 	agent := opt.Agent
 	if agent == "" {
 		agent = "claude"
 		fmt.Fprintf(out, "update-agent-cli: note: --agent 未指定＝%s を対象にする"+
-			"（更新口を持つエージェントは現状これのみ）\n", agent)
+			"（更新口を持つのは %s。--agent で選べる）\n",
+			agent, strings.Join(agentid.UpdaterAgents(), " / "))
 	}
 	if _, ok := agentid.Updater(agent); !ok {
 		return "", fmt.Errorf("%s は更新口（UpdaterSpec）を持たない"+

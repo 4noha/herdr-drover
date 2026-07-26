@@ -100,6 +100,17 @@ func TestStripResumeUsesSpecNotValueFormat(t *testing.T) {
 			[]string{"pi", "--verbose"}},
 		{"= 形", "copilot",
 			[]string{"copilot", "--resume=abc", "-x"}, []string{"copilot", "-x"}},
+		// copilot / devin の短縮形 -r（実測 `-r, --resume`）。**落とし損ねると
+		// BuildResume が付け直した指定と二重になる**。
+		{"copilot: alias の = 形", "copilot",
+			[]string{"copilot", "-r=abc", "-x"}, []string{"copilot", "-x"}},
+		{"copilot: alias の値なし picker 形", "copilot",
+			[]string{"copilot", "-r", "--banner"}, []string{"copilot", "--banner"}},
+		{"devin: alias はスペース形で値も落とす", "devin",
+			[]string{"devin", "-r", "sess-1", "--sandbox"}, []string{"devin", "--sandbox"}},
+		{"devin: 値なし picker 形はフラグだけ落とす", "devin",
+			[]string{"devin", "--resume", "--model", "opus"},
+			[]string{"devin", "--model", "opus"}},
 		{"alias も落とす", "claude",
 			[]string{"claude", "-r", "8b1e0e2c-0000-4000-8000-000000000000"}, []string{"claude"}},
 		{"値なし picker 形はフラグだけ落とす", "claude",
@@ -199,10 +210,16 @@ func TestIsDirectInvocationCoversAllAgents(t *testing.T) {
 // フラグ名が同じでも**モデル名は互換でない**ので、種別を跨いで同じ値を
 // 渡してはいけない（呼び手が --agent を要求する）。
 func TestModelSpec(t *testing.T) {
-	for _, a := range []string{"claude", "codex", "cursor"} {
+	for _, a := range []string{"claude", "codex", "cursor", "copilot", "devin"} {
 		sp, ok := Model(a)
 		if !ok || sp.Flag != "--model" {
 			t.Errorf("%s: ModelSpec = %+v ok=%v", a, sp, ok)
+		}
+	}
+	// copilot / devin とも短縮形は無い（実測 copilot 1.0.75 / devin 3000.2.17）。
+	for _, a := range []string{"copilot", "devin"} {
+		if sp, _ := Model(a); len(sp.Aliases) != 0 {
+			t.Errorf("%s に短縮形は無いはず: %v", a, sp.Aliases)
 		}
 	}
 	// codex だけ短縮形 -m を持つ（実測 `-m, --model <MODEL>`）。
@@ -254,7 +271,8 @@ func TestBuildModel(t *testing.T) {
 
 // 更新口は実 CLI で確認した 3 種（いずれも `<bin> update` と `--version`）。
 func TestUpdaterSpecCoversVerifiedAgents(t *testing.T) {
-	for _, a := range []string{"claude", "codex", "cursor"} {
+	// 自己更新まで**非対話で完走することを実測した**もの。
+	for _, a := range []string{"claude", "codex", "cursor", "copilot"} {
 		sp, ok := Updater(a)
 		if !ok || len(sp.UpdateArgv) != 1 || sp.UpdateArgv[0] != "update" {
 			t.Errorf("%s: UpdaterSpec = %+v ok=%v", a, sp, ok)
@@ -263,7 +281,64 @@ func TestUpdaterSpecCoversVerifiedAgents(t *testing.T) {
 			t.Errorf("%s: VersionArgv = %v", a, sp.VersionArgv)
 		}
 	}
+	// devin は **版は取れるが自己更新は載せない**（`devin update` は存在するが
+	// 非対話で完走しない＝実測 3000.2.17 で stdin を閉じると rc=130・出力 9B。
+	// さらに brew cask 管理なので自己更新は brew と食い違う）。UpdateArgv=nil は
+	// 型の first-class な状態（errNoUpdater＝再起動のみ）＝**書き忘れではない**。
+	sp, ok := Updater("devin")
+	if !ok {
+		t.Fatal("devin: UpdaterSpec が無い（版取得だけは載せる）")
+	}
+	if len(sp.VersionArgv) != 1 || sp.VersionArgv[0] != "--version" {
+		t.Errorf("devin: VersionArgv = %v", sp.VersionArgv)
+	}
+	if sp.UpdateArgv != nil {
+		t.Errorf("devin: UpdateArgv は nil のはず（非対話で完走しない）: %v", sp.UpdateArgv)
+	}
 	if _, ok := Updater("gemini"); ok {
 		t.Error("未確認の agent に UpdaterSpec を書いてはいけない")
+	}
+}
+
+// UpdaterAgents は表から導出する（呼び手のメッセージに種別名を焼かないため。
+// 以前「更新口を持つのは claude のみ」と出力に焼いてあり、codex/cursor 追加後も
+// 直っておらず利用者に嘘を表示していた）。
+func TestUpdaterAgents(t *testing.T) {
+	got := UpdaterAgents()
+	want := []string{"claude", "codex", "copilot", "cursor", "devin"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("UpdaterAgents() = %v, want %v（昇順・表と一致）", got, want)
+	}
+	// 表に足したら自動で増えること＝ハードコードでないことの担保。
+	if len(got) != len(updaterSpecs) {
+		t.Errorf("表の件数 %d と戻り値 %d が食い違う", len(updaterSpecs), len(got))
+	}
+}
+
+// InstallSpec は**実機で実行ファイルの所在を確認できた agent のみ**載せる。
+// BinNames が herdr の alias 表の要素であることは ValidateSpecs が別途検証する
+// （表に無い名前で起動すると herdr の検出に一切載らない）。
+func TestInstallSpecCoversVerifiedAgents(t *testing.T) {
+	for _, tc := range []struct {
+		agent string
+		bin   string
+	}{
+		{"claude", "claude"},
+		{"codex", "codex"},
+		{"cursor", "cursor-agent"},
+		{"copilot", "copilot"}, // npm -g @github/copilot（実測 /opt/homebrew/bin/copilot）
+		{"devin", "devin"},     // brew --cask devin-cli（実測 /opt/homebrew/bin/devin）
+	} {
+		sp, ok := Install(tc.agent)
+		if !ok {
+			t.Errorf("%s: InstallSpec が無い", tc.agent)
+			continue
+		}
+		if len(sp.BinNames) == 0 || sp.BinNames[0] != tc.bin {
+			t.Errorf("%s: BinNames = %v（先頭は %q のはず）", tc.agent, sp.BinNames, tc.bin)
+		}
+	}
+	if _, ok := Install("gemini"); ok {
+		t.Error("未確認の agent に InstallSpec を書いてはいけない（実バイナリ名を推測しない）")
 	}
 }

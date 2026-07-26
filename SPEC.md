@@ -332,13 +332,19 @@ organize / producer が共有）。権威は強い順に:
   （herdr が `agent_session` を出さない）＝素起動へ落として loud に報告。
 - **UpdaterSpec** — `VersionArgv`（nil=版比較 skip）／`UpdateArgv`（nil=更新口なし＝
   再起動のみ）／`Timeout`（**per-agent 予算**。全体に 1 本掛けない）。
-  実 CLI の `--help` で確認した 3 種（claude / codex / cursor。いずれも
-  `<bin> update` と `--version`）。**推測で書かない**。
+  実 CLI で確認した 5 種（claude / codex / cursor / copilot は `<bin> update`＋
+  `--version`。**devin は `--version` のみで `UpdateArgv=nil`**）。**推測で書かない**。
+  ⚠ **`UpdateArgv=nil` は「更新口が無い」ではなく「自動化から呼べない」も含む**:
+  `devin update` は存在するが**非対話で完走しない**（stdin を閉じて rc=130）うえ
+  Homebrew cask 管理と食い違うため、あえて載せていない（人が
+  `brew upgrade --cask devin-cli`、drover は再起動だけ担当）。
+  対象種別は `agentid.UpdaterAgents()` が表から導出する（**文言に焼かない**）。
 - **ModelSpec** — 起動時のモデル指定。`Flag` と `Aliases`（strip 対象の短縮形）。
   ⚠**フラグ名が同じでもモデル名は互換でない**（claude=`opus` / codex=`gpt-5` /
-  cursor=`sonnet-4-thinking`）。よって `--model` は **`--agent` と併用が必須**
-  （旧名 `restart-claude` 経由のみ claude 固定として許す＝既存手順書の互換）。
-  codex だけ短縮形 `-m` を持つので、**剥がし損ねると二重指定になる**。
+  cursor=`sonnet-4-thinking` / devin=`claude-sonnet-4`）。よって `--model` は
+  **`--agent` と併用が必須**（旧名 `restart-claude` 経由のみ claude 固定として許す
+  ＝既存手順書の互換）。codex だけ短縮形 `-m` を持つので、**剥がし損ねると二重指定に
+  なる**（copilot / devin に短縮形は無い＝実測）。
 - **InstallSpec** — `BinNames` / `WellKnownPaths`。⚠**`BinNames` は herdr の
   `lookup_agent` alias 表の要素でなければならない**。表に無い basename で起動すると
   herdr の検出（前景プロセス名基準）に**一切載らず**、`pane.agent` も
@@ -355,6 +361,23 @@ organize / producer が共有）。権威は強い順に:
 | resume argv | `--resume <id>` | `codex resume <id>` | `--resume <id>`（argv[0]=`cursor-agent`） |
 | restart 実機 | ✅ | ✅ | ✅ |
 | resume 後の hook 再発火 | ✅ | ❌ **しない** | 未計測 |
+
+#### copilot / devin（2026-07-26 追加・CLI 実測。⚠**会話 e2e は未検証**）
+
+| 事項 | copilot 1.0.75 | devin 3000.2.17 |
+|---|---|---|
+| 導入 | `npm i -g @github/copilot`（要 Node 22+） | `brew install --cask devin-cli` |
+| 実行ファイル | `copilot` | `devin` |
+| 版の出力 | `GitHub Copilot CLI 1.0.75.` ＋ 更新案内の 2 行目 | `devin 3000.2.17 (2c489dfc)` |
+| resume argv | `--resume=<id>`（`-r` 短縮形あり） | `--resume <id>`（`-r` 短縮形あり） |
+| 自己更新 | `copilot update` ✅ 非対話で完走 | ❌ **非対話で完走しない**（rc=130）＝Spec に載せない |
+| `--model` | ✅（短縮形なし） | ✅（短縮形なし・env `DEVIN_MODEL`） |
+| `agent_session` / restart | ⏳ **未検証**（`/login` が要る） | ⏳ **未検証**（認証が要る） |
+
+⚠ **devin の resume は「値が任意」形**（clap の `-r, --resume [<SESSION_ID>]`）。
+optional value はスペース区切りで値を拾わない実装がありうるので実測した:
+`devin --resume <id>` はパースを通り、対照の裸位置引数 `devin <id>` は
+`error: unexpected argument` で弾かれる＝**スペース形で値が付く**（`FormSpace` が正）。
 
 ⚠ **`agent_session` は herdr が自力で見つけるのではなく、各エージェントの hook が
 報告する**（`herdr integration install <agent>` で設置。`herdr integration status`

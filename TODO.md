@@ -30,6 +30,37 @@ v0.5.30 で**判定を経過時間ベースへ**変更し、**実 websocket 越�
 > できない* の記述は**すべて解消済み**（PR #1 merge・`e9bab96` で release に windows 資産。
 > Windows 機の self-update 成功を 7/25 15:52 の Ack で実確認）。
 
+### 2026-07-26: copilot / devin 対応（Spec 追加）
+
+両 CLI をこのマシンへ導入して**実物を叩いてから** `internal/agentid/spec.go` に
+Spec を足した（設計どおり「Spec を足すだけ」で済んだ）。
+
+| | 導入元 | 版 | 実行ファイル |
+|---|---|---|---|
+| copilot | `npm i -g @github/copilot`（要 Node 22+） | 1.0.75 | `/opt/homebrew/bin/copilot` |
+| devin | `brew install --cask devin-cli` | 3000.2.17 | `/opt/homebrew/bin/devin` |
+
+⚠ devin は検索上位に**非公式らしき GitHub リポジトリ**が混ざる。公式ドキュメント
+（`https://docs.devin.ai/cli`）で確認してから homebrew-cask 経由で入れること。
+
+- ⚠**devin の resume は `FormSpace` で正しい**（clap の「値が任意」形はスペース区切りで
+  値を拾わないことがあるので実測した）。`devin --resume <id>` はパースを通り、対照の
+  裸位置引数 `devin <id>` は `error: unexpected argument` で弾かれる＝値が付いている証拠。
+- ⚠**devin の自己更新は載せない**（`UpdateArgv=nil`）。`devin update` は存在するが
+  **非対話で完走しない**（stdin を閉じて rc=130・出力 9B・版も変わらず）。加えて
+  brew cask 管理なので自己更新は brew と食い違う。更新は
+  `brew upgrade --cask devin-cli` を人が行い、drover は再起動だけ担当する。
+  copilot は非対話で完走する（rc=0）ので更新口を載せた。
+- 🔴 **`-r` alias の欠落は既存の不具合だった**（両者とも短縮形を持つのに Spec に無く、
+  `-r <id>` 起動の pane を restart すると指定が二重になる）。
+- 環境側の配線: `herdr integration install devin`（未導入だった＝**これが無いと
+  agent_session が付かず resume が原理的に不可**）／`~/.zshrc` に copilot・devin の
+  シム alias（`-real` の逃げ道付き）。copilot の hook は 7/18 に導入済みだった。
+- ⏳ **ログインを要する e2e は未実施**。`agent_session` の実報告と
+  `restart-agent-session` の成功は未確認（copilot は `/login`、devin は認証が要る。
+  どちらも起動時に `Login canceled` で止まる）。codex/cursor は実会話まで通した
+  経緯があるので、同水準に揃えるならログイン後に再検証すること。
+
 ### 2026-07-26: v0.5.29 の fleet 配信記録（＝新機構の実地検証）
 
 | PC | 版数 | 経路 |

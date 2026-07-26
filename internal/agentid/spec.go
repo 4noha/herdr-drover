@@ -24,6 +24,7 @@ package agentid
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
@@ -66,8 +67,12 @@ type ResumeSpec struct {
 // ここに無い canonical label は resume 非対応（＝残り 7 種）。
 var resumeSpecs = map[string]ResumeSpec{
 	// `<bin> --resume <v>`
-	"claude":   {Supported: true, Flag: "--resume", Aliases: []string{"-r"}, Form: FormSpace, Kinds: []string{"id"}},
-	"devin":    {Supported: true, Flag: "--resume", Form: FormSpace, Kinds: []string{"id"}},
+	"claude": {Supported: true, Flag: "--resume", Aliases: []string{"-r"}, Form: FormSpace, Kinds: []string{"id"}},
+	// devin は `-r, --resume [<SESSION_ID>]`（値は任意）。⚠clap の「値が任意」形は
+	// スペース区切りだと値を拾わないことがあるので実測した（3000.2.17）:
+	// `devin --resume <id>` はパースを通り（対照の裸位置引数は
+	// `error: unexpected argument` で弾かれる）＝**スペース形で値が付く**。
+	"devin":    {Supported: true, Flag: "--resume", Aliases: []string{"-r"}, Form: FormSpace, Kinds: []string{"id"}},
 	"droid":    {Supported: true, Flag: "--resume", Form: FormSpace, Kinds: []string{"id"}},
 	"hermes":   {Supported: true, Flag: "--resume", Form: FormSpace, Kinds: []string{"id"}},
 	"qodercli": {Supported: true, Flag: "--resume", Form: FormSpace, Kinds: []string{"id"}},
@@ -80,8 +85,10 @@ var resumeSpecs = map[string]ResumeSpec{
 	"pi":       {Supported: true, Flag: "--session", Form: FormSpace, Kinds: []string{"id", "path"}},
 	// `<bin> --thread <v>`
 	"mastracode": {Supported: true, Flag: "--thread", Form: FormSpace, Kinds: []string{"id"}},
-	// `<bin> --resume=<v>`
-	"copilot": {Supported: true, Flag: "--resume", Form: FormEquals, Kinds: []string{"id"}},
+	// `<bin> --resume=<v>` — copilot は `-r, --resume[=value]`（実測 1.0.75。
+	// --help の例も `copilot --resume=<session-id>` 形）。値は session ID / task ID /
+	// ID prefix / 名前を受ける。
+	"copilot": {Supported: true, Flag: "--resume", Aliases: []string{"-r"}, Form: FormEquals, Kinds: []string{"id"}},
 	// omp は `-r, --resume=<value>`（ID prefix または path）。pi と違い --session は無い。
 	"omp": {Supported: true, Flag: "--resume", Aliases: []string{"-r"}, Form: FormEquals, Kinds: []string{"id", "path"}},
 	// `codex resume <v>` — 位置引数サブコマンド。
@@ -115,10 +122,44 @@ var updaterSpecs = map[string]UpdaterSpec{
 	// cursor: `cursor-agent update`（--help に "Update Cursor Agent to the latest version"）。
 	// 版の出力: "2026.07.23-e383d2b"
 	"cursor": {VersionArgv: []string{"--version"}, UpdateArgv: []string{"update"}, Timeout: 15 * time.Minute},
+	// copilot: `copilot update [channel]`（--help "Download the latest version"・
+	// channel は stable/prerelease）。**非対話で完走することを実測**（1.0.75・
+	// stdin を閉じて rc=0 / "No update needed, current version is 1.0.75, fetched
+	// latest release is v1.0.75"）。版の出力は 2 行:
+	//   "GitHub Copilot CLI 1.0.75."
+	//   "Run 'copilot update' to check for updates."
+	// DL 規模は claude の ~250MB とは桁違いに小さい（実測の版チェックは数秒）が、
+	// 遅回線を見込んで他と同じ上限に揃える。
+	"copilot": {VersionArgv: []string{"--version"}, UpdateArgv: []string{"update"}, Timeout: 15 * time.Minute},
+	// devin: **`UpdateArgv` を意図的に nil にする**（＝自己更新の口なし・再起動のみ）。
+	// `devin update` サブコマンド自体は存在するが（--help "Check for updates and
+	// optionally install them"）、**非対話では完走しない**ことを実測した
+	// （3000.2.17・stdin を閉じて rc=130・出力 9 バイトのみ・版も変わらず）。
+	// 自動化から呼ぶと固まるか黙って失敗するので載せない。加えて本 CLI は
+	// Homebrew cask（`brew install --cask devin-cli`）で入るため、自己更新させると
+	// brew の管理と食い違う。更新は `brew upgrade --cask devin-cli` を人が行い、
+	// drover は**セッション再起動だけ**を担当するのが正しい分担。
+	// 版の出力: "devin 3000.2.17 (2c489dfc)"
+	"devin": {VersionArgv: []string{"--version"}, Timeout: 15 * time.Minute},
 }
 
 // Updater は agent の UpdaterSpec と、載っているかを返す。
 func Updater(agent string) (UpdaterSpec, bool) { s, ok := updaterSpecs[agent]; return s, ok }
+
+// UpdaterAgents は UpdaterSpec を持つ canonical label を昇順で返す。
+//
+// ⚠**呼び手のメッセージに種別名をハードコードしないため**にある。以前は
+// 「更新口を持つエージェントは現状 claude のみ」と出力に焼いてあり、codex/cursor を
+// 足した後も直っていなかった（利用者に嘘を表示していた）。表から導出すれば
+// Spec を足すだけで文言が追随する。
+func UpdaterAgents() []string {
+	out := make([]string, 0, len(updaterSpecs))
+	for a := range updaterSpecs {
+		out = append(out, a)
+	}
+	sort.Strings(out)
+	return out
+}
 
 // InstallSpec は「本体バイナリの解決」の差分。
 type InstallSpec struct {
@@ -144,6 +185,16 @@ var installSpecs = map[string]InstallSpec{
 	// `agent` は汎用名で衝突を招く（Grok の /.grok/bin/agent と実際に衝突した）ため
 	// 解決先の候補は cursor-agent のみに絞る。
 	"cursor": {BinNames: []string{"cursor-agent"}, WellKnownPaths: []string{"~/.local/bin/cursor-agent"}},
+	// copilot: `npm install -g @github/copilot` が `copilot` を PATH に置く
+	// （実測 /opt/homebrew/bin/copilot・要 Node 22+）。herdr の alias 表は
+	// copilot / github-copilot / ghcs だが、**実行ファイル名として確認できたのは
+	// copilot のみ**なので候補もそれだけに絞る（cursor で `agent` を外したのと同じ理由
+	// ＝未確認の名前を候補に混ぜると別物を掴みうる）。
+	"copilot": {BinNames: []string{"copilot"}},
+	// devin: `brew install --cask devin-cli` が `devin` を PATH に置く
+	// （実測 /opt/homebrew/bin/devin。公式は curl インストーラも提供）。
+	// alias 表の devin-cli は**実行ファイル名としては未確認**なので載せない。
+	"devin": {BinNames: []string{"devin"}},
 }
 
 // Install は agent の InstallSpec と、載っているかを返す。
@@ -168,6 +219,13 @@ var modelSpecs = map[string]ModelSpec{
 	"claude": {Flag: "--model"},                          // 短縮形なし（実測 2.1.220）
 	"codex":  {Flag: "--model", Aliases: []string{"-m"}}, // `-m, --model <MODEL>`
 	"cursor": {Flag: "--model"},                          // `--model <model>`
+	// copilot: `--model <model>`（"use 'auto' to let Copilot pick automatically"）。
+	// 短縮形なし（実測 1.0.75）。
+	"copilot": {Flag: "--model"},
+	// devin: `--model <MODEL>`（例 "claude-sonnet-4" / "opus" / "codex"・env DEVIN_MODEL）。
+	// 短縮形なし（実測 3000.2.17）。⚠値の語彙は agent 固有＝claude の `opus` と
+	// 文字列が被っていても**同じ意味とは限らない**（型 doc の警告どおり種別を跨がない）。
+	"devin": {Flag: "--model"},
 }
 
 // Model は agent の ModelSpec と、載っているかを返す。
