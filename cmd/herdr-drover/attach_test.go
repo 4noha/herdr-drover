@@ -508,6 +508,124 @@ func TestConnHolderForceCloseClosesCurrentConn(t *testing.T) {
 	}
 }
 
+// TestConnHolderInputWakesReconnect は **本件の核心**: near-$0 設計では
+// 「無操作なら切断」が正常なので、**未接続中に入力が来たら再接続を促す**必要がある。
+//
+// 旧実装は未接続中の入力を黙って捨てるだけで `wakeCh` を叩かず（叩くのは
+// watchLifecycle のスリープ復帰・NIC 変化だけ）、**打鍵しても復活せず注入をやり直す
+// まで操作できない**障害になっていた。Web は開いた瞬間に wake するので同じ問題が
+// 出ず、常駐 pane である ↗窓 だけの穴だった。旧コードではこのテストは FAIL する。
+func TestConnHolderInputWakesReconnect(t *testing.T) {
+	wake := make(chan struct{}, 1)
+	h := &connHolder{wake: wake}
+
+	// 未接続（c==nil）の状態で打鍵する。
+	if err := h.write([]byte("hello")); err != nil {
+		t.Fatalf("未接続中の write がエラーを返した: %v", err)
+	}
+
+	select {
+	case <-wake:
+		// 期待どおり「今すぐ再接続」が促された。
+	default:
+		t.Fatal("未接続中の入力で wakeCh が叩かれなかった" +
+			"（＝打鍵しても復活せず、注入をやり直すまで操作できない）")
+	}
+
+	// 連打しても 1 回に集約される（capacity 1・非ブロッキング）。
+	for i := 0; i < 100; i++ {
+		_ = h.write([]byte("x"))
+	}
+	if len(wake) > 1 {
+		t.Fatalf("wake が %d 件溜まった（集約されていない）", len(wake))
+	}
+}
+
+// TestConnHolderFlushesPendingInputOnReconnect は「復活のきっかけになった打鍵が
+// 実際に届く」ことを確認する。ここが無いと、ユーザーは打った文字が消えたように
+// 見えて二度打ちすることになる。
+func TestConnHolderFlushesPendingInputOnReconnect(t *testing.T) {
+	client, peer := net.Pipe()
+	defer peer.Close()
+	defer client.Close()
+
+	h := &connHolder{wake: make(chan struct{}, 1)}
+	_ = h.write([]byte("abc")) // 未接続中に打鍵 → 保留される
+
+	got := make(chan string, 1)
+	go func() {
+		buf := make([]byte, 16)
+		n, _ := peer.Read(buf)
+		got <- string(buf[:n])
+	}()
+
+	h.set(client) // 再接続＝保留分が流れるはず
+
+	select {
+	case s := <-got:
+		if s != "abc" {
+			t.Fatalf("保留入力 = %q, want %q", s, "abc")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("再接続時に保留入力が流れなかった（打鍵が消える）")
+	}
+}
+
+// TestConnHolderDropsStalePendingInput は **古い打鍵を後から流さない**ことを確認する。
+// 画面が変わっている可能性があるので、TTL を超えた保留は破棄するのが正しい
+// （破棄自体はログに残す＝silent に捨てない）。
+func TestConnHolderDropsStalePendingInput(t *testing.T) {
+	client, peer := net.Pipe()
+	defer peer.Close()
+	defer client.Close()
+
+	h := &connHolder{wake: make(chan struct{}, 1)}
+	_ = h.write([]byte("stale"))
+	// 打鍵時刻を TTL より古く偽装する。
+	h.mu.Lock()
+	h.pendingSince = time.Now().Add(-inputWakeTTL - time.Second)
+	h.mu.Unlock()
+
+	got := make(chan int, 1)
+	go func() {
+		buf := make([]byte, 16)
+		_ = peer.SetReadDeadline(time.Now().Add(700 * time.Millisecond))
+		n, _ := peer.Read(buf)
+		got <- n
+	}()
+
+	h.set(client)
+
+	if n := <-got; n != 0 {
+		t.Fatalf("TTL 超過の保留入力が流れた（%d バイト）＝古い打鍵を後から送っている", n)
+	}
+}
+
+// TestConnHolderPendingInputIsBounded は貼り付け等で無制限に溜めないことを確認する。
+func TestConnHolderPendingInputIsBounded(t *testing.T) {
+	h := &connHolder{wake: make(chan struct{}, 1)}
+	for i := 0; i < 10; i++ {
+		_ = h.write(make([]byte, inputWakeMaxBytes))
+	}
+	h.mu.Lock()
+	n := len(h.pending)
+	h.mu.Unlock()
+	if n > inputWakeMaxBytes {
+		t.Fatalf("保留入力が上限を超えた: %d > %d", n, inputWakeMaxBytes)
+	}
+}
+
+// TestConnHolderZeroValueStillSafe は wake/lg 未設定のゼロ値（既存テストや
+// 将来の呼び手）で panic しないことを確認する。
+func TestConnHolderZeroValueStillSafe(t *testing.T) {
+	h := &connHolder{}
+	if err := h.write([]byte("x")); err != nil {
+		t.Fatalf("ゼロ値 connHolder の write が失敗: %v", err)
+	}
+	h.set(nil)
+	h.forceClose()
+}
+
 // TestConnHolderForceCloseNilSafe は c==nil（未接続中＝backoff sleep 中）の
 // forceClose 呼出が panic せず no-op なことを確認する。
 func TestConnHolderForceCloseNilSafe(t *testing.T) {

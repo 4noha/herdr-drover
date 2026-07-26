@@ -205,18 +205,75 @@ func watchLifecycle(
 	}
 }
 
+// inputWakeTTL は「未接続中に打たれた入力」を保持しておく上限。復活まで数秒かかる
+// ので捨てずに持つが、**古い打鍵を後から流すのは危険**（画面が変わっている可能性が
+// ある）ので短く切る。
+const inputWakeTTL = 5 * time.Second
+
+// inputWakeMaxBytes は同バッファの上限（貼り付け等で無制限に溜めない）。
+const inputWakeMaxBytes = 4096
+
 // connHolder は「現在の接続」を保持し、常駐 stdin reader が接続切替を跨いで現接続
 // へ書けるようにする（reader を cycle ごとに作らない＝キーストローク奪い合い防止）。
-// 未接続(nil)中の入力は破棄する（次の接続確立後の入力から届く）。
+//
+// ⚠**未接続中の入力は「捨てる」のではなく「再接続の合図」にする**（v0.5.33）。
+// near-$0 設計では **無操作なら切断しているのが正常**（bridge は無通信 30s で
+// データ線を自切断し、次の wake まで Cloud Run を掴まない）。つまり ↗窓 は
+// 平常時ほぼ切断していて構わない。問題は**そこから戻る契機が入力に無かった**こと:
+// 旧実装は未接続中の入力を黙って捨てるだけで、`wakeCh` を叩くのは watchLifecycle
+// （スリープ復帰・NIC 変化）だけだった。結果「打鍵しても復活せず、注入をやり直す
+// まで操作できない」障害になっていた（実障害・長期）。Web は開いた瞬間に wake する
+// ので同じ問題が出ない＝**常駐 pane である ↗窓 だけの穴**だった。
 type connHolder struct {
 	mu sync.Mutex
 	c  net.Conn
+	// wake は「入力が来たので今すぐ再接続してほしい」を cmdAttach へ伝える口。
+	// nil 可（テストのゼロ値＝no-op）。
+	wake chan<- struct{}
+	// lg は診断ログ。nil 可（no-op）。
+	lg *attachLogger
+	// pending は未接続中に打たれた入力。接続確立時に TTL 内なら流す。
+	pending      []byte
+	pendingSince time.Time
 }
 
+// set は現接続を差し替える。接続確立時（c != nil）に、未接続中へ溜めた入力が
+// TTL 内なら流す＝**復活のきっかけになった打鍵そのものが届く**。
 func (h *connHolder) set(c net.Conn) {
 	h.mu.Lock()
 	h.c = c
+	pending, since := h.pending, h.pendingSince
+	h.pending = nil
 	h.mu.Unlock()
+
+	if c == nil || len(pending) == 0 {
+		return
+	}
+	if age := time.Since(since); age > inputWakeTTL {
+		// ⚠ silent に捨てない。古い打鍵を流す方が危険という判断をログに残す。
+		h.lg.Printf("復活: 保留入力 %dB を破棄（%s 経過＝TTL %s 超過。古い打鍵は流さない）",
+			len(pending), age.Round(time.Millisecond), inputWakeTTL)
+		return
+	}
+	h.lg.Printf("復活: 保留入力 %dB を送出", len(pending))
+	_ = c.SetWriteDeadline(time.Now().Add(inputWriteTimeout))
+	if _, err := c.Write(pending); err != nil {
+		h.lg.Printf("復活: 保留入力の送出に失敗: %v", err)
+		_ = c.Close()
+	}
+}
+
+// kickWake は「今すぐ再接続」を非ブロッキングで promote する。capacity 1 なので
+// 連打しても 1 回に集約される（ログもその 1 回だけ＝打鍵ごとに書かない）。
+func (h *connHolder) kickWake() {
+	if h.wake == nil {
+		return
+	}
+	select {
+	case h.wake <- struct{}{}:
+		h.lg.Printf("未接続中に入力＝再接続を促す（quiescence からの復帰）")
+	default: // 既に要求済み
+	}
 }
 
 // write は現接続へ書く。inputWriteTimeout 超過は無期限ブロックの回避策として
@@ -227,10 +284,24 @@ func (h *connHolder) set(c net.Conn) {
 func (h *connHolder) write(p []byte) error {
 	h.mu.Lock()
 	c := h.c
-	h.mu.Unlock()
 	if c == nil {
-		return nil // 未接続中の入力は破棄（次の接続から届く）
+		// ⚠ ここが「操作したいときに復活させる」経路（型 doc 参照）。捨てて終わると
+		// 打鍵しても永久に戻らない。入力は**ユーザーが操作したい唯一の合図**なので、
+		// 短時間だけ保持したうえで再接続を促す。
+		if h.pending == nil {
+			h.pendingSince = time.Now()
+		}
+		if room := inputWakeMaxBytes - len(h.pending); room > 0 {
+			if room > len(p) {
+				room = len(p)
+			}
+			h.pending = append(h.pending, p[:room]...)
+		}
+		h.mu.Unlock()
+		h.kickWake()
+		return nil
 	}
+	h.mu.Unlock()
 	_ = c.SetWriteDeadline(time.Now().Add(inputWriteTimeout))
 	_, err := c.Write(p)
 	if err != nil {
@@ -345,7 +416,14 @@ func cmdAttach(args []string, stdout, stderr io.Writer) error {
 	if old, rerr := enterRaw(inFD); rerr == nil {
 		defer restoreRaw(inFD, old)
 	}
-	holder := &connHolder{}
+	// wakeCh は「今すぐ再接続してほしい」の合図（capacity 1・最新のみ保持）。
+	// backoff sleep 中の select を早期に解く。送り手は 2 つ:
+	//   - watchLifecycle（スリープ復帰・NIC 変化）
+	//   - **connHolder.write（未接続中に入力が来た＝ユーザーが操作したい）**
+	// ⚠ holder より先に作る。stdin reader goroutine は holder 生成直後に走り出すので、
+	// 後から holder.wake を代入すると data race になる。
+	wakeCh := make(chan struct{}, 1)
+	holder := &connHolder{wake: wakeCh, lg: lg}
 	go func() {
 		buf := make([]byte, 4096)
 		for {
@@ -359,12 +437,6 @@ func cmdAttach(args []string, stdout, stderr io.Writer) error {
 		}
 	}()
 
-	// wakeCh はスリープ復帰・NIC 変化検知時に watchLifecycle が非ブロッキング送信
-	// する（capacity 1 で最新のみ保持）。backoff sleep 中の select を早期に解いて
-	// 「復帰直後の再接続を最大 backoff-1s ではなく即時に」する。attachOnce 実行中は
-	// holder.forceClose 側が pumpFrames Read err を誘発するので wakeCh は buffer に
-	// 溜まって次の backoff 局面で 1 回消費されるだけ＝副作用なし。
-	wakeCh := make(chan struct{}, 1)
 	go watchLifecycle(ctx, holder, wakeCh, nil, nil, nil, func(reason string) {
 		fmt.Fprintf(out, "\r\n↗ %s: %s — 再接続します\r\n", remotePC, reason)
 		lg.Printf("watchLifecycle: %s → forceClose＋backoff リセット", reason)
