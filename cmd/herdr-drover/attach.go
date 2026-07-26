@@ -25,6 +25,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -375,13 +376,11 @@ func cmdAttach(args []string, stdout, stderr io.Writer) error {
 			return nil
 		}
 		start := time.Now()
-		attachCycle(ctx, injSid, remotePC, holder, out)
+		idleClosed := attachCycle(ctx, injSid, remotePC, holder, out)
 		if ctx.Err() != nil {
 			return nil
 		}
-		if time.Since(start) > 5*time.Second {
-			backoff = 500 * time.Millisecond // 正常に使えていた接続の切断は素早く復帰
-		}
+		backoff = attachBackoffReset(backoff, time.Since(start), idleClosed)
 		select {
 		case <-ctx.Done():
 			return nil
@@ -399,20 +398,42 @@ func cmdAttach(args []string, stdout, stderr io.Writer) error {
 	}
 }
 
+// attachBackoffReset は 1 サイクル後の backoff を決める純関数（BUG-3 の thrash 対策）。
+//
+// ⚠**idle 切断（無通信 quiescence）は backoff をリセットしない**。リモート pane が
+// idle だと source は 30s 無通信で bridge を quiescence 自切断し、viewer 側 pumpFrames
+// も idle 超過で戻る。旧実装は「サイクルが >5s 続いた＝健全な接続だった」とみなして
+// backoff を 500ms へリセットし即再接続→即再 Wake していたが、これは**pane が idle な
+// だけ**で、毎周期 source に observe を再 spawn させる thrash になる（実測: observe
+// spawn 59,329 回 / agent.log 16.8MB）。idle 切断時はリセットせず backoff を伸ばし、
+// 再接続を最大でも cap 間隔まで疎にする（＝quiescence の「無通信なら畳む」意図を活かす）。
+//
+// 実データが流れていた接続（idleClosed=false）が >5s 続いてから不意に切れた場合だけ、
+// ネットワーク瞬断からの素早い復帰のためリセットする。接続前段の即失敗（<5s）は
+// リセットせず backoff を伸ばす（source 不達を連打しない＝従来どおり）。
+func attachBackoffReset(cur, cycle time.Duration, idleClosed bool) time.Duration {
+	if !idleClosed && cycle > 5*time.Second {
+		return 500 * time.Millisecond // 実データ接続の不意の切断＝素早く復帰
+	}
+	return cur
+}
+
 // attachCycle は 1 サイクル（設定解決→state→grant/wake→dial→pump）。どの段階の
 // 失敗でも **exit せず戻る**（cmdAttach の backoff ループが再試行＝pane は生存）。
 // 設定は primary クラウド（reconcile が pane env に GCP_PROJECT 等を注入する。
 // env が無くても config.json / clouds.json から解決を試みる）。
-func attachCycle(ctx context.Context, injSid, remotePC string, holder *connHolder, out *os.File) {
+// 戻り値 idleClosed は attachOnce から伝播する（無通信 quiescence 切断＝BUG-3）。
+// 接続前段の失敗（設定/クラウド/Firestore）は idle ではない＝false。
+func attachCycle(ctx context.Context, injSid, remotePC string, holder *connHolder, out *os.File) (idleClosed bool) {
 	cfg, err := resolveConfig()
 	if err != nil {
 		fmt.Fprintf(out, "\x1b[2J\x1b[H↗ %s: 設定解決失敗（再試行）: %v\r\n", remotePC, err)
-		return
+		return false
 	}
 	clouds := cfg.LoadClouds()
 	if len(clouds) == 0 {
 		fmt.Fprintf(out, "\x1b[2J\x1b[H↗ %s: 接続先クラウド未設定（再試行）\r\n", remotePC)
-		return
+		return false
 	}
 	cl := clouds[0] // primary（reconcile と同じクラウドで他 PC を見ている）
 
@@ -425,16 +446,18 @@ func attachCycle(ctx context.Context, injSid, remotePC string, holder *connHolde
 	st, err := state.NewWithCredentials(cctx, cl.Project, cl.PCName, creds)
 	if err != nil {
 		fmt.Fprintf(out, "\x1b[2J\x1b[H↗ %s: Firestore 接続失敗（再試行）: %v\r\n", remotePC, err)
-		return
+		return false
 	}
 	defer st.Close()
 
-	attachOnce(cctx, st, cl.RelayURL, injSid, remotePC, holder, out)
+	return attachOnce(cctx, st, cl.RelayURL, injSid, remotePC, holder, out)
 }
 
 // attachOnce は 1 接続の生存（grant→wake→dial→frame/input pump）。conn 切断か
 // ctx 終了で戻る。エラーは画面に控えめに出し、上位の backoff ループが再接続する。
-func attachOnce(ctx context.Context, st *state.Client, relayURL, injSid, remotePC string, holder *connHolder, out *os.File) {
+// 戻り値 idleClosed は「無通信 quiescence（idle 超過）で pumpFrames が戻った」印
+// （BUG-3: cmdAttach の backoff 判断に使う）。dial 前段の失敗は false。
+func attachOnce(ctx context.Context, st *state.Client, relayURL, injSid, remotePC string, holder *connHolder, out *os.File) (idleClosed bool) {
 	// viewer 許可を先に置き、リモート agent を起こす（source を bridge させる）。
 	gctx, gcancel := context.WithTimeout(ctx, 10*time.Second)
 	_ = st.PutRelayGrant(gctx, injSid, "viewer", injGrantTTL)
@@ -451,7 +474,7 @@ func attachOnce(ctx context.Context, st *state.Client, relayURL, injSid, remoteP
 	})
 	if err != nil {
 		fmt.Fprintf(out, "\x1b[2J\x1b[H↗ %s / %s: %v（再試行）\r\n", remotePC, injSid, err)
-		return
+		return false
 	}
 	defer conn.Close()
 
@@ -490,7 +513,7 @@ func attachOnce(ctx context.Context, st *state.Client, relayURL, injSid, remoteP
 	// この attachOnce が終了し backoff ループが再接続する。
 	go func() { <-dctx.Done(); conn.Close() }()
 
-	pumpFrames(conn, out, DefaultIdle)
+	return pumpFrames(conn, out, DefaultIdle)
 }
 
 // deadlineConn は SetReadDeadline を持つ conn（net.Conn のうち pumpFrames が
@@ -511,7 +534,11 @@ type deadlineConn interface {
 // deadline 到達で解ける＝doc.go 保証）ため、フレーム受信ごとに deadline を
 // idle 先へ延ばし、無通信 idle 超過で Read がタイムアウトしたら戻る＝
 // cmdAttach の backoff ループが再接続を試みる。idle<=0 は監視無効（テスト用）。
-func pumpFrames(conn deadlineConn, out io.Writer, idle time.Duration) {
+// 戻り値 idleClosed は「無通信 quiescence（idle 超過の read deadline）で戻った」印。
+// 実データ切断（conn 破断）と区別して cmdAttach の backoff 判断に使う（BUG-3:
+// idle 切断を『健全接続の切断』と誤判定して即再 Wake すると source が observe を
+// 再 spawn し続ける thrash になる）。idle<=0（監視無効）では常に false。
+func pumpFrames(conn deadlineConn, out io.Writer, idle time.Duration) (idleClosed bool) {
 	if idle > 0 {
 		_ = conn.SetReadDeadline(time.Now().Add(idle))
 	}
@@ -520,16 +547,31 @@ func pumpFrames(conn deadlineConn, out io.Writer, idle time.Duration) {
 		n, rerr := conn.Read(buf)
 		if n > 0 {
 			if _, werr := out.Write(buf[:n]); werr != nil {
-				return
+				return false
 			}
 			if idle > 0 {
 				_ = conn.SetReadDeadline(time.Now().Add(idle))
 			}
 		}
 		if rerr != nil {
-			return
+			return idle > 0 && isIdleTimeout(rerr)
 		}
 	}
+}
+
+// isIdleTimeout は err が read deadline（quiescence idle 超過）由来かを判定する。
+// websocket.NetConn の deadline エラーは os.ErrDeadlineExceeded を満たすか
+// net.Error.Timeout()==true になる（実装差を両方受ける）。実データ切断（EOF・
+// conn reset 等）は false＝素早い再接続に回す。
+func isIdleTimeout(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		return true
+	}
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
 }
 
 // resizeMagic は cm-wire の RESIZE（0xff 0xff + rows u16BE + cols u16BE）。

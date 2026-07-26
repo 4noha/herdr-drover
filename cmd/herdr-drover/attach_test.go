@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -137,6 +138,68 @@ func TestPumpFramesForwardsData(t *testing.T) {
 
 	if got := out.String(); got != "hello" {
 		t.Fatalf("転送データ = %q, want %q", got, "hello")
+	}
+}
+
+// errConn は Read が即座に固定エラーを返す fake（idle 判定の分岐を機械確認する）。
+type errConn struct{ err error }
+
+func (c *errConn) Read([]byte) (int, error)        { return 0, c.err }
+func (c *errConn) SetReadDeadline(time.Time) error { return nil }
+
+// fakeNetTimeout は net.Error を満たし Timeout()==true を返す（websocket.NetConn の
+// deadline エラーが os.ErrDeadlineExceeded ではなく net.Error 形で来る実装差を模す）。
+type fakeNetTimeout struct{}
+
+func (fakeNetTimeout) Error() string   { return "fake net timeout" }
+func (fakeNetTimeout) Timeout() bool   { return true }
+func (fakeNetTimeout) Temporary() bool { return true }
+
+// TestPumpFramesReportsIdleClose は BUG-3 の要: pumpFrames が「無通信 quiescence
+// （idle 超過 = read deadline）で戻った」ことを idleClosed=true で報告し、実データ
+// 切断（EOF 等）や idle 無効時は false を返すことを機械確認する。この戻り値が
+// cmdAttach の「idle 切断では backoff をリセットしない」判断（=thrash 停止）の入力。
+func TestPumpFramesReportsIdleClose(t *testing.T) {
+	var out discardWriter
+	cases := []struct {
+		name string
+		conn deadlineConn
+		idle time.Duration
+		want bool
+	}{
+		{"os.ErrDeadlineExceeded → idle 切断", &errConn{err: os.ErrDeadlineExceeded}, 30 * time.Millisecond, true},
+		{"net.Error Timeout → idle 切断", &errConn{err: fakeNetTimeout{}}, 30 * time.Millisecond, true},
+		{"io.EOF → 実データ切断（idle でない）", &errConn{err: io.EOF}, 30 * time.Millisecond, false},
+		{"idle<=0（監視無効）は常に false", &errConn{err: os.ErrDeadlineExceeded}, 0, false},
+	}
+	for _, c := range cases {
+		if got := pumpFrames(c.conn, &out, c.idle); got != c.want {
+			t.Errorf("%s: idleClosed=%v want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// TestAttachBackoffReset は thrash 停止ロジックの純関数検証（BUG-3）。
+func TestAttachBackoffReset(t *testing.T) {
+	const cur = 8 * time.Second
+	cases := []struct {
+		name       string
+		cycle      time.Duration
+		idleClosed bool
+		want       time.Duration
+	}{
+		// idle 切断は >5s でも **リセットしない**（これが本修正の肝）。
+		{"idle 切断 30s はリセットしない", 30 * time.Second, true, cur},
+		{"idle 切断 1s もリセットしない", time.Second, true, cur},
+		// 実データ接続が >5s 続いてから切れたら素早い復帰のためリセット。
+		{"実切断 30s はリセット", 30 * time.Second, false, 500 * time.Millisecond},
+		// 接続前段の即失敗（<5s・idle でない）はリセットせず伸ばす（source 不達を連打しない）。
+		{"実切断でも <5s はリセットしない", time.Second, false, cur},
+	}
+	for _, c := range cases {
+		if got := attachBackoffReset(cur, c.cycle, c.idleClosed); got != c.want {
+			t.Errorf("%s: attachBackoffReset(%v,%v,%v)=%v want %v", c.name, cur, c.cycle, c.idleClosed, got, c.want)
+		}
 	}
 }
 
