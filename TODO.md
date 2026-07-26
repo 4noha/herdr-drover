@@ -3,8 +3,20 @@
 **開発の鉄則は [CLAUDE.md](CLAUDE.md) / DESIGN.md 末尾**（実テスト担保・旧コード
 FAIL 確認・exact-match・AGPL 衛生・silent 変更禁止・対外操作はユーザー確認後）。
 **再開時はまずこの TODO.md を通読**（in-flight・残課題・デプロイ手順の正）。
+**既知バグ 3 件は [BUGS.md](BUGS.md) で修正済み**（2026-07-26: BUG-1 shim 再入ゾンビ化
+【P0・claudeshim.go findAgentPaneByResumeRef に自 pane 除外＋live 検証】／ BUG-2
+リモート注入 off 設定を新設【`DROVER_INJECT_REMOTE`/`inject_remote_panes`・config.go・
+reconcile.go emptyRemoteSource】／ BUG-3 `#inj` bridge thrash【attach.go の viewer 側
+再 Wake が真因・idleClosed 伝播＋backoff 非リセット】。いずれも実 herdr テストで担保・
+全 test 緑）。**BUG-3 は BUGS.md 旧記述の推定真因（source 側 tick）が誤りだった点も訂正済み**。
 
 ---
+
+> ⚠ **この TODO の本文は v0.5.24 時点で止まっている**（2026-07-26 時点の実状: main =
+> **v0.5.27** / drover-cloud **v0.1.14**・いずれも push・release 済み・working tree clean）。
+> v0.5.25〜v0.5.27 の内容は **各 tag のメッセージが実質の正**（`git tag -l -n20 v0.5.27`）。
+> 下記「0. Windows 移植」の *未 push* / *branch `windows-port`* / *Windows は self-update
+> できない* の記述は**すべて解消済み**（PR #1 merge・`e9bab96` で release に windows 資産）。
 
 ## 最新状態（2026-07-25・最新タグ v0.5.23 / drover-cloud v0.1.11）
 
@@ -368,26 +380,39 @@ argv を組み立てた＝**Spec 抽象が claude 以外でも機能する**こ�
 - ⚠**codex は resume 後に hook が再発火しない**（hook 呼び出しログで実測）。
   同じ pane の 2 回目の restart は素起動になる。drover 側の問題ではない。
 
-#### ⚠ 未解決: CLAUDE_CODE_CHILD_SESSION による transcript 抑止
+#### ⚠ CLAUDE_CODE_CHILD_SESSION による transcript 抑止（原因特定＝v0.5.27 で修正）
 
 herdr server が `CLAUDE_CODE_CHILD_SESSION` を持つと（**Claude Code の中から herdr
 server を起動すると起きる**）、herdr が生やす全 pane が継承し、その claude は
 transcript を保存しない。`--resume` が読むのはそれなので、**そのマシンの claude
-セッションはどれも復元できない**（mac-studio が現にこの状態）。
+セッションはどれも復元できない**。
 
-**drover の env 注入では直せないことを A/B で確定**（実測 2026-07-25。実装は
-取り下げた。**同じ空振りを繰り返さないこと**）:
+**混入経路は drover 自身**（v0.5.27 `54bccf6` で修正済み。`sanitizedServerEnv`）。
+ただし**修正が効くのはこれから起動する server だけ**＝**既に汚染された稼働 server は
+再起動しないと直らない**。
 
-| 条件 | 会話成立 | transcript |
-|---|---|---|
-| 素の herdr 経路 | ✅ | 保存されない |
-| `CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1` を pane に注入 | ✅ | 保存されない |
-| `CLAUDE_CODE_CHILD_SESSION=""`（空値）を注入 | ✅ | 保存されない |
-| `claude -p`（print mode・マーカーあり） | — | **保存される** |
+##### 2026-07-26 の実測（mac-studio で再確認・SPEC §「transcript 抑止」に正）
 
-`layout.apply` の leaf `env` は pane のプロセスまで実際に届く（実測済）ので
-**注入の仕組みの問題ではない**。唯一分かっている対処は **herdr server を
-クリーンな環境で起動し直すこと**（⚠全 pane が失われる）。
+- 本番 server = **pid 31863（7/17 23:07 起動）** が汚染当事者。`ps eww -p 31863` で
+  `CLAUDE_CODE_CHILD_SESSION=1` を直接確認。**pane 側の `CLAUDE_CODE_SSE_PORT` が
+  server のそれと同値**＝継承の決定的証拠（自分のポートではない）。
+- ⚠ **`herdr server live-handoff` では直らない**（隔離 herdr で実測）。pane は生き残るが
+  **新 server が旧 server の env を丸ごと継承**し、handoff 後に作った pane も汚染継承。
+  **clean env から呼んでも無意味**＝この道は塞がっている。**再検証で時間を使わないこと**。
+- ✅ **`CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1` は claude 2.1.220 で効く**
+  （汚染 server 配下でも jsonl 生成を確認・対照群は 0 件）。**2.1.219 での「効かない」
+  という旧結論は版依存だった**＝実測表には必ず claude の版を書くこと。
+  → 汚染サーバを直ちに再起動できない場合の緩和策になる（新規起動の claude にのみ効く）。
+- ⚠ `herdr workspace create --env KEY=VALUE` は **root pane に届かない**（実測）。
+- ⚠ **テスト残骸の herdr server が常駐しうる**（`/tmp/hd*` の socket・7/18 起動が 2 本
+  8 日間リークしていた）。本番との判別は `lsof -t <socket>`。裸の `pkill herdr` は恒久禁止。
+
+##### 実施記録: クリーン再起動（2026-07-26）
+
+ユーザー判断で**クリーン再起動を選択**（FORCE 緩和策の実装ではなく根治）。手順と
+検証コマンドは **SPEC.md「クリーン再起動の手順」** が正。⚠実行すると**全 pane の
+プロセスと会話が失われる**（レイアウトは session.json から復元。汚染下の claude は
+transcript が無いので `--resume` は即終了＝会話は戻らない）。
 
 drover 側の挙動は正しい: `--resume` 即終了 → 二段構えフォールバックが pane を
 必ず残し「resume 復元不可のため新規会話で起動」と正直に報告する。

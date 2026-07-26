@@ -393,7 +393,7 @@ organize / producer が共有）。権威は強い順に:
 これが無いと原因に辿り着けない（実際、両方ともこれで初めて判明した。それまでは
 hook や integration の不具合を疑って空振りしていた）。
 
-### ⚠ `CLAUDE_CODE_CHILD_SESSION` による transcript 抑止（未解決）
+### ⚠ `CLAUDE_CODE_CHILD_SESSION` による transcript 抑止（原因特定済み）
 
 herdr server が `CLAUDE_CODE_CHILD_SESSION` を持っていると（**Claude Code の中から
 herdr server を起動すると起きる**）、herdr が生やす全 pane がそれを継承する。
@@ -401,17 +401,29 @@ herdr server を起動すると起きる**）、herdr が生やす全 pane が�
 `--resume` が読むのはその transcript なので、**そのマシンの claude セッションは
 どれも復元できない**。
 
-実測（2026-07-25・A/B で確定）:
+実測（A/B で確定。⚠**claude のバージョンで結論が変わる**ので必ず版を併記すること）:
 
-| 条件 | 会話成立 | transcript |
+| 条件 | claude 版 | transcript |
 |---|---|---|
-| 素の herdr 経路 | ✅ | **保存されない** |
-| pane に `CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1` を注入 | ✅ | **保存されない** |
-| pane に `CLAUDE_CODE_CHILD_SESSION=""`（空値）を注入 | ✅ | **保存されない** |
-| `claude -p`（print mode・マーカーあり） | — | **保存される** |
+| 素の herdr 経路 | 2.1.219 / 2.1.220 | **保存されない** |
+| pane に `CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1` を注入 | 2.1.219 | 保存されない |
+| **同上** | **2.1.220** | ✅ **保存される**（2026-07-26 実測） |
+| pane に `CLAUDE_CODE_CHILD_SESSION=""`（空値）を注入 | 2.1.219 | 保存されない |
+| `claude -p`（print mode・マーカーあり） | 2.1.219 | 保存される |
 
-⇒ **pane 側への env 注入では直せない**（試して駄目だったので実装は取り下げた。
-同じ空振りを繰り返さないこと）。
+⇒ **claude 2.1.220 で `CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1` が効くようになった**
+（2.1.220 の実装は「FORCE があれば抑止しない」を先頭分岐で判定する）。
+**「env 注入では直せない」という 2.1.219 時点の結論は 2.1.220 では成り立たない**。
+汚染サーバを直ちに再起動できない場合の緩和策として使える（既に走っている
+プロセスの env は変えられないので、**新しく起動する claude にのみ効く**）。
+
+⚠ **`herdr server live-handoff` では直らない**（2026-07-26・隔離 herdr で実測）。
+pane は生き残るが **新 server が旧 server の env を丸ごと継承する**（仕込んだ
+`CLAUDE_CODE_SESSION_ID` がそのまま新 server に現れた）。handoff 後に新規作成した
+pane も汚染を継承した。**clean な env から handoff を呼んでも無意味**＝この道は無い。
+
+⚠ `herdr workspace create --env KEY=VALUE` は **root pane に届かない**（同実測。
+`printenv` で未設定）。pane へ env を渡す経路として当てにしないこと。
 
 ### 原因と恒久対処（v0.5.27 で特定・修正）
 
@@ -433,6 +445,27 @@ server の env で起こす**ので、そこから生える全 pane が継承す
 ⚠**既に汚染されたサーバは自動では直らない**（env はプロセス起動時に決まる）。
 そのマシンでは **herdr server をクリーンな環境で起動し直す**必要がある
 （⚠全 pane が失われるので慎重に。設定や integration の再導入は不要）。
+
+**クリーン再起動の手順**（herdr の**外**の clean なシェルから。実施 2026-07-26）:
+
+```sh
+env | grep CLAUDE_CODE                          # 何も出なければ clean
+cp ~/.config/herdr/session.json ~/.config/herdr/session.json.bak-$(date +%F)
+herdr server stop                               # ⚠全 pane のプロセスが死ぬ
+env -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_SESSION_ID \
+    -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SSE_PORT herdr server &
+# 検証（何も出なければ成功）:
+ps eww -p $(lsof -t ~/.config/herdr/herdr.sock | head -1) | tr ' ' '\n' | grep CLAUDE_CODE
+```
+
+- **残る**: `~/.config/herdr/session.json` のレイアウト（pane ごとの cwd / label /
+  `launch_argv`）。**失う**: 全 pane のプロセスと画面。汚染下の claude は transcript が
+  無いので `--resume` は即終了する＝**会話は戻らない**（単独 pane の Tab は消えうる）。
+- ⚠ **汚染の当事者判定は `ps eww -p <server pid>`**（同 uid なら macOS でも env が読める）。
+  pane 側の `CLAUDE_CODE_SSE_PORT` が server のそれと**同値**なら継承の決定的証拠。
+- ⚠ socket を握っている server を `lsof -t <socket>` で特定してから触ること。
+  同時に**テスト残骸の herdr server が複数常駐しうる**（`/tmp/hd*` の socket を持つ）。
+  裸の `pkill herdr` は恒久禁止＝socket で本番と残骸を見分ける。
 
 **drover 側の挙動は正しい**: `--resume` で即終了 → 二段構えフォールバックが
 resume 無しで作り直して **pane は必ず残す**＋`resume 復元不可のため新規会話で起動`
