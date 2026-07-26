@@ -308,6 +308,16 @@ func cmdAttach(args []string, stdout, stderr io.Writer) error {
 	}
 	fmt.Fprintf(out, "\x1b[2J\x1b[H↗ %s / %s に接続中...\r\n", remotePC, sid)
 
+	// 永続ログ（attachlog.go）。画面の診断はフレームで上書きされて消えるため、
+	// 再接続の失敗理由を追うにはこれが唯一の手がかりになる。開けなくても続行する
+	// （↗窓 の表示/入力がログ都合で壊れる方が害が大きい）が、黙って諦めない。
+	lg, lerr := newAttachLogger(remotePC, sid)
+	if lerr != nil {
+		fmt.Fprintf(out, "↗ %s: 接続ログを開けない（診断は画面のみになる）: %v\r\n", remotePC, lerr)
+	}
+	defer lg.Close()
+	lg.Printf("起動 version=%s pane=%s", version, os.Getenv("HERDR_PANE_ID"))
+
 	// この pane 自身に注入 identity token を再表明する（自己治癒）。herdr サーバ
 	// 再起動で pane の report_metadata token は消える（実 herdr 0.7.4 で実測）が、
 	// pane の argv（attach pc sid）と HERDR_PANE_ID は復元されるので、復元後に
@@ -357,6 +367,7 @@ func cmdAttach(args []string, stdout, stderr io.Writer) error {
 	wakeCh := make(chan struct{}, 1)
 	go watchLifecycle(ctx, holder, wakeCh, nil, nil, nil, func(reason string) {
 		fmt.Fprintf(out, "\r\n↗ %s: %s — 再接続します\r\n", remotePC, reason)
+		lg.Printf("watchLifecycle: %s → forceClose＋backoff リセット", reason)
 	}, nil)
 
 	// ⚠ この pane は reconcile が管理する（リモートセッション消滅で pane.close）。
@@ -372,21 +383,31 @@ func cmdAttach(args []string, stdout, stderr io.Writer) error {
 	backoff := 500 * time.Millisecond
 	for {
 		if ctx.Err() != nil {
+			lg.Printf("ctx 終了＝正常終了（pane close / SIGTERM）")
 			return nil
 		}
 		start := time.Now()
-		idleClosed := attachCycle(ctx, injSid, remotePC, holder, out)
+		idleClosed := attachCycle(ctx, injSid, remotePC, holder, out, lg)
 		if ctx.Err() != nil {
+			lg.Printf("ctx 終了＝正常終了（pane close / SIGTERM）")
 			return nil
 		}
-		backoff = attachBackoffReset(backoff, time.Since(start), idleClosed)
+		cycle := time.Since(start)
+		next := attachBackoffReset(backoff, cycle, idleClosed)
+		// ⚠この 1 行が「張り付き」診断の主役: サイクルがどれだけ続いたか・idle 由来か・
+		// 次に何秒待つかが並ぶので、**再接続が回っているのか止まっているのか**が読める。
+		lg.Printf("cycle 終了 継続=%s idleClosed=%v backoff %s→%s",
+			cycle.Round(time.Millisecond), idleClosed, backoff, next)
+		backoff = next
 		select {
 		case <-ctx.Done():
+			lg.Printf("ctx 終了＝正常終了（pane close / SIGTERM）")
 			return nil
 		case <-wakeCh:
 			// スリープ復帰 / NIC 変化検知＝ネットワーク条件が変わったので backoff
 			// 状態自体をリセット（前回まで dial 失敗続きで 30s まで伸びていても、
 			// 環境変化後の最初の再試行は即時に始めるべき）。
+			lg.Printf("wakeCh 受信＝backoff を 500ms へリセットして即再試行")
 			backoff = 500 * time.Millisecond
 			continue
 		case <-time.After(backoff):
@@ -423,15 +444,17 @@ func attachBackoffReset(cur, cycle time.Duration, idleClosed bool) time.Duration
 // env が無くても config.json / clouds.json から解決を試みる）。
 // 戻り値 idleClosed は attachOnce から伝播する（無通信 quiescence 切断＝BUG-3）。
 // 接続前段の失敗（設定/クラウド/Firestore）は idle ではない＝false。
-func attachCycle(ctx context.Context, injSid, remotePC string, holder *connHolder, out *os.File) (idleClosed bool) {
+func attachCycle(ctx context.Context, injSid, remotePC string, holder *connHolder, out *os.File, lg *attachLogger) (idleClosed bool) {
 	cfg, err := resolveConfig()
 	if err != nil {
 		fmt.Fprintf(out, "\x1b[2J\x1b[H↗ %s: 設定解決失敗（再試行）: %v\r\n", remotePC, err)
+		lg.Printf("設定解決 失敗: %v", err)
 		return false
 	}
 	clouds := cfg.LoadClouds()
 	if len(clouds) == 0 {
 		fmt.Fprintf(out, "\x1b[2J\x1b[H↗ %s: 接続先クラウド未設定（再試行）\r\n", remotePC)
+		lg.Printf("接続先クラウド未設定")
 		return false
 	}
 	cl := clouds[0] // primary（reconcile と同じクラウドで他 PC を見ている）
@@ -442,25 +465,34 @@ func attachCycle(ctx context.Context, injSid, remotePC string, holder *connHolde
 	}
 	cctx, ccancel := context.WithCancel(ctx)
 	defer ccancel()
+	fsStart := time.Now()
 	st, err := state.NewWithCredentials(cctx, cl.Project, cl.PCName, creds)
 	if err != nil {
 		fmt.Fprintf(out, "\x1b[2J\x1b[H↗ %s: Firestore 接続失敗（再試行）: %v\r\n", remotePC, err)
+		lg.Printf("Firestore 接続 失敗（所要 %s）: %v", time.Since(fsStart).Round(time.Millisecond), err)
 		return false
 	}
 	defer st.Close()
 
-	return attachOnce(cctx, st, cl.RelayURL, injSid, remotePC, holder, out)
+	return attachOnce(cctx, st, cl.RelayURL, injSid, remotePC, holder, out, lg)
 }
 
 // attachOnce は 1 接続の生存（grant→wake→dial→frame/input pump）。conn 切断か
 // ctx 終了で戻る。エラーは画面に控えめに出し、上位の backoff ループが再接続する。
 // 戻り値 idleClosed は「無通信 quiescence（idle 超過）で pumpFrames が戻った」印
 // （BUG-3: cmdAttach の backoff 判断に使う）。dial 前段の失敗は false。
-func attachOnce(ctx context.Context, st *state.Client, relayURL, injSid, remotePC string, holder *connHolder, out *os.File) (idleClosed bool) {
+func attachOnce(ctx context.Context, st *state.Client, relayURL, injSid, remotePC string, holder *connHolder, out *os.File, lg *attachLogger) (idleClosed bool) {
 	// viewer 許可を先に置き、リモート agent を起こす（source を bridge させる）。
+	// ⚠ 元から戻り値を捨てている（best-effort）。ここが黙って失敗し続けると source が
+	// bridge を張らず「dial は通るのにフレームが来ない」形の張り付きになるので、
+	// **失敗をログにだけは残す**（画面には出さない＝従来の見た目を変えない）。
 	gctx, gcancel := context.WithTimeout(ctx, 10*time.Second)
-	_ = st.PutRelayGrant(gctx, injSid, "viewer", injGrantTTL)
-	_ = st.Wake(gctx, remotePC, injSid)
+	if gerr := st.PutRelayGrant(gctx, injSid, "viewer", injGrantTTL); gerr != nil {
+		lg.Printf("PutRelayGrant 失敗（続行）: %v", gerr)
+	}
+	if werr := st.Wake(gctx, remotePC, injSid); werr != nil {
+		lg.Printf("Wake 失敗（続行）: %v", werr)
+	}
 	gcancel()
 
 	dctx, dcancel := context.WithCancel(ctx)
@@ -468,14 +500,17 @@ func attachOnce(ctx context.Context, st *state.Client, relayURL, injSid, remoteP
 	// source PC を spc で渡す＝relay の KeyFor が slave source PC の時だけ
 	// slaveSessionKey(spc,injSid) で viewer を Accept し、slave の #inj source と
 	// ペアする（master source PC では spc 無視＝従来と同一 wire）。
+	dialStart := time.Now()
 	conn, err := dialWithTimeout(dialTimeout, dcancel, func() (net.Conn, error) {
 		return relayclient.DialViewerFrom(dctx, relayURL, injSid, remotePC)
 	})
 	if err != nil {
 		fmt.Fprintf(out, "\x1b[2J\x1b[H↗ %s / %s: %v（再試行）\r\n", remotePC, injSid, err)
+		lg.Printf("dial 失敗（所要 %s）: %v", time.Since(dialStart).Round(time.Millisecond), err)
 		return false
 	}
 	defer conn.Close()
+	lg.Printf("dial 成功（所要 %s）", time.Since(dialStart).Round(time.Millisecond))
 
 	// この接続を holder に載せ、常駐 stdin reader（cmdAttach）が入力を転送できる
 	// ようにする。切断で外す（未接続中の入力は破棄＝次接続から届く）。cycle ごとに
@@ -512,7 +547,14 @@ func attachOnce(ctx context.Context, st *state.Client, relayURL, injSid, remoteP
 	// この attachOnce が終了し backoff ループが再接続する。
 	go func() { <-dctx.Done(); conn.Close() }()
 
-	return pumpFrames(conn, out, DefaultIdle)
+	pumpStart := time.Now()
+	idleClosed, got := pumpFrames(conn, out, DefaultIdle)
+	// ⚠張り付き調査の核心行。received=0 が続くなら「dial は通るが source が bridge を
+	// 張っていない」（＝Wake/grant 側の問題）、received>0 なら「流れていた接続が落ちた」
+	// で原因が別れる。conn の生存時間も一緒に見る。
+	lg.Printf("pump 終了 接続=%s received=%dB idleClosed=%v",
+		time.Since(pumpStart).Round(time.Millisecond), got, idleClosed)
+	return idleClosed
 }
 
 // deadlineConn は SetReadDeadline を持つ conn（net.Conn のうち pumpFrames が
@@ -547,7 +589,10 @@ type deadlineConn interface {
 // でもない。エラー型に依存した判定はこの conn では構造的に成立しない。
 // 経過時間なら実装差に依存せず、相手（source）側の quiescence 自切断が先に届く
 // 場合も同じ基準で拾える。
-func pumpFrames(conn deadlineConn, out io.Writer, idle time.Duration) (idleClosed bool) {
+// 戻り値 got は**この接続で受け取った総バイト数**（診断用）。0 のまま切れたのは
+// 「dial は通ったのに source が bridge を張らなかった／フレームが一度も来なかった」で、
+// 「流れていた接続が落ちた」とは原因が別＝張り付き調査で最初に効く切り分けになる。
+func pumpFrames(conn deadlineConn, out io.Writer, idle time.Duration) (idleClosed bool, got int64) {
 	if idle > 0 {
 		_ = conn.SetReadDeadline(time.Now().Add(idle))
 	}
@@ -559,15 +604,16 @@ func pumpFrames(conn deadlineConn, out io.Writer, idle time.Duration) (idleClose
 		n, rerr := conn.Read(buf)
 		if n > 0 {
 			if _, werr := out.Write(buf[:n]); werr != nil {
-				return false
+				return false, got
 			}
+			got += int64(n)
 			last = time.Now()
 			if idle > 0 {
 				_ = conn.SetReadDeadline(time.Now().Add(idle))
 			}
 		}
 		if rerr != nil {
-			return isQuiescentClose(idle, time.Since(last))
+			return isQuiescentClose(idle, time.Since(last)), got
 		}
 	}
 }

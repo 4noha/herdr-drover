@@ -599,7 +599,34 @@ workspace.close  workspace.create  workspace.focus  workspace.list  workspace.re
 | `~/.herdr-drover/workspaces.json` | Tab 着地ルール（`exact` > 最長 `prefix` > `default`）＋ `inject_placement` |
 | `~/.herdr-drover/inject-index.json` | 注入 pane の identity index |
 | `~/.herdr-drover/attach-version` | 注入 pane を最後に作り直した drover 版数（600）。§6.3 |
+| `~/.herdr-drover/attach.log` | ↗窓 viewer の接続ログ（600・全 viewer 共有）。§6.4 |
 | `~/.herdr-drover/agent.log` | daemon ログ |
+
+### 6.4 ↗窓 viewer の接続ログ（`attach.log`）
+
+**⚠ これが無いと ↗窓 の接続障害は事後診断が構造的に不可能だった。** attach の診断は
+すべて pane 画面向けで、しかも各エラーは `\x1b[2J`（画面クリア）してから書くため
+**次のフレームが 1 枚来た瞬間に消える**。再注入すれば復旧するので、原因を追う手がかりが
+毎回失われていた（「viewer が張り付いて注入し直すまで戻らない」障害が長く残っていた理由）。
+
+- **全 viewer が 1 本のファイルを共有する**。この障害でまず知りたいのは「全 viewer が
+  同時に落ちたのか（ネットワーク/relay 側）／個別に落ちたのか（プロセス個別）」で、
+  ファイルを分けると突合が手作業になる。行頭は `<pc>/<sid>[pid]`。
+- **1 サイクル粒度**（フレームごとには書かない）。BUG-3 の thrash で agent.log が
+  16.8MB に膨れた前例があるため粒度は粗く保つ。8MB で 1 世代だけローテートし、
+  **ローテートした事実は新ファイルの先頭に必ず書く**（silent に捨てない）。
+- 主要な行:
+
+  | 行 | 何が読めるか |
+  |---|---|
+  | `dial 成功（所要 …）` / `dial 失敗（所要 …）: …` | relay へ届いているか |
+  | `pump 終了 接続=… received=…B idleClosed=…` | **received=0B は「dial は通るが source が bridge を張っていない」**（Wake/grant 側）。`>0` なら「流れていた接続が落ちた」で原因が別 |
+  | `cycle 終了 継続=… idleClosed=… backoff a→b` | 再接続が回っているか止まっているか |
+  | `PutRelayGrant 失敗` / `Wake 失敗` | 元は戻り値を捨てていた best-effort 経路（画面には出さずログにだけ残す） |
+  | `watchLifecycle: <理由> → forceClose` | スリープ復帰 / NIC 変化の能動検知が効いたか |
+
+- ⚠ ログを開けなくても attach は動き続ける（↗窓 の表示と入力がログ都合で壊れる方が
+  害が大きい）。ただし黙って諦めず画面に 1 行出す。
 
 ### 6.3 注入 pane の版数追随（`attach-version`）
 

@@ -125,8 +125,9 @@ func TestPumpFramesForwardsData(t *testing.T) {
 	var out captureWriter
 
 	done := make(chan struct{})
+	var received int64
 	go func() {
-		pumpFrames(conn, &out, time.Second)
+		_, received = pumpFrames(conn, &out, time.Second)
 		close(done)
 	}()
 
@@ -143,6 +144,10 @@ func TestPumpFramesForwardsData(t *testing.T) {
 
 	if got := out.String(); got != "hello" {
 		t.Fatalf("転送データ = %q, want %q", got, "hello")
+	}
+	// received は診断ログ（pump 終了 received=…B）の値。転送量と一致すること。
+	if received != int64(len("hello")) {
+		t.Fatalf("received = %d, want %d", received, len("hello"))
 	}
 }
 
@@ -213,11 +218,16 @@ func TestPumpFramesDetectsIdleOnRealWebsocketConn(t *testing.T) {
 	var out discardWriter
 	const idle = 300 * time.Millisecond
 	start := time.Now()
-	got := pumpFrames(nc, &out, idle)
+	got, received := pumpFrames(nc, &out, idle)
 	if !got {
 		t.Fatalf("実 websocket conn の無通信切断を idleClosed として報告しなかった"+
 			"（= backoff がリセットされ即再 Wake→observe 再 spawn の thrash が続く）。経過=%v",
 			time.Since(start).Round(10*time.Millisecond))
+	}
+	// received は張り付き調査の切り分け値（0 なら「dial は通ったが source が bridge を
+	// 張っていない」）。この fake は 1 バイトも送らないので 0 でなければ計上が壊れている。
+	if received != 0 {
+		t.Fatalf("何も送っていないのに received=%d（バイト計上が壊れている）", received)
 	}
 }
 
@@ -294,7 +304,7 @@ func TestPumpFramesReportsIdleClose(t *testing.T) {
 		{"idle<=0（監視無効）は常に false", &errConn{err: io.EOF}, 0, false},
 	}
 	for _, c := range cases {
-		if got := pumpFrames(c.conn, &out, c.idle); got != c.want {
+		if got, _ := pumpFrames(c.conn, &out, c.idle); got != c.want {
 			t.Errorf("%s: idleClosed=%v want %v", c.name, got, c.want)
 		}
 	}

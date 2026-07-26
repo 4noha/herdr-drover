@@ -30,6 +30,48 @@ v0.5.30 で**判定を経過時間ベースへ**変更し、**実 websocket 越�
 > できない* の記述は**すべて解消済み**（PR #1 merge・`e9bab96` で release に windows 資産。
 > Windows 機の self-update 成功を 7/25 15:52 の Ack で実確認）。
 
+### 2026-07-26: ↗窓 viewer 張り付き障害の調査（**未解決・観測を仕掛けた**）
+
+**症状（ユーザー曰く長く続いている）**: mac-studio の ↗窓 viewer が再接続に失敗した
+まま張り付き、**注入をやり直すまで復帰しない**。Web コンソールは正常＝relay と source
+（スレーブ側）は健全で、**viewer 側だけ**の問題。
+
+実測（2026-07-26）: 11 本中 6 本が TCP 接続ゼロ。1 本を 90 秒サンプリングして 0/45。
+`pkill -f 'herdr-drover attach'` → `launchctl kickstart -k` の再注入で **11/11 復帰**。
+
+#### 🔴 なぜ長く残ったか＝**事後診断が構造的に不可能だった**
+
+attach の診断はすべて pane 画面向けで、各エラーは `\x1b[2J`（画面クリア）してから
+書く＝**次のフレームが 1 枚来た瞬間に消える**。再注入すれば直るので手がかりが毎回失われる。
+**ログファイルが無かった**（`grep -nE 'log\.|os\.OpenFile' attach.go` で確認）。
+
+→ `attach.log` を新設した（SPEC §6.4）。**これが今回の主目的**で、原因の修正はまだ。
+
+#### 入れた直後に見えたこと
+
+```
+desktop-djb9pfr-herdr/w1:p1   6/6 が received=0B・接続 30s・backoff 500ms→…→16s
+lph77xyyc7-herdr/w1:p5        1/9 が received=0B
+d24wt27c3j-herdr/w4:pV        0/3・最長 1m1.9s（健全）
+```
+
+- `desktop-djb9pfr` は**オフラインの Windows 機**＝source が bridge を張らないので
+  「dial は通る／0 バイトのまま 30s／backoff が cap まで伸びる」。これは**設計どおり**。
+- ⚠ **`received=0B` かどうかが最初の切り分け**になる（0 なら Wake/grant 側、>0 なら
+  流れていた接続の切断）。この値が無かったので今まで切り分けられなかった。
+
+#### 残っている宿題
+
+- **張り付きの再現待ち**。`~/.herdr-drover/attach-stall.log` に外部監視を常駐させ、
+  **連続 180 秒以上 TCP ゼロ**で `sample`（スタック）/ `lsof` / pane 画面 / 全 attach の
+  同時状態 / NIC を `~/.herdr-drover/stall-<時刻>-<pid>/` へ保存する。
+  判定 180s の根拠は「backoff は 30s で頭打ち＝正常なら 180s 連続切断は起きない」。
+  ⚠ この監視は scratchpad の使い捨てスクリプト（`watch_attach.sh`）。恒久化するなら
+  製品側（daemon）へ移すこと。
+- ⚠ **`attachrefresh` は版数変化のときしか走らない**＝同版のまま張り付いた場合は
+  自動復旧しない。原因が分かるまで「無通信 N 分で自己再注入」を足すのは対症療法に
+  なるので保留（原因に合った修正を入れる）。
+
 ### 2026-07-26: copilot / devin 対応（Spec 追加）
 
 両 CLI をこのマシンへ導入して**実物を叩いてから** `internal/agentid/spec.go` に
