@@ -69,11 +69,13 @@
 | `agent_session` の発火契機 | 起動時 | 初回発話時 | 初回発話時<br>（要 trust 通過） | 初回発話時まで<br>には付与 | 初回発話時まで<br>には付与 |
 | 会話 ref の形 | uuid v4 | uuid v7 系 | uuid v4 | uuid v4 | **単語スラッグ**<br>（例 `resolute-lynx`） |
 | resume で会話復元 | ✅ | ✅ | ✅ | ✅ | ✅ |
-| resume 後の hook 再発火 | ✅ | ❌ | 未計測 | ❌ | ✅ |
+| resume 後の hook 再発火 | ✅ | ❌ | ❌ | ❌ | ✅ |
 
-⚠ **「resume 後の hook 再発火」が ❌ の種別は、同じ pane を 2 回目に restart すると
-素起動になる**（会話が失われる）。herdr / 各エージェント側の性質で drover では
-埋められない。dry-run で ref が出るか確認してから実行するのが安全。
+⚠ **再発火しないのが多数派（5 種中 3 種）**。「resume 後の hook 再発火」が ❌ の
+種別は、**同じ pane を 2 回目に restart すると素起動になる**（会話が失われる）。
+1 回目の restart で `agent_session` が消えるためで、herdr / 各エージェント側の性質
+＝drover では埋められない。**`--dry-run` で `--resume <ref>` が出るか確認してから
+実行する**のが安全（ref が出なければ素起動になる）。
 
 ⚠ **会話 ref は UUID とは限らない**（devin は単語スラッグ）。drover は値の書式で
 判定せず「非空・512B 以下・制御文字なし」しか見ない＝**書式ヒューリスティックを

@@ -360,7 +360,7 @@ organize / producer が共有）。権威は強い順に:
 | 会話 ref の形 | uuid v4 | uuid v7 系 | uuid v4 |
 | resume argv | `--resume <id>` | `codex resume <id>` | `--resume <id>`（argv[0]=`cursor-agent`） |
 | restart 実機 | ✅ | ✅ | ✅ |
-| resume 後の hook 再発火 | ✅ | ❌ **しない** | 未計測 |
+| resume 後の hook 再発火 | ✅ | ❌ **しない** | ❌ **しない**（2026-07-26 計測） |
 
 #### copilot / devin（2026-07-26 追加・**会話 e2e まで実機検証済み**）
 
@@ -378,6 +378,19 @@ organize / producer が共有）。権威は強い順に:
 | **resume 後の hook 再発火** | ❌ **しない**（codex と同型） | ✅ **する** |
 | 自己更新 | `copilot update` ✅ 非対話で完走 | ❌ **非対話で完走しない**（rc=130）＝Spec に載せない |
 | `--model` | ✅（短縮形なし） | ✅（短縮形なし・env `DEVIN_MODEL`） |
+
+#### 「resume 後の hook 再発火」の一覧（2026-07-26 に cursor を計測して確定）
+
+| claude | codex | cursor | copilot | devin |
+|---|---|---|---|---|
+| ✅ する | ❌ しない | ❌ しない | ❌ しない | ✅ する |
+
+⚠ **再発火しないのが多数派（5 種中 3 種）**。❌ の種別は 1 回目の restart で
+`agent_session` が消えるため、**同じ pane を 2 回目に restart すると素起動になる**
+（会話が失われる）。herdr / 各エージェント側の性質で drover では埋められない。
+運用は **`--dry-run` で `--resume <ref>` が組み立てられるか確認してから実行**する。
+cursor の計測は「restart → 画面に元の発話が復元されている（＝resume は成功）／
+`agent_session` は `None` に落ちる」を実 pane で確認した。
 
 ⚠ **devin の会話 ref は UUID ではない**（`resolute-lynx`）。`ValidSessionRef` が
 「非空・512B 以下・制御文字なし」しか見ない設計だからそのまま通った。
