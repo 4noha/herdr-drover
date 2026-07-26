@@ -194,6 +194,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		return 0
+	case "memvault":
+		return cmdMemvault(rest, stdout, stderr)
 	case "mv-tab-launch":
 		// plugin action `mv-tab` の実体。drawer から非 TTY spawn で呼ばれ、layout.apply で
 		// 新 Tab を作り、その中で `herdr-drover mv-tab` を対話モードで走らせる（TTY 内へ迂回）。
@@ -291,6 +293,13 @@ func usage(w io.Writer) {
   herdr-drover update     selfupdate（GitHub Releases・sha256 検証・原子置換）
                           ⚠これは **herdr-drover 自身**の更新（claude 本体は
                           update-claude）
+  herdr-drover memvault <status|whoami|claim|release|issue-inherit-token>
+                          共用 slave 上の memvault daemon (4noha/memvault) への
+                          thin wrapper。複数 operator が 1 daemon を共用する
+                          multi-owner モードの control plane を drover 経由で
+                          叩ける。 inject 系は各 operator の laptop 責務なので
+                          drover 経由の入口は意図的に無い。'herdr-drover memvault help'
+                          で詳細
   herdr-drover version    バージョン表示
   herdr-drover help       このヘルプ
 
