@@ -40,6 +40,28 @@ func DefaultSocketPath() string {
 	return filepath.Join(home, ".memvault.sock")
 }
 
+// CtrlSocketPath returns the preferred socket for control-plane calls
+// (claim / release / inject / wipe / whoami / status / issue-inherit-token
+// / job/*). When memvault is running in split-socket mode (phase 1d)
+// $MEMVAULT_CTRL_SOCKET points at the ctrl socket; otherwise we fall back
+// to the legacy $MEMVAULT_SOCKET so single-socket deployments keep working.
+func CtrlSocketPath() string {
+	if v := os.Getenv("MEMVAULT_CTRL_SOCKET"); v != "" {
+		return v
+	}
+	return DefaultSocketPath()
+}
+
+// UseSocketPath returns the preferred socket for use-plane calls
+// (/gcp/id-token / /gcp/access-token / /aws/creds). Fallback to
+// $MEMVAULT_SOCKET when split-socket mode isn't in use.
+func UseSocketPath() string {
+	if v := os.Getenv("MEMVAULT_USE_SOCKET"); v != "" {
+		return v
+	}
+	return DefaultSocketPath()
+}
+
 // Client is a small HTTP-over-UNIX-socket client for one memvault daemon.
 type Client struct {
 	SocketPath string

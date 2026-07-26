@@ -109,9 +109,9 @@ func memvaultStatus(args []string, stdout, stderr io.Writer) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	c := memvaultclient.New("")
+	c := memvaultclient.New(memvaultclient.CtrlSocketPath())
 	if c.SocketPath == "" {
-		return errors.New("$MEMVAULT_SOCKET も $HOME/.memvault.sock も見つからない")
+		return errors.New("memvault socket が見つからない ($MEMVAULT_CTRL_SOCKET / $MEMVAULT_SOCKET / $HOME/.memvault.sock を確認)")
 	}
 	st, err := c.Status()
 	if err != nil {
@@ -128,9 +128,9 @@ func memvaultWhoami(args []string, stdout, stderr io.Writer) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	c := memvaultclient.New("")
+	c := memvaultclient.New(memvaultclient.CtrlSocketPath())
 	if c.SocketPath == "" {
-		return errors.New("$MEMVAULT_SOCKET も $HOME/.memvault.sock も見つからない")
+		return errors.New("memvault socket が見つからない ($MEMVAULT_CTRL_SOCKET / $MEMVAULT_SOCKET / $HOME/.memvault.sock を確認)")
 	}
 	w, err := c.Whoami()
 	if err != nil {
@@ -162,7 +162,7 @@ func memvaultClaim(args []string, stdout, stderr io.Writer) error {
 	if operator == "" {
 		return errors.New("operator 名を決定できない（--operator も $MEMVAULT_OPERATOR も $USER も空）")
 	}
-	c := memvaultclient.New("")
+	c := memvaultclient.New(memvaultclient.CtrlSocketPath())
 	buf, err := c.Claim(memvaultclient.ClaimOptions{
 		Operator: operator, Force: *force, Inherit: *inherit, Token: *token,
 	})
@@ -188,7 +188,7 @@ func memvaultRelease(args []string, stdout, stderr io.Writer) error {
 	if operator == "" {
 		operator = operatorDefault()
 	}
-	c := memvaultclient.New("")
+	c := memvaultclient.New(memvaultclient.CtrlSocketPath())
 	buf, err := c.Release(operator, *force)
 	if err != nil {
 		if errors.Is(err, memvaultclient.ErrReleaseConflict) {
@@ -211,7 +211,7 @@ func memvaultIssueInheritToken(args []string, stdout, stderr io.Writer) error {
 	if *owner == "" {
 		return errors.New("--owner is required")
 	}
-	c := memvaultclient.New("")
+	c := memvaultclient.New(memvaultclient.CtrlSocketPath())
 	buf, err := c.IssueInheritToken(*owner, *forOp, *ttl)
 	if err != nil {
 		return err
@@ -268,7 +268,7 @@ func memvaultJobRegister(args []string, stdout, stderr io.Writer) error {
 	if ownerVal == "" {
 		ownerVal = operatorDefault()
 	}
-	c := memvaultclient.New("")
+	c := memvaultclient.New(memvaultclient.CtrlSocketPath())
 	buf, err := c.JobRegister(ownerVal, id, *ttl)
 	if err != nil {
 		return err
@@ -292,7 +292,7 @@ func memvaultJobEnd(args []string, stdout, stderr io.Writer) error {
 	if ownerVal == "" {
 		ownerVal = operatorDefault()
 	}
-	c := memvaultclient.New("")
+	c := memvaultclient.New(memvaultclient.CtrlSocketPath())
 	buf, err := c.JobEnd(ownerVal, id)
 	if err != nil {
 		return err
