@@ -533,7 +533,8 @@ workspace.close  workspace.create  workspace.focus  workspace.list  workspace.re
 | `HERDR_ROLE` | `master` | `slave` で制限クレデンシャル動作 |
 | `DROVER_TICK` | `5s` | producer 周期 |
 | `DROVER_IDLE` | `30s` | Web ターミナル quiescence 自切断（負値＝無効化は不可） |
-| `DROVER_MIRROR_AGENTS` | `false` | ↗窓 にリモートの agent_status を転記 |
+| `DROVER_MIRROR_AGENTS` | `false` | ↗窓 にリモートの agent_status を転記（**metadata 転記の gate であって注入の gate ではない**） |
+| `DROVER_INJECT_REMOTE` | `true` | 他 PC のセッションを ↗窓 pane として注入するか（file 名 `inject_remote_panes`）。`false` で**既存の注入 pane も撤去**し新規を作らない。producer（Web/スマホ閲覧）は止めない |
 | `DROVER_SHARE_LOCAL_IPS` | — | terminal_title へローカル IP を出す |
 
 ### 6.2 ファイル
@@ -545,7 +546,28 @@ workspace.close  workspace.create  workspace.focus  workspace.list  workspace.re
 | `~/.herdr-drover/clouds.json` | マルチ Google アカウント fan-out |
 | `~/.herdr-drover/workspaces.json` | Tab 着地ルール（`exact` > 最長 `prefix` > `default`）＋ `inject_placement` |
 | `~/.herdr-drover/inject-index.json` | 注入 pane の identity index |
+| `~/.herdr-drover/attach-version` | 注入 pane を最後に作り直した drover 版数（600）。§6.3 |
 | `~/.herdr-drover/agent.log` | daemon ログ |
+
+### 6.3 注入 pane の版数追随（`attach-version`）
+
+**注入 pane（↗窓）の中身は `<selfExe> attach <pc> <sid>` という別プロセスで、親は
+herdr＝drover daemon が exit/再起動しても入れ替わらない。** よって `attach.go` の
+変更は **pane を作り直さない限り反映されない**。ローカル配信手順が
+`pkill -f 'herdr-drover attach'` → `launchctl kickstart -k` を要求してきたのはこれが
+理由で、**遠隔 `self-update` / `update-all` はこの pkill をしないため attach.go の
+変更が他 PC に永久に届かなかった**（実測 2026-07-26・v0.5.28 の BUG-3 修正が owner 機
+でしか効いていなかった）。
+
+そこで daemon は起動時に「前回この処理を回した版数」を `attach-version` と比較し、
+**変わっていた起動の 1 回だけ既存の注入 pane を撤去する**（撤去は
+`DROVER_INJECT_REMOTE=off` と同じ desired=∅ 経路。再生成は起動時 reconcile）。
+
+- **版数が同じ起動では何もしない**＝通常の daemon 再起動で ↗窓 を瞬断させない。
+- スタンプ不在（この仕組み以前のバイナリが作った pane が残る起動）は**作り直す側**に倒す。
+- 版数が空（ldflags を焼かない素の `go build`）は**判定しない**＝毎起動の瞬断を避ける。
+- 撤去が完走しなかった周はスタンプを更新しない＝次回起動で再試行する。
+- ⇒ **`attach.go` を変えたリリースでも遠隔 `self-update` だけで配れる**（v0.5.29〜）。
 
 ---
 

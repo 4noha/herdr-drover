@@ -666,6 +666,18 @@ func runRemoteInject(ctx context.Context, api *herdrapi.Client, st *state.Client
 		reported = map[string]string{}
 		lg.Printf("[reconcile] agent 転記 有効（DROVER_MIRROR_AGENTS=on・↗窓 を herdr に agent 検出させる）")
 	}
+	// drover の版数が前回から変わっていたら、既存の注入 pane を**ここで撤去する**
+	// （attachrefresh.go）。注入 pane の中身 `<selfExe> attach ...` は herdr が親の
+	// 別プロセスで daemon 再起動では入れ替わらないため、pane を作り直す以外に
+	// attach.go の変更を反映する手段が無い（遠隔 self-update が attach を配れなかった
+	// 実害＝2026-07-26）。上の kick() は既に trigger に積まれているので、撤去した
+	// 直後の 1 周目が desired どおり**新バイナリで**作り直す。
+	if stamp, serr := attachStampPath(); serr != nil {
+		lg.Printf("[reconcile] attach 版数スタンプのパス解決失敗（注入 pane の作り直し判定を skip）: %v", serr)
+	} else {
+		refreshStaleAttachPanes(ctx, api, cl, selfExe, idx, lg, reported, stamp, version)
+	}
+
 	// watchdog は「reconcileRemote が abort し続けている」ことのカウンタ
 	// （reconcileWatchdog 参照）。成功（ok==true）で 0 にリセットする＝一時的な
 	// 数回の失敗は正常なリトライとして許容し、長期停滞だけを自己再起動の対象にする。

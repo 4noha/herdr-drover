@@ -67,13 +67,29 @@ pane を他 PC の ↗窓 へ配信している）で、再 Wake しているの
 BUG-2（daemon/reconcile）は新プロセスなので配信済みだが、**BUG-3 は mac-studio でしか
 効いていない**（このマシンだけ手順どおり pkill→kickstart した）。
 
-- 対処案 A: `self-update` / `restart-daemon` の実行前に自 PC の attach 子プロセスを
-  終了させる（reconcile の起動時 kick が新バイナリで貼り直す＝ローカル手順の自動化）。
-  ⚠ pane が単独 Tab だと**プロセス終了で Tab ごと消える**ので、reconcile が確実に
-  作り直すことを実機で確かめてから入れること（restart-claude の二段構えと同じ論点）。
-- 対処案 B: 遠隔命令に「注入 pane 作り直し」を新設する（`restart-inject` 等）。
-- ⚠ どちらもやるまでは、**attach.go を触ったリリースは各機で手動の
-  `pkill -f 'herdr-drover attach'` → `launchctl kickstart -k` が要る**。
+##### ✅ 解決（v0.5.29・`cmd/herdr-drover/attachrefresh.go`）
+
+検討した案は 2 つあった:
+
+- 案 A: `self-update` / `restart-daemon` の**実行前**に自 PC の attach を終了させる
+  （ローカル手順の自動化）。⚠**採らなかった**: これだと「その命令を処理する側＝旧
+  バイナリ」に実装が要るので、**入れた版から次の版へ更新する回にしか効かない**
+  （今まさに困っている v0.5.28→v0.5.29 の回を救えない）。
+- 案 B: 遠隔命令に `restart-inject` を新設。⚠**採らなかった**: allowlist（drover-cloud）
+  と Web の両方を触る必要があり、しかも人が明示的に投げないと効かない。
+
+採ったのは **案 C: 起動時に自分で気づく**。daemon 起動時に
+`~/.herdr-drover/attach-version`（前回作り直した版数）と自版数を比べ、**変わっていた
+起動の 1 回だけ**注入 pane を撤去する。**判定するのが新バイナリ側**なので、
+**v0.5.28→v0.5.29 の回から効く**（スタンプ不在＝作り直す側に倒す設計）。
+
+- 撤去は BUG-2 で入れた `emptyRemoteSource`（desired=∅ → 全 close）、再生成は
+  `runRemoteInject` の起動時 kick。**新しい機構をひとつも足していない**。
+- **同一版数の起動では何もしない**＝通常の daemon 再起動で ↗窓 を瞬断させない
+  （これが無いと「毎起動で全 ↗窓 が作り直される」という別の実害になる）。
+- 実 herdr テスト `TestRefreshStaleAttachPanesOnVersionChange` が両方向を見る。
+  判定を常時 true / 常時 false に壊すとそれぞれ落ちることを確認済み。
+- 仕様は **SPEC §6.3**。
 
 ## 最新状態（2026-07-25・最新タグ v0.5.23 / drover-cloud v0.1.11）
 
@@ -716,9 +732,10 @@ launchctl kickstart -k gui/$(id -u)/com.4noha.herdr-drover
   駆動でローカル pane の消滅を契機にしないため、注入 pane が 11→0 のまま放置される。
   daemon の起動時 reconcile が唯一の確実な再生成契機なので kickstart が必須。
   （attach.go 無変更のリリースでは機能差ゼロ＝この手順自体が不要）。
-- 🔴**遠隔（`self-update`/`update-all`）はこの pkill をしない**＝**attach.go の変更は
-  遠隔更新では他機に届かない**（2026-07-26 の v0.5.28 配信で実測。上記
-  「遠隔 self-update は attach.go の変更を配れない」）。当面は各機で手動が要る。
+- ✅**v0.5.29 以降はこの pkill が不要**（`attachrefresh.go`＝版数が変わった起動の 1 回
+  だけ注入 pane を自動で作り直す。SPEC §6.3）。**v0.5.28 以前の PC へ配る回だけ**は
+  旧コードが命令を処理するが、新バイナリの起動時判定で追いつくので手動作業は要らない。
+  （2026-07-26 に「遠隔更新は attach.go の変更を配れない」を実測して足した仕組み。）
 - ⚠バイナリ/設定はプロセス起動時のみ反映＝各セッションは新規起動で新版。
 - ⚠**リリースビルドは GOWORK=off**（go.work のローカル drover-cloud でなく go.mod
   宣言の公開タグで解決）。⚠go.work は**このリポではなく `~/works/tools/go.work`**
@@ -732,10 +749,13 @@ launchctl kickstart -k gui/$(id -u)/com.4noha.herdr-drover
 
 ## 残バックログ（優先順）
 
-0. 🔴 **遠隔更新が attach 子プロセスを作り直さない**（2026-07-26 実測・上記デプロイ節）。
-   これがある限り **attach.go の変更は fleet に配れない**（BUG-3 修正が mac-studio
-   以外で効いていない実害が出ている）。対処案 A（self-update/restart-daemon の前に
-   自 PC の attach を終了）か B（`restart-inject` 命令の新設）。
+0. ~~**遠隔更新が attach 子プロセスを作り直さない**~~ → **v0.5.29 で解決**
+   （`cmd/herdr-drover/attachrefresh.go`）。daemon 起動時に `~/.herdr-drover/attach-version`
+   と自版数を比べ、**変わった起動の 1 回だけ**注入 pane を撤去する（撤去は BUG-2 の
+   `emptyRemoteSource` 経路・再生成は起動時 kick ＝新機構ゼロ）。**同一版数の起動では
+   何もしない**＝通常再起動で ↗窓 を瞬断させない。仕様は SPEC §6.3。
+   ⚠ **v0.5.28→v0.5.29 の配信では旧コードが命令を処理する**が、新バイナリの**起動時**に
+   スタンプ不在（＝作り直す側）と判定されるので、その 1 回で追いつく。
 0b. **遠隔命令を投げる CLI が無い**（Web UI か `state.PushCommand` を直に叩くしかない）。
    v0.5.28 の配信は scratchpad の使い捨てツールで投入した＝`herdr-drover push-command
    <pc> <cmd>` 相当を CLI に足すのが筋（allowlist 検証は state 側が持っている）。
