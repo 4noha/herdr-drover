@@ -3,13 +3,21 @@
 **開発の鉄則は [CLAUDE.md](CLAUDE.md) / DESIGN.md 末尾**（実テスト担保・旧コード
 FAIL 確認・exact-match・AGPL 衛生・silent 変更禁止・対外操作はユーザー確認後）。
 **再開時はまずこの TODO.md を通読**（in-flight・残課題・デプロイ手順の正）。
-**既知バグ 3 件は [BUGS.md](BUGS.md) で修正済み＝v0.5.28 で fleet 配信済み**
-（2026-07-26: BUG-1 shim 再入ゾンビ化【P0・claudeshim.go findAgentPaneByResumeRef に
-自 pane 除外＋live 検証】／ BUG-2 リモート注入 off 設定を新設
-【`DROVER_INJECT_REMOTE`/`inject_remote_panes`・config.go・reconcile.go
-emptyRemoteSource】／ BUG-3 `#inj` bridge thrash【attach.go の viewer 側 再 Wake が
-真因・idleClosed 伝播＋backoff 非リセット】。いずれも実 herdr テストで担保・全 test 緑）。
-**BUG-3 は BUGS.md 旧記述の推定真因（source 側 tick）が誤りだった点も訂正済み**。
+**既知バグ 3 件は [BUGS.md](BUGS.md) で修正済み**（2026-07-26）:
+BUG-1 shim 再入ゾンビ化【P0・claudeshim.go `findAgentPaneByResumeRef` に自 pane 除外＋
+live 検証・**v0.5.28 で fleet 配信済**】／ BUG-2 リモート注入 off 設定を新設
+【`DROVER_INJECT_REMOTE`・reconcile.go `emptyRemoteSource`・**v0.5.28 配信済**】／
+**BUG-3 `#inj` bridge thrash【v0.5.28 の修正は実経路に一度も当たっておらず、v0.5.30 で
+再修正】**。
+
+🔴 **BUG-3 の教訓（鉄則 2 を踏んだ）**: v0.5.28 は `idleClosed` を**エラー型**
+（`os.ErrDeadlineExceeded` / `net.Error.Timeout()`）で判定していたが、実 conn の
+`websocket.NetConn` は **deadline を内部 context cancel で実装**しており返るのは
+`failed to get reader: context canceled`＝**どの判定にも当たらない**。単体テストは
+合成エラーを直接注入していたので緑だったが、本番では一度も効いていなかった
+（fleet 配信後も observe 再 spawn は ~31s 周期のまま＝backoff が伸びない数字が出ていた）。
+v0.5.30 で**判定を経過時間ベースへ**変更し、**実 websocket 越しの回帰テスト**を追加。
+**外部ライブラリの振る舞いは実物で確かめてから判定に使うこと。**
 
 ---
 
@@ -21,6 +29,36 @@ emptyRemoteSource】／ BUG-3 `#inj` bridge thrash【attach.go の viewer 側 �
 > 下記「0. Windows 移植」の *未 push* / *branch `windows-port`* / *Windows は self-update
 > できない* の記述は**すべて解消済み**（PR #1 merge・`e9bab96` で release に windows 資産。
 > Windows 機の self-update 成功を 7/25 15:52 の Ack で実確認）。
+
+### 2026-07-26: v0.5.29 の fleet 配信記録（＝新機構の実地検証）
+
+| PC | 版数 | 経路 |
+|---|---|---|
+| `mac-studio-herdr` | **v0.5.29** | 手動 rm→cp＋codesign＋kickstart（**pkill attach は意図的にしない**＝新機構の検証） |
+| `d24wt27c3j-herdr` | **v0.5.29** | 遠隔 `self-update` |
+| `lph77xyyc7-herdr` | **v0.5.29** | 同上 |
+| `n9htqcr6g0-herdr` | v0.5.28→適用中 | 同上 |
+| `desktop-djb9pfr-herdr`（Windows） | v0.5.26 | オフライン＝pending 2 件 |
+
+✅ **`attachrefresh` が実地で動いた**（`pkill` 一切なしで attach 子プロセスが入れ替わった）:
+
+```
+[reconcile] drover 版数が変わった（"" → "v0.5.29"）＝注入 pane を作り直す
+[reconcile] desired=0 cur(injected)=11 → CLOSE ×11
+[reconcile] 注入 pane を撤去した（直後の reconcile が新バイナリで作り直す）
+[reconcile] desired=11 cur(injected)=0 → CREATE ×11
+```
+旧 attach PID 11 本すべて消滅 → 新 PID 11 本。`~/.herdr-drover/attach-version` = `v0.5.29`（600）。
+
+- ⚠ **撤去パスでは必ず `[reconcile] CAP: 注入 pane=N > 8 → 作成停止し整理のみ` が出る**
+  （`maxPanes = len(desired)*3 + 8` に `desired=0` を入れた結果）。**撤去だけが目的の
+  パスなので実害はない**（直後のパスで全数作り直されている）。ログを読む人が
+  「作成が止まった」と誤解しないよう注記しておく。
+- 🔴 **この配信で BUG-3 が直っていないことが判明した**（下記・v0.5.30 で再修正）。
+  配信後も observe 再 spawn は **~31s 周期のまま**（13:04:50 / 13:05:22 / 13:05:53 /
+  13:06:24 / 13:06:56）＝backoff が伸びていない。**source 側の quiescence ログは 0 件**
+  だったので閉じているのは viewer 自身の read deadline と分かり、そこから
+  「エラー型判定が当たっていない」に辿り着いた。
 
 ### 2026-07-26: v0.5.28 の fleet 配信記録
 

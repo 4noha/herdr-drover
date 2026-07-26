@@ -25,7 +25,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -534,14 +533,27 @@ type deadlineConn interface {
 // deadline 到達で解ける＝doc.go 保証）ため、フレーム受信ごとに deadline を
 // idle 先へ延ばし、無通信 idle 超過で Read がタイムアウトしたら戻る＝
 // cmdAttach の backoff ループが再接続を試みる。idle<=0 は監視無効（テスト用）。
-// 戻り値 idleClosed は「無通信 quiescence（idle 超過の read deadline）で戻った」印。
+// 戻り値 idleClosed は「無通信 quiescence（idle の間 1 バイトも来ずに切れた）」印。
 // 実データ切断（conn 破断）と区別して cmdAttach の backoff 判断に使う（BUG-3:
 // idle 切断を『健全接続の切断』と誤判定して即再 Wake すると source が observe を
 // 再 spawn し続ける thrash になる）。idle<=0（監視無効）では常に false。
+//
+// ⚠**判定はエラー型ではなく「最後に 1 バイト来てからの経過時間」で行う**
+// （v0.5.30 の再修正。v0.5.28〜v0.5.29 はエラー型で判定していて実経路で一度も
+// 当たらなかった＝BUG-3 が直っていなかった）。実測（`TestNetConnDeadlineIsNotATimeoutError`）:
+// **`websocket.NetConn` は read deadline を内部 context の cancel で実装**しており、
+// 返るのは `failed to get reader: context canceled`（`*fmt.wrapError`）で、
+// `os.ErrDeadlineExceeded` でも `context.DeadlineExceeded` でも `net.Error.Timeout()`
+// でもない。エラー型に依存した判定はこの conn では構造的に成立しない。
+// 経過時間なら実装差に依存せず、相手（source）側の quiescence 自切断が先に届く
+// 場合も同じ基準で拾える。
 func pumpFrames(conn deadlineConn, out io.Writer, idle time.Duration) (idleClosed bool) {
 	if idle > 0 {
 		_ = conn.SetReadDeadline(time.Now().Add(idle))
 	}
+	// last は「最後に 1 バイト受けた時刻」。1 バイトも来ないまま切れた場合に備え
+	// 接続確立時刻で初期化する。
+	last := time.Now()
 	buf := make([]byte, 32*1024)
 	for {
 		n, rerr := conn.Read(buf)
@@ -549,29 +561,30 @@ func pumpFrames(conn deadlineConn, out io.Writer, idle time.Duration) (idleClose
 			if _, werr := out.Write(buf[:n]); werr != nil {
 				return false
 			}
+			last = time.Now()
 			if idle > 0 {
 				_ = conn.SetReadDeadline(time.Now().Add(idle))
 			}
 		}
 		if rerr != nil {
-			return idle > 0 && isIdleTimeout(rerr)
+			return isQuiescentClose(idle, time.Since(last))
 		}
 	}
 }
 
-// isIdleTimeout は err が read deadline（quiescence idle 超過）由来かを判定する。
-// websocket.NetConn の deadline エラーは os.ErrDeadlineExceeded を満たすか
-// net.Error.Timeout()==true になる（実装差を両方受ける）。実データ切断（EOF・
-// conn reset 等）は false＝素早い再接続に回す。
-func isIdleTimeout(err error) bool {
-	if err == nil {
+// isQuiescentClose は「この切断は無通信（quiescence）由来か」を経過時間だけで
+// 判定する純関数。idle<=0（監視無効）は常に false。
+//
+// 自前の read deadline は last+idle に置いてあるので、それが発火した周の
+// sinceLastByte は idle 以上になる。相手側の quiescence 自切断が先に届く場合は
+// 相手の idle 分の無通信が経っているが、クロック差でこちらの idle を僅かに
+// 下回りうるので slack を置く（どちらも「無通信で畳まれた」＝同じ扱いでよい）。
+func isQuiescentClose(idle, sinceLastByte time.Duration) bool {
+	if idle <= 0 {
 		return false
 	}
-	if errors.Is(err, os.ErrDeadlineExceeded) {
-		return true
-	}
-	var ne net.Error
-	return errors.As(err, &ne) && ne.Timeout()
+	const slack = time.Second
+	return sinceLastByte+slack >= idle
 }
 
 // resizeMagic は cm-wire の RESIZE（0xff 0xff + rows u16BE + cols u16BE）。

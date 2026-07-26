@@ -7,14 +7,19 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/coder/websocket"
 )
 
 // timeoutConn は Read が「SetReadDeadline で設定された時刻が来るまで」
@@ -141,24 +146,132 @@ func TestPumpFramesForwardsData(t *testing.T) {
 	}
 }
 
-// errConn は Read が即座に固定エラーを返す fake（idle 判定の分岐を機械確認する）。
+// errConn は Read が即座に固定エラーを返す fake。
 type errConn struct{ err error }
 
 func (c *errConn) Read([]byte) (int, error)        { return 0, c.err }
 func (c *errConn) SetReadDeadline(time.Time) error { return nil }
 
-// fakeNetTimeout は net.Error を満たし Timeout()==true を返す（websocket.NetConn の
-// deadline エラーが os.ErrDeadlineExceeded ではなく net.Error 形で来る実装差を模す）。
-type fakeNetTimeout struct{}
+// silentConn は idle 経過後にエラーを返す fake（無通信のまま切れた conn を模す）。
+// 1 バイトも書かないので pumpFrames の last は接続時刻のまま＝経過時間判定に乗る。
+type silentConn struct {
+	after time.Duration
+	err   error
+}
 
-func (fakeNetTimeout) Error() string   { return "fake net timeout" }
-func (fakeNetTimeout) Timeout() bool   { return true }
-func (fakeNetTimeout) Temporary() bool { return true }
+func (c *silentConn) Read([]byte) (int, error) {
+	time.Sleep(c.after)
+	return 0, c.err
+}
+func (c *silentConn) SetReadDeadline(time.Time) error { return nil }
 
-// TestPumpFramesReportsIdleClose は BUG-3 の要: pumpFrames が「無通信 quiescence
-// （idle 超過 = read deadline）で戻った」ことを idleClosed=true で報告し、実データ
-// 切断（EOF 等）や idle 無効時は false を返すことを機械確認する。この戻り値が
-// cmdAttach の「idle 切断では backoff をリセットしない」判断（=thrash 停止）の入力。
+// TestNetConnDeadlineIsNotATimeoutError は **BUG-3 が v0.5.28/v0.5.29 で直らなかった
+// 理由そのもの**を実 websocket で固定する回帰テスト。
+//
+// v0.5.28 の実装は「read deadline 由来のエラーか」をエラー型
+// （os.ErrDeadlineExceeded / net.Error.Timeout()）で判定していた。ところが実際に
+// 使う conn は `websocket.NetConn` で、**deadline を内部 context の cancel で実装**
+// しており、返るのは `failed to get reader: context canceled`（*fmt.wrapError）。
+// どの型判定にも当たらないので idleClosed が常に false になり、thrash が
+// 一度も止まらなかった（実測: fleet 配信後も observe 再 spawn が ~31s 周期のまま）。
+//
+// このテストは「エラー型では判定できない」ことを**実ライブラリで**固定する。
+// 将来 coder/websocket がエラー型を変えてもこのテストが教えてくれる。
+func TestNetConnDeadlineIsNotATimeoutError(t *testing.T) {
+	nc, cleanup := silentWebsocketNetConn(t)
+	defer cleanup()
+
+	if err := nc.SetReadDeadline(time.Now().Add(200 * time.Millisecond)); err != nil {
+		t.Fatalf("SetReadDeadline: %v", err)
+	}
+	_, rerr := nc.Read(make([]byte, 1024))
+	if rerr == nil {
+		t.Fatal("deadline 超過でエラーが返るはず")
+	}
+	var ne net.Error
+	t.Logf("実 websocket.NetConn の deadline エラー: %T %v", rerr, rerr)
+	if errors.Is(rerr, os.ErrDeadlineExceeded) ||
+		errors.Is(rerr, context.DeadlineExceeded) ||
+		(errors.As(rerr, &ne) && ne.Timeout()) {
+		t.Fatal("エラー型で deadline を判定できてしまった＝ pumpFrames の判定を" +
+			"エラー型ベースへ戻してよい可能性がある。実測しなおして設計を見直すこと" +
+			"（現状は経過時間ベースが正しいという前提でこのテストが立っている）")
+	}
+}
+
+// TestPumpFramesDetectsIdleOnRealWebsocketConn は **実 websocket.NetConn 越しに**
+// pumpFrames が無通信切断を idleClosed=true と報告することを確認する。
+//
+// ⚠これが BUG-3 で欠けていたテスト。v0.5.28 では合成エラー（errConn に
+// os.ErrDeadlineExceeded を直接注入）でしか検証しておらず、**単体テストは緑なのに
+// 本番では一度も当たらない**という状態を作ってしまった（開発の鉄則
+// 「合成ストリームだけで緑にしない」を踏んだ）。旧実装ではこのテストは FAIL する。
+func TestPumpFramesDetectsIdleOnRealWebsocketConn(t *testing.T) {
+	nc, cleanup := silentWebsocketNetConn(t)
+	defer cleanup()
+
+	var out discardWriter
+	const idle = 300 * time.Millisecond
+	start := time.Now()
+	got := pumpFrames(nc, &out, idle)
+	if !got {
+		t.Fatalf("実 websocket conn の無通信切断を idleClosed として報告しなかった"+
+			"（= backoff がリセットされ即再 Wake→observe 再 spawn の thrash が続く）。経過=%v",
+			time.Since(start).Round(10*time.Millisecond))
+	}
+}
+
+// silentWebsocketNetConn は「接続はできるが 1 バイトも送ってこない」実 websocket の
+// NetConn を返す（relayclient.DialViewerFrom と同じ websocket.NetConn 経路）。
+func silentWebsocketNetConn(t *testing.T) (net.Conn, func()) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer c.Close(websocket.StatusNormalClosure, "")
+		<-r.Context().Done() // 何も送らずに黙る（source が idle な状態）
+	}))
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	c, _, err := websocket.Dial(ctx, "ws"+srv.URL[len("http"):], &websocket.DialOptions{})
+	if err != nil {
+		cancel()
+		srv.Close()
+		t.Fatalf("websocket.Dial: %v", err)
+	}
+	return websocket.NetConn(ctx, c, websocket.MessageBinary), func() {
+		c.Close(websocket.StatusNormalClosure, "")
+		cancel()
+		srv.Close()
+	}
+}
+
+// TestIsQuiescentClose は経過時間ベース判定の純関数テーブル。
+func TestIsQuiescentClose(t *testing.T) {
+	const idle = 30 * time.Second
+	cases := []struct {
+		name          string
+		idle, elapsed time.Duration
+		want          bool
+	}{
+		{"idle ちょうどで切れた＝quiescence", idle, idle, true},
+		{"idle 超過も quiescence", idle, idle + 5*time.Second, true},
+		{"slack 内の僅かな不足も quiescence（相手側 close のクロック差）", idle, idle - 500*time.Millisecond, true},
+		{"流れている最中の切断は quiescence でない", idle, 2 * time.Second, false},
+		{"直後の切断も quiescence でない", idle, 0, false},
+		{"idle<=0（監視無効）は常に false", 0, time.Hour, false},
+	}
+	for _, c := range cases {
+		if got := isQuiescentClose(c.idle, c.elapsed); got != c.want {
+			t.Errorf("%s: isQuiescentClose(%v,%v)=%v want %v", c.name, c.idle, c.elapsed, got, c.want)
+		}
+	}
+}
+
+// TestPumpFramesReportsIdleClose は pumpFrames の戻り値が「経過時間」で決まること
+// （エラー型ではない）を fake conn で機械確認する。この戻り値が cmdAttach の
+// 「idle 切断では backoff をリセットしない」判断＝thrash 停止の入力になる。
 func TestPumpFramesReportsIdleClose(t *testing.T) {
 	var out discardWriter
 	cases := []struct {
@@ -167,10 +280,18 @@ func TestPumpFramesReportsIdleClose(t *testing.T) {
 		idle time.Duration
 		want bool
 	}{
-		{"os.ErrDeadlineExceeded → idle 切断", &errConn{err: os.ErrDeadlineExceeded}, 30 * time.Millisecond, true},
-		{"net.Error Timeout → idle 切断", &errConn{err: fakeNetTimeout{}}, 30 * time.Millisecond, true},
-		{"io.EOF → 実データ切断（idle でない）", &errConn{err: io.EOF}, 30 * time.Millisecond, false},
-		{"idle<=0（監視無効）は常に false", &errConn{err: os.ErrDeadlineExceeded}, 0, false},
+		// エラー型が何であれ、無通信が idle 続いていれば quiescence。
+		// ⚠ context.Canceled は実 websocket.NetConn が deadline 時に返す形
+		// （TestNetConnDeadlineIsNotATimeoutError 参照）＝ここが本番経路。
+		{"context canceled でも無通信 idle 経過なら idle 切断",
+			&silentConn{after: 60 * time.Millisecond, err: context.Canceled}, 50 * time.Millisecond, true},
+		{"EOF でも無通信 idle 経過なら idle 切断",
+			&silentConn{after: 60 * time.Millisecond, err: io.EOF}, 50 * time.Millisecond, true},
+		// 経過していなければ実データ切断扱い（素早く復帰する）。
+		{"即座の EOF は実データ切断", &errConn{err: io.EOF}, 30 * time.Second, false},
+		{"即座の deadline エラーでも経過ゼロなら実データ切断",
+			&errConn{err: os.ErrDeadlineExceeded}, 30 * time.Second, false},
+		{"idle<=0（監視無効）は常に false", &errConn{err: io.EOF}, 0, false},
 	}
 	for _, c := range cases {
 		if got := pumpFrames(c.conn, &out, c.idle); got != c.want {

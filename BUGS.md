@@ -138,23 +138,53 @@ reconcile が別 pane id で貼り直す。実質、daemon を `launchctl bootou
 
 ## BUG-3【P2】外向き #inj bridge の thrash（30s quiescence→即再オープンの無限ループ）
 
-### ✅ 解決（2026-07-26）＋真因の訂正
-**真因は本書の推定と違った。** source 側に周期的に bridge を張り直すループは
-**存在しない**（`st.Wake` の呼び出しは viewer 側 2 箇所＝`attach.go:441` /
-`sshforward.go:172` のみ・producer の `Tick` は session-list 同期で bridge 確立では
-ない）。実経路は **viewer 側 `cmdAttach` の backoff 再接続**: 注入 attach pane は
-idle で source が quiescence 自切断すると `pumpFrames` が idle 超過で戻り、旧
-`cmdAttach` は「サイクルが >5s 続いた＝健全接続」とみなして backoff を 500ms へ
-**リセットして即再接続→再 `st.Wake`** → source（`webterm.handleWake`）が bridge を
-再張り＝observe 再 spawn。これが 30s 周期で回り 59k spawn になっていた。
+### ✅ 解決（v0.5.30）— ⚠**v0.5.28 の「修正」は実経路に一度も当たっていなかった**
 
-修正（`cmd/herdr-drover/attach.go`）: `pumpFrames` に **`idleClosed`（idle 超過の
-read deadline で戻った印）** を返させ、`attachOnce`→`attachCycle`→`cmdAttach` へ伝播。
-純関数 `attachBackoffReset` が **idle 切断では backoff をリセットしない**（伸ばして
-再接続を疎にする＝quiescence の「無通信なら畳む」意図を活かす）。実データ接続が
->5s 続いてから不意に切れた場合だけ素早い復帰のためリセット。テスト
-`TestPumpFramesReportsIdleClose` / `TestAttachBackoffReset`（純関数・既存 pumpFrames
-テストも後方互換で緑）。
+真因は 2 段階で判明した。**推定を消さずに経緯ごと残す**（同じ踏み方を繰り返さないため）。
+
+#### 第 1 段（v0.5.28・機構としては正しいが効かなかった）
+
+本書が当初推定した「source 側に周期的な張り直しループがある」は**誤り**だった
+（`st.Wake` の呼び出しは viewer 側 2 箇所だけ・producer の `Tick` は session-list
+同期であって bridge 確立ではない）。実経路は **viewer 側 `cmdAttach` の backoff
+再接続**: 注入 pane が idle → 無通信 30s で conn が切れる → 旧 `cmdAttach` は
+「サイクルが >5s 続いた＝健全接続の切断」とみなして backoff を 500ms へ**リセット
+して即再接続→再 `st.Wake`** → source が bridge を再張り＝observe 再 spawn。
+
+そこで `pumpFrames` に `idleClosed` を返させ、純関数 `attachBackoffReset` が
+**idle 切断では backoff をリセットしない**ようにした。**この機構自体は正しい。**
+
+#### 第 2 段（v0.5.30・なぜ効かなかったか）
+
+v0.5.28/v0.5.29 の `idleClosed` は「**エラー型**が read deadline 由来か」で判定して
+いた（`os.ErrDeadlineExceeded` / `net.Error.Timeout()`）。ところが実 conn は
+`websocket.NetConn`（`relayclient.DialViewerFrom`）で、**deadline を内部 context の
+cancel で実装している**。実測（`TestNetConnDeadlineIsNotATimeoutError`）:
+
+```
+err = failed to get reader: context canceled   型 = *fmt.wrapError
+errors.Is(os.ErrDeadlineExceeded)   = false
+errors.Is(context.DeadlineExceeded) = false
+net.Error かつ Timeout()             = false
+```
+
+⇒ **どの判定にも当たらず `idleClosed` は常に false**。thrash は一度も止まっていな
+かった。fleet 配信後の実測でも observe 再 spawn は **~31s 周期のまま**（13:04:50 /
+13:05:22 / 13:05:53 / 13:06:24 / 13:06:56）で、backoff が伸びていないことが数字に
+出ていた。
+
+**修正**（v0.5.30・`cmd/herdr-drover/attach.go`）: 判定を**エラー型から経過時間へ**
+変える。`pumpFrames` が「最後に 1 バイト受けた時刻」を持ち、切断時に
+`isQuiescentClose(idle, time.Since(last))` で決める。実装差に依存せず、相手側の
+quiescence 自切断が先に届く場合も同じ基準で拾える。
+
+#### この件の教訓（鉄則 2 を踏んだ）
+
+v0.5.28 のテストは `errConn` に `os.ErrDeadlineExceeded` を**直接注入**する合成
+ストリームだった＝**単体テストは緑なのに本番では一度も当たらない**状態を作った。
+v0.5.30 で **実 `websocket.NetConn` 越しの `TestPumpFramesDetectsIdleOnRealWebsocketConn`**
+を追加（旧実装で FAIL することを確認済み）。**外部ライブラリの振る舞いは
+「ドキュメントどおりのはず」で書かず、実物で確かめてから判定に使うこと。**
 
 ### 症状
 daemon 稼働中、ローカル各 pane に対する外向き bridge `sid="wX:pY#inj"` が
