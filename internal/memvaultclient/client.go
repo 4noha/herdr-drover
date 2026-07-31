@@ -112,8 +112,18 @@ func (c *Client) doJSON(method, path string, body io.Reader) ([]byte, int, error
 	return buf, resp.StatusCode, err
 }
 
-// Status is the parsed shape of GET /status that we need to know about.
-// Extra fields the daemon returns are ignored (forward-compatible).
+// Status is the parsed shape of GET /status that we need to branch on.
+//
+// ⚠ The typed fields are deliberately a SUBSET. The daemon keeps growing
+// /status (git_loaded / git_hosts / github_app_loaded / kind_ttl_remain_sec
+// / routes were all added after this struct was written) and a struct
+// silently drops every field it doesn't declare. So:
+//
+//   - branching on /status → use the typed fields
+//   - DISPLAYING /status to a human → use Raw
+//
+// Displaying the typed struct instead of Raw is how drover ended up hiding
+// whether GitHub material was loaded at all. Don't reintroduce that.
 type Status struct {
 	UptimeSec        int                       `json:"uptime_sec"`
 	HardCapRemainSec int                       `json:"hard_cap_remain_sec"`
@@ -126,9 +136,15 @@ type Status struct {
 	ActiveOperator   string                    `json:"active_operator"`
 	ActiveSlot       string                    `json:"active_slot"`
 	InheritInPlace   bool                      `json:"inherit_in_place"`
+
+	// Raw is the whole decoded payload, including fields this struct does
+	// not declare. Populated by Status(); never dropped. Display paths must
+	// use this so a daemon-side addition shows up without a drover release.
+	Raw map[string]any `json:"-"`
 }
 
-// Status calls GET /status and returns the parsed result.
+// Status calls GET /status and returns both the typed view and the full
+// raw payload (Status.Raw). One round-trip; decoded twice on purpose.
 func (c *Client) Status() (*Status, error) {
 	buf, code, err := c.doJSON("GET", "/status", nil)
 	if err != nil {
@@ -141,7 +157,59 @@ func (c *Client) Status() (*Status, error) {
 	if err := json.Unmarshal(buf, &st); err != nil {
 		return nil, fmt.Errorf("parse /status: %w", err)
 	}
+	// Second decode into a map so nothing the daemon sent is lost. A
+	// failure here can't happen once the typed decode succeeded, but
+	// don't swallow it silently if it somehow does.
+	if err := json.Unmarshal(buf, &st.Raw); err != nil {
+		return nil, fmt.Errorf("parse /status (raw): %w", err)
+	}
 	return &st, nil
+}
+
+// SlotMaterialKinds is the set of credential kinds a slot can hold, in the
+// order they should be reported. Each maps to a "<kind>_loaded" bool in the
+// per-slot /status object.
+//
+// ⚠ Keep in sync with memvault's slot stores (gcp/aws/env/routes/git/
+// github_app). A kind missing here is invisible to the slot-mismatch
+// check — which is exactly the silent-hole class of bug this file already
+// had once.
+var SlotMaterialKinds = []string{"gcp", "aws", "env", "routes", "git", "github_app"}
+
+// SlotLoadedKinds reports which kinds the named slot currently holds,
+// reading the per-slot objects of /status.
+//
+// ok=false means only one thing: /status carried no "slots" object at all,
+// i.e. a pre-multi-owner daemon — genuinely undecidable, so callers must
+// not infer anything.
+//
+// A *missing entry* inside an existing "slots" object is NOT undecidable:
+// it means empty. memvault materialises a slot lazily (slotForOwner) and a
+// fresh slot is created empty, so "no entry for owner X" and "X holds
+// nothing" are the same state. This matters because `claim` does not
+// materialise the claimed slot — measured: claim alice on a daemon whose
+// only material is in the default slot leaves status.slots == {"": {...}}
+// with no "alice" key, while /git/credential for alice already 404s. Read
+// that absence as undecidable and the mismatch check goes silent exactly
+// when it is needed most.
+func (s *Status) SlotLoadedKinds(slot string) (kinds []string, ok bool) {
+	if s == nil || s.Slots == nil {
+		return nil, false
+	}
+	obj, present := s.Slots[slot]
+	if !present {
+		return nil, true // lazily-created slot that doesn't exist yet ＝ empty
+	}
+	for _, k := range SlotMaterialKinds {
+		v, has := obj[k+"_loaded"]
+		if !has {
+			continue // daemon predates this kind — not a "no"
+		}
+		if b, isBool := v.(bool); isBool && b {
+			kinds = append(kinds, k)
+		}
+	}
+	return kinds, true
 }
 
 // Whoami is the parsed shape of GET /whoami.

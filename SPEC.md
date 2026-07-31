@@ -125,12 +125,27 @@ Firestore サーバは Cloud Run に 1 回デプロイして全 PC で共有す�
 **inject 系の入口は持たない（意図的）**。raw material を送る経路は各 operator の
 laptop からの SSH tunnel が担当する。理由は DESIGN_MEMVAULT.md §6.1。
 
-⚠ **既知の逸脱（2026-07-31 実測・要修正）**: `memvault status` は daemon が返す
-top-level の `git_loaded` / `git_hosts` / `github_app_loaded` /
-`kind_ttl_remain_sec` / `routes` を **silent に捨てている**（`Status` struct に
-フィールドが無いキーが JSON デコードで落ちる）＝**鉄則⑤に反する**。
-本仕様としては「`/status` の応答は欠落なく提示する」が正。当面は `slots[""]`
-側に同じ情報が出る。詳細は [DESIGN_MEMVAULT.md](DESIGN_MEMVAULT.md) §5.4(c)。
+**`status` の出力は `/status` の応答をそのまま提示する**（欠落なし）。struct に
+宣言したフィールドだけを出す実装は、daemon が `/status` を拡張するたびに黙って
+情報を落とす（実際に `git_loaded` / `git_hosts` / `github_app_loaded` /
+`kind_ttl_remain_sec` / `routes` の 5 キーが消えていた＝鉄則⑤違反。2026-07-31
+修正）。したがって:
+
+- **分岐**に使う値は `memvaultclient.Status` の typed field
+- **表示**は `Status.Raw`（未宣言キーを含む生の map）
+
+回帰は `TestMemvaultStatusShowsEveryDaemonField`（実 daemon 相手に「daemon が
+返したキーが 1 つでも出力に無ければ FAIL」）で固定。
+
+**`status` / `whoami` は slot ズレを検出したら stderr に警告する**。
+「active operator の slot は空だが default slot に材料がある」状態は、参照側
+（`/aws/creds` `/gcp/*` `/git/credential`）が `--owner` 省略時に active slot を
+見るため **材料があるのに 404/503 になる**（しかも 404 本文は host 違いにしか
+読めない）。判定は exact（`/status` の `slots` オブジェクト自体が無い
+＝multi-owner 前の daemon のときだけ黙る。**エントリ不在は「空」で確定**＝
+memvault は slot を lazy 生成し、`claim` は slot を作らないため）。
+stdout は素の JSON のまま保つ（機械可読性を壊さない）。詳細は
+[DESIGN_MEMVAULT.md](DESIGN_MEMVAULT.md) §5.4(a)。
 
 ### 2.4 `restart-agent-session` の詳細仕様
 

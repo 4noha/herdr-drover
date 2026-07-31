@@ -270,7 +270,24 @@ curl '/git/credential?host=github.com'    # → HTTP 200
 404 の本文は `no git credential held for host "github.com"` で、**「host が違う」
 ようにしか読めない**（実際は slot 違い）。multi-owner を使うなら
 **inject 側も `--owner` を必ず明示する**のが正しい運用。
-`whoami` で active slot を確認してから切り分けること。
+
+**2026-07-31 対処済**: `herdr-drover memvault status` / `whoami` がこの状態を
+検出して stderr に警告を出すようにした（stdout の JSON は素のまま）。
+
+```
+⚠ slot ズレ: active_slot="alice" は材料が空だが default slot に git がある。
+  参照側 (/aws/creds /gcp/* /git/credential) は --owner 省略時に active slot を見るので、
+  この状態では材料があるのに 404 / 503 になる（404 本文は host 違いに見える）。
+  対処: inject を --owner alice でやり直す、または `herdr-drover memvault release` で default slot に戻す。
+```
+
+判定を書くときに踏んだ**二次の trap**: `claim` は slot を materialize しない。
+memvault の slot は `slotForOwner` の lazy 生成で、`inject` か参照が来た時点で
+初めて生える。よって **claim 直後の `/status` は `slots={"":{…}}` のままで
+`alice` のキーが無い**（実測）。この不在を「判定不能」として黙る実装にすると、
+**最も普通の踏み方でちょうど警告が出ない**。生成直後の slot は必ず空なので、
+`slots` オブジェクトがある応答での**エントリ不在は「空」で確定**とする。
+「本当に判定不能」なのは `slots` 自体が無い応答（multi-owner 前の daemon）だけ。
 
 ### (b) split-socket でも legacy socket が `$HOME` に作られる
 
@@ -288,24 +305,36 @@ ctrl/use 分離の意図が達成されない。分離したいなら `--socket`
 検証目的で daemon を立てるときは **`--socket` を省略すると本番運用中の
 `$HOME/.memvault.sock` を奪う**ので必ず明示すること。
 
-### (c) `herdr-drover memvault status` は daemon の top-level 5 キーを捨てている
+### (c) `herdr-drover memvault status` が daemon の top-level 5 キーを捨てていた
 
-`memvaultclient.Status` の struct にフィールドが無いキーが JSON デコードで
-落ちる。実測の差分（daemon が返すが drover が出さない）:
+**2026-07-31 修正済**。`memvaultclient.Status` の struct にフィールドが無いキーが
+JSON デコードで落ちていた。実測の差分（daemon が返すが drover が出さなかった）:
 
 ```
 git_hosts / git_loaded / github_app_loaded / kind_ttl_remain_sec / routes
 ```
 
-**GitHub 連携の状態（`git_loaded` / `github_app_loaded`）と kind ごとの残 TTL が
-top-level に出ない**＝`herdr-drover memvault status` だけでは「GitHub 材料が
-入っているか」「あと何分で切れるか」が分からない。`slots[""]` 側には
-`git_loaded` / `git_hosts` / `github_app_loaded` / `kind_ttl_remain_sec` が
-出ているので**当面はそこを見る**（default slot 運用なら等価）。
+つまり **GitHub 連携の状態（`git_loaded` / `github_app_loaded`）と kind ごとの
+残 TTL が top-level に出ない**＝`herdr-drover memvault status` だけでは「GitHub
+材料が入っているか」「あと何分で切れるか」が分からなかった。**鉄則⑤（silent な
+skip 禁止）違反**。
 
-これは **鉄則⑤（silent な skip 禁止）に触れる**＝修正候補。直し方は
-`Status` struct に 5 フィールドを足すか、pretty-print を `map[string]any` の
-そのまま出力に変えるか。後者なら memvault が今後足すキーにも自動追随する。
+直し方は 2 案あった:
+
+| 案 | 評価 |
+|---|---|
+| `Status` struct に 5 フィールドを足す | ❌ 同じ穴が次の拡張で再発する（この 5 キーもそうやって漏れた） |
+| 表示を生の `map[string]any` にする | ✅ daemon が今後足すキーに自動追随 |
+
+採った形（構造的に再発しない側）:
+
+- `Status.Raw map[string]any` を追加し、`Status()` で **同じ body を 2 回
+  decode**（typed＋map）。1 往復のまま生の応答を失わない。
+- **表示は `Raw`／分岐は typed field** という規約を struct の doc comment に
+  明記（`internal/memvaultclient/client.go`）。
+- 回帰テスト `TestMemvaultStatusShowsEveryDaemonField` が実 daemon を起動し
+  「daemon が返したキーが 1 つでも出力に無ければ FAIL」を固定。旧コード
+  （typed struct 表示）では上記 5 キーで実際に FAIL することを確認済。
 
 ### (d) 検証で確認できた「資料どおり」の項目
 

@@ -879,10 +879,12 @@ TODO の out-of-scope 宣言どおりで、対応するなら移植作業が要�
 [4noha/memvault](https://github.com/4noha/memvault) の daemon が実体で、drover は
 **control plane の thin wrapper のみ**（inject 経路は意図的に持たない）。
 
-- ✅ **実装済み**（ブランチ `feat/memvault-integration`・main から 3 commit 先）:
-  `cmd/herdr-drover/memvault.go`（316 行）＋`internal/memvaultclient/client.go`（331 行）。
+- ✅ **実装済み**（ブランチ `feat/memvault-integration`）:
+  `cmd/herdr-drover/memvault.go`＋`internal/memvaultclient/client.go`
+  ＋`cmd/herdr-drover/memvault_status_test.go`（実 daemon e2e）。
   commit `0b264bc`（multi-owner control plane）→`78492c9`（job register/end）
-  →`c680504`（split-socket `$MEMVAULT_CTRL_SOCKET` / `$MEMVAULT_USE_SOCKET`）。
+  →`c680504`（split-socket `$MEMVAULT_CTRL_SOCKET` / `$MEMVAULT_USE_SOCKET`）
+  →`1b3febb`（設計・仕様資料）→ 実測で見つけた 2 件の修正。
 - ⏳ **未 merge**（main は v0.5.34 = `da25a20`）。**対外操作＝ユーザー明示確認後**。
 - ⏳ **pane env への `MEMVAULT_*` 自動注入は未実装**。現状は各人の `~/.zshenv` に
   `export MEMVAULT_SOCKET="$HOME/.memvault-<name>.sock"` を置く運用（memvault repo の
@@ -892,34 +894,45 @@ TODO の out-of-scope 宣言どおりで、対応するなら移植作業が要�
 - ⏳ 実機 e2e（AWS / GCP / GitHub の 3 系統を共用 slave で通す）は未記録。
 - ⚠ **slave の `/etc/sudoers.d/memvault-runner` が `NOPASSWD: ALL` のまま**
   ＝必要最小の whitelist へ戻す（放置すると共用機で無制限 sudo が残る）。
-- ⚠ memvault 側に **`git_loaded` / `git_hosts` / `github_app_loaded` を `/status` に
-  出す未コミット差分**がある（`~/works/tools/memvault`・branch
-  `feat/multi-owner-retention`）。commit+push 待ち。それ以前の daemon では
-  `herdr-drover memvault status` にこの 3 項目が出ない。
-- ⚠ memvault の README にも **`git` / `github_app` kind の記載が無い**
-  （commit `61cccde` で実装だけ入った）。上流側の docs 追記が残っている。
+**2026-07-31 の実測で判明した 3 件**（隔離した実 daemon で全経路を通した。詳細と
+再現手順は [DESIGN_MEMVAULT.md](DESIGN_MEMVAULT.md) §5.4）:
 
-**2026-07-31 の実測で判明した要修正 3 件**（隔離した実 daemon で全経路を通した。
-詳細と再現手順は [DESIGN_MEMVAULT.md](DESIGN_MEMVAULT.md) §5.4）:
+1. ✅ **修正済**: `memvault status` が daemon の top-level 5 キーを silent に
+   捨てていた（`git_loaded` / `git_hosts` / `github_app_loaded` /
+   `kind_ttl_remain_sec` / `routes`）＝鉄則⑤違反。**GitHub 材料の有無と残 TTL が
+   top-level に出ていなかった**。`Status.Raw`（同じ body を 2 回 decode）を足し、
+   **表示は Raw／分岐は typed field** の規約を struct doc に明記。struct に 5
+   フィールド足す案は「次の拡張で同じ穴が空く」ので採らなかった。
+2. ✅ **緩和済**: `active_operator` が居ると inject 先と参照先の slot がズレる
+   （memvault 側の仕様）。`inject` は `--owner` 省略で default slot、参照側は
+   active operator の slot を見る＝**404 が「host 違い」に見えて実は slot 違い**。
+   `status` / `whoami` が検出して stderr に警告を出すようにした（stdout の JSON は
+   素のまま）。⚠ **判定を書くときに二次の trap を踏んだ**: `claim` は slot を
+   materialize しない（memvault の slot は lazy 生成）ので claim 直後の `/status`
+   に active slot のキーは無い。この不在を「判定不能」扱いにすると**最も普通の
+   踏み方でちょうど警告が出ない**。エントリ不在は「空」で確定（生成直後の slot は
+   必ず空）、`slots` オブジェクト自体が無い応答だけが判定不能。
+   なお運用としては multi-owner なら **inject にも `--owner` を明示**が正。
+3. ⚠ **未修正（上流の docs 事項）**: split-socket でも `--socket` 省略時は legacy
+   socket が `$HOME` に作られ全 endpoint を受ける（deprecation ログは出る）＝
+   ctrl/use 分離の意図が達成されない。**検証で daemon を立てるときは `--socket` を
+   必ず別パスへ明示**（省略すると本番運用中の `$HOME/.memvault.sock` を奪う。
+   実際に踏んだ）。memvault README の config reference に `--ctrl-socket` /
+   `--use-socket` の記載が無いこと自体も未了。
 
-1. 🔧 **`memvault status` が daemon の top-level 5 キーを silent に捨てている**
-   （`git_loaded` / `git_hosts` / `github_app_loaded` / `kind_ttl_remain_sec` /
-   `routes`）＝**鉄則⑤違反**。`memvaultclient.Status` struct にフィールドが無い
-   キーが JSON デコードで落ちる。**GitHub 材料の有無と残 TTL が top-level に
-   出ない**。直し方は (a) struct に 5 フィールド追加 (b) pretty-print を
-   `map[string]any` のそのまま出力に変更（後者は memvault が今後足すキーにも
-   自動追随＝こちらが本命）。当面は `slots[""]` 側を見れば同じ情報が取れる。
-2. ⚠ **`active_operator` が居ると inject 先と参照先の slot がズレる**（memvault
-   側の仕様）。`inject` は `--owner` 省略で default slot、参照側は active
-   operator の slot を見る＝**404 が「host 違い」に見えて実は slot 違い**。
-   multi-owner を使うなら **inject にも `--owner` を必ず明示する**運用にする。
-   drover 側で `status` に警告を出す余地あり（default slot に材料があるのに
-   active operator の slot が空、という状態を検出できる）。
-3. ⚠ **split-socket でも `--socket` 省略時は legacy socket が `$HOME` に作られ
-   全 endpoint を受ける**（deprecation ログは出る）＝ctrl/use 分離の意図が
-   達成されない。**検証で daemon を立てるときは `--socket` を必ず別パスへ明示**
-   （省略すると本番運用中の `$HOME/.memvault.sock` を奪う）。上流の運用ドキュメント
-   に書くべき事項。
+**回帰テスト**（実 memvault daemon を起動。`memvault` が PATH に無い環境では
+Skip、`MEMVAULT_TEST_BIN` で上書き可）:
+`cmd/herdr-drover/memvault_status_test.go`。①②とも**修正前のコードで実際に
+FAIL することを確認済**（鉄則②）。daemon は `--socket`/`--ctrl-socket`/
+`--use-socket` すべて `/tmp` 配下へ明示（上記 3 の事故防止＋`sun_path` 104B）、
+停止は自分が spawn した PID のみ。
+
+**memvault 側（`~/works/tools/memvault`・branch `feat/multi-owner-retention`）**:
+
+- ✅ `/status` top-level に `git_loaded` / `git_hosts` / `github_app_loaded` を
+  出す差分を commit。
+- ✅ README に `git` / `github_app` kind の行と `--ctrl-socket` / `--use-socket`
+  の記載（+ 上記 3 の trap）を追記。
 
 **実測で「資料どおり」を確認した項目**（回帰の基準線）: claim/release conflict=
 exit 3・usage=exit 2・socket 解決順（CTRL > legacy）とフォールバック・到達不能は

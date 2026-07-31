@@ -117,10 +117,53 @@ func memvaultStatus(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	// pretty-print
-	buf, _ := json.MarshalIndent(st, "", "  ")
+	// ⚠ Raw を出す（typed struct を出すと、struct が宣言していないフィールドを
+	// silent に落とす＝実際に git_loaded / github_app_loaded /
+	// kind_ttl_remain_sec / routes / git_hosts が消えていた）。鉄則⑤。
+	buf, err := json.MarshalIndent(st.Raw, "", "  ")
+	if err != nil {
+		return fmt.Errorf("format /status: %w", err)
+	}
 	fmt.Fprintln(stdout, string(buf))
+	// slot ズレ（inject 先と参照先が違う）を検出したら警告する。silent に
+	// 「材料が無い」ように見える事故を防ぐのが目的。
+	if warn := slotMismatchWarning(st); warn != "" {
+		fmt.Fprint(stderr, warn)
+	}
 	return nil
+}
+
+// slotMismatchWarning は「active operator の slot は空だが default slot に材料が
+// ある」状態を検出して警告文を返す（無ければ空文字）。
+//
+// なぜ要るか: memvault の `inject` は --owner 省略で default slot("") に入るが、
+// 参照側（/git/credential・/aws/creds・/gcp/*）は --owner 省略時に **active
+// operator の slot** を見る。よって claim した状態で --owner 無しに inject
+// すると、材料はあるのに参照は 404 になる。しかも 404 の本文は
+// `no git credential held for host "github.com"` で、host 違いにしか読めない。
+//
+// 判定は exact（どちらの slot の *_loaded を見ているかが確定している場合だけ
+// 警告する）。/status に slot オブジェクトが無い＝判定不能なら黙る（鉄則③）。
+func slotMismatchWarning(st *memvaultclient.Status) string {
+	if st == nil || st.ActiveSlot == "" {
+		return "" // default slot を見ている＝ズレようがない
+	}
+	activeKinds, activeOK := st.SlotLoadedKinds(st.ActiveSlot)
+	defaultKinds, defaultOK := st.SlotLoadedKinds("")
+	if !activeOK || !defaultOK {
+		return "" // 判定不能＝推測しない
+	}
+	if len(activeKinds) > 0 || len(defaultKinds) == 0 {
+		return "" // active に材料がある／default も空＝ズレていない
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "\n⚠ slot ズレ: active_slot=%q は材料が空だが default slot に %s がある。\n",
+		st.ActiveSlot, strings.Join(defaultKinds, ", "))
+	b.WriteString("  参照側 (/aws/creds /gcp/* /git/credential) は --owner 省略時に active slot を見るので、\n")
+	b.WriteString("  この状態では材料があるのに 404 / 503 になる（404 本文は host 違いに見える）。\n")
+	fmt.Fprintf(&b, "  対処: inject を --owner %s でやり直す、または `herdr-drover memvault release` で default slot に戻す。\n",
+		st.ActiveSlot)
+	return b.String()
 }
 
 func memvaultWhoami(args []string, stdout, stderr io.Writer) error {
@@ -138,10 +181,20 @@ func memvaultWhoami(args []string, stdout, stderr io.Writer) error {
 	}
 	if w.ActiveOperator == "" {
 		fmt.Fprintln(stdout, "active_operator=(none) → default slot only")
-	} else if w.InheritInPlace {
+		return nil
+	}
+	if w.InheritInPlace {
 		fmt.Fprintf(stdout, "active_operator=%s (inheriting slot %q)\n", w.ActiveOperator, w.ActiveSlot)
 	} else {
 		fmt.Fprintf(stdout, "active_operator=%s\n", w.ActiveOperator)
+	}
+	// whoami は「今どの slot を見ているか」を答えるコマンドなので、その slot が
+	// 空で default に材料がある状態（＝参照が 404 になる）は必ず告げる。
+	// /status を 1 回だけ追加で引く。取れなければ黙る（whoami 自体は成功させる）。
+	if st, err := c.Status(); err == nil {
+		if warn := slotMismatchWarning(st); warn != "" {
+			fmt.Fprint(stderr, warn)
+		}
 	}
 	return nil
 }
