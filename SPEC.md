@@ -75,6 +75,63 @@ Firestore サーバは Cloud Run に 1 回デプロイして全 PC で共有す�
 | `ssh-forward` | `<pc> [label]` | owner の ssh-agent を slave へ relay 越しに一時転送 | [非依存] |
 | `attach` | `<pc> <sid>` | ↗窓 の viewer client（reconcile が注入 pane 内で起動する内部コマンド） | [非依存] |
 
+### 2.3b 共用 slave の認証（memvault control plane）
+
+| サブコマンド | 引数 | 説明 | 結合度 |
+|---|---|---|---|
+| `memvault status` | なし | memvault `/status` を pretty-print（kind ごとの残 TTL・slot 一覧） | [非依存] |
+| `memvault whoami` | なし | active operator と実効 slot（inherit 込み） | [非依存] |
+| `memvault claim` | `--operator NAME` `--force` `--inherit --token T` | 自分を active operator に | [非依存] |
+| `memvault release` | `--operator NAME` `--force` | active を降りる | [非依存] |
+| `memvault issue-inherit-token` | `--owner NAME` `--for OP` `--ttl 8h` | 自 slot を他人に貸す consent を発行 | [非依存] |
+| `memvault job register` | `--owner NAME` `--job-id ID` `--ttl 4h` | 長時間 job の寿命宣言（slot 延命） | [非依存] |
+| `memvault job end` | `--owner NAME` `--job-id ID` | job 登録の解除（**冪等**） | [非依存] |
+
+設計と AWS/GCP/GitHub の材料・消費経路は **[DESIGN_MEMVAULT.md](DESIGN_MEMVAULT.md)**
+が正。ここは drover 側のインターフェース契約のみを定める。
+
+**exit code は §2 の一般規則を 1 つ拡張する**:
+
+| code | 意味 |
+|---|---|
+| 0 | 成功 |
+| 1 | 実行時エラー（daemon 不在・socket 到達不能・HTTP 5xx 等） |
+| 2 | 使い方エラー（未知サブコマンド・必須引数欠落） |
+| **3** | **claim / release の conflict**（HTTP 409） |
+
+3 を分けるのは、自動化から「他人が active（＝奪うか待つかの判断が要る）」と
+「daemon が落ちている（＝復旧が要る）」を区別させるため。conflict 時は daemon が
+返した JSON を **stderr にそのまま出す**（誰が active かを人が読める）。
+
+**socket 解決の権威順**（用途で使う socket が違う＝split-socket 対応）:
+
+| 用途 | 順序 |
+|---|---|
+| control plane（上表の全サブコマンド） | `$MEMVAULT_CTRL_SOCKET` → `$MEMVAULT_SOCKET` → `$HOME/.memvault.sock` |
+| use plane（drover は未使用・client のみ保持） | `$MEMVAULT_USE_SOCKET` → `$MEMVAULT_SOCKET` → `$HOME/.memvault.sock` |
+
+いずれも legacy `$MEMVAULT_SOCKET` に落ちる＝単一 socket 運用の daemon が無改造で
+動く。全部空なら「memvault が無い」として **loud に失敗**する（推測しない）。
+
+**operator 名の決定順**: `--operator` → `$MEMVAULT_OPERATOR` → `$USER`。
+3 つ全部空なら**エラー**（鉄則③＝推測で operator を決めない）。
+`job register` / `job end` の `--owner` は空を許す（＝default slot＝従来の
+1-tenant ケース）が、明示されなければ claim/release と同じ順序を使う
+（**同じコマンド列で対象 slot がブレないようにする**）。
+
+**`--job-id` 省略時は `$HERDR_PANE_ID`**（drover が既に持つ pane 単位の識別子を
+再利用＝新しい ID 体系を足さない）。両方空ならエラー。
+
+**inject 系の入口は持たない（意図的）**。raw material を送る経路は各 operator の
+laptop からの SSH tunnel が担当する。理由は DESIGN_MEMVAULT.md §6.1。
+
+⚠ **既知の逸脱（2026-07-31 実測・要修正）**: `memvault status` は daemon が返す
+top-level の `git_loaded` / `git_hosts` / `github_app_loaded` /
+`kind_ttl_remain_sec` / `routes` を **silent に捨てている**（`Status` struct に
+フィールドが無いキーが JSON デコードで落ちる）＝**鉄則⑤に反する**。
+本仕様としては「`/status` の応答は欠落なく提示する」が正。当面は `slots[""]`
+側に同じ情報が出る。詳細は [DESIGN_MEMVAULT.md](DESIGN_MEMVAULT.md) §5.4(c)。
+
 ### 2.4 `restart-agent-session` の詳細仕様
 
 **目的**: claude バイナリを入れ替えても exec 済みプロセスは旧 inode に貼り付く

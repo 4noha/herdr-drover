@@ -871,6 +871,62 @@ TODO の out-of-scope 宣言どおりで、対応するなら移植作業が要�
     update の Windows 経路はテスト未整備**。常駐化は `scripts/windows/install-task.ps1`
     へ移した（install.go の Windows 移植は未了＝当面この PowerShell が正）。
 
+### A0. memvault 連携（共用 slave の AWS/GCP/GitHub 認証） — 未 merge
+
+**設計・仕様資料は新設済み＝[DESIGN_MEMVAULT.md](DESIGN_MEMVAULT.md)**（材料の
+入れ方・消費経路・脅威モデル・SSH 転送との使い分け）／CLI 契約は
+[SPEC.md](SPEC.md) §2.3b。外部プロダクト
+[4noha/memvault](https://github.com/4noha/memvault) の daemon が実体で、drover は
+**control plane の thin wrapper のみ**（inject 経路は意図的に持たない）。
+
+- ✅ **実装済み**（ブランチ `feat/memvault-integration`・main から 3 commit 先）:
+  `cmd/herdr-drover/memvault.go`（316 行）＋`internal/memvaultclient/client.go`（331 行）。
+  commit `0b264bc`（multi-owner control plane）→`78492c9`（job register/end）
+  →`c680504`（split-socket `$MEMVAULT_CTRL_SOCKET` / `$MEMVAULT_USE_SOCKET`）。
+- ⏳ **未 merge**（main は v0.5.34 = `da25a20`）。**対外操作＝ユーザー明示確認後**。
+- ⏳ **pane env への `MEMVAULT_*` 自動注入は未実装**。現状は各人の `~/.zshenv` に
+  `export MEMVAULT_SOCKET="$HOME/.memvault-<name>.sock"` を置く運用（memvault repo の
+  `tools/gh-mv` がこの形を要求。`.zshenv` は非対話 shell も読む＝エージェント
+  session から `gh` が使える）。**drover が注入するには「この pane の operator は
+  誰か」を決める設計判断が要る**＝未着手。
+- ⏳ 実機 e2e（AWS / GCP / GitHub の 3 系統を共用 slave で通す）は未記録。
+- ⚠ **slave の `/etc/sudoers.d/memvault-runner` が `NOPASSWD: ALL` のまま**
+  ＝必要最小の whitelist へ戻す（放置すると共用機で無制限 sudo が残る）。
+- ⚠ memvault 側に **`git_loaded` / `git_hosts` / `github_app_loaded` を `/status` に
+  出す未コミット差分**がある（`~/works/tools/memvault`・branch
+  `feat/multi-owner-retention`）。commit+push 待ち。それ以前の daemon では
+  `herdr-drover memvault status` にこの 3 項目が出ない。
+- ⚠ memvault の README にも **`git` / `github_app` kind の記載が無い**
+  （commit `61cccde` で実装だけ入った）。上流側の docs 追記が残っている。
+
+**2026-07-31 の実測で判明した要修正 3 件**（隔離した実 daemon で全経路を通した。
+詳細と再現手順は [DESIGN_MEMVAULT.md](DESIGN_MEMVAULT.md) §5.4）:
+
+1. 🔧 **`memvault status` が daemon の top-level 5 キーを silent に捨てている**
+   （`git_loaded` / `git_hosts` / `github_app_loaded` / `kind_ttl_remain_sec` /
+   `routes`）＝**鉄則⑤違反**。`memvaultclient.Status` struct にフィールドが無い
+   キーが JSON デコードで落ちる。**GitHub 材料の有無と残 TTL が top-level に
+   出ない**。直し方は (a) struct に 5 フィールド追加 (b) pretty-print を
+   `map[string]any` のそのまま出力に変更（後者は memvault が今後足すキーにも
+   自動追随＝こちらが本命）。当面は `slots[""]` 側を見れば同じ情報が取れる。
+2. ⚠ **`active_operator` が居ると inject 先と参照先の slot がズレる**（memvault
+   側の仕様）。`inject` は `--owner` 省略で default slot、参照側は active
+   operator の slot を見る＝**404 が「host 違い」に見えて実は slot 違い**。
+   multi-owner を使うなら **inject にも `--owner` を必ず明示する**運用にする。
+   drover 側で `status` に警告を出す余地あり（default slot に材料があるのに
+   active operator の slot が空、という状態を検出できる）。
+3. ⚠ **split-socket でも `--socket` 省略時は legacy socket が `$HOME` に作られ
+   全 endpoint を受ける**（deprecation ログは出る）＝ctrl/use 分離の意図が
+   達成されない。**検証で daemon を立てるときは `--socket` を必ず別パスへ明示**
+   （省略すると本番運用中の `$HOME/.memvault.sock` を奪う）。上流の運用ドキュメント
+   に書くべき事項。
+
+**実測で「資料どおり」を確認した項目**（回帰の基準線）: claim/release conflict=
+exit 3・usage=exit 2・socket 解決順（CTRL > legacy）とフォールバック・到達不能は
+loud に exit 1・`--job-id` 省略で `$HERDR_PANE_ID`・`job end` 冪等・job-id 決定
+不能はエラー・git host の両方向小文字化と exact-match・未知 host は 404・
+metadata の 403（ヘッダ無し）/503（未 inject）/応答 `Metadata-Flavor: Google`。
+
 ### A. SSH エージェント転送 — Phase 3（実機 e2e）保留中
 
 共用 slave 上で owner の SSH 鍵を**ディスクに置かず**一時的に git/gh 認証する

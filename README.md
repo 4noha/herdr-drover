@@ -383,6 +383,43 @@ SSH_AUTH_SOCK=~/.herdr-drover/agent-fwd/afwd-repoA.sock git clone git@github.com
   `internal/agentfwd` の多重化 mux（1 relay セッション上で複数 SSH agent 接続）。
 - ⚠ owner・slave 双方が本機能を持つビルド（>= v0.5.0）である必要がある。
 
+### memvault（共用 slave の AWS / GCP / GitHub 認証）
+
+共用 slave で AWS / GCP / GitHub の認証を **秘密材をディスクに置かず**行う。実体は
+外部プロダクト [4noha/memvault](https://github.com/4noha/memvault) の daemon で、
+raw material（SA 鍵 JSON・SSO refresh token・PAT・GitHub App 秘密鍵）は operator の
+laptop から SSH 越しに daemon の stdin へ流し込み、**slave のディスクには一度も
+落ちない**。ワークロードが受け取るのは外向きに使える短命トークンだけ。
+
+drover が提供するのは **control plane の thin wrapper**（複数人が 1 daemon を
+共用する multi-owner モードの operator 切替・job 寿命宣言）:
+
+```sh
+herdr-drover memvault status                 # kind ごとの残 TTL・slot 一覧
+herdr-drover memvault whoami                 # 今 active な operator は誰か
+herdr-drover memvault claim                  # 自分を active に（既定 $USER）
+herdr-drover memvault release                # 降りる
+herdr-drover memvault issue-inherit-token --owner me --for you --ttl 8h
+
+# 長時間 job（docker build / terraform apply）の寿命を宣言して slot を延命
+herdr-drover memvault job register --ttl 4h  # job-id 既定は $HERDR_PANE_ID
+herdr-drover memvault job end                # 冪等
+```
+
+- **消費側は memvault が直接受ける**（drover は通らない）: AWS は
+  `~/.aws/config` の `credential_process`＝SDK 全部（boto3 / terraform / cdk / CLI）、
+  GCP は `GCE_METADATA_HOST` に立てた GCE metadata impersonator＝ADC 準拠ツール
+  全部（gcloud / gsutil / bq / terraform-google / google-cloud-*）、GitHub は
+  git-credential helper（`gh` は memvault repo の `tools/gh-mv` wrapper）。
+- **inject 経路は drover に持たせない（意図的）**。raw material は operator の
+  laptop から出さない設計契約を drover が破らないため。
+- exit code は **3 = claim/release の conflict**（他 operator が active）を
+  1（daemon 不在等）と区別する＝自動化から「奪うか待つか」を判断できる。
+- 設計・脅威モデル・SSH 転送との使い分けは
+  **[DESIGN_MEMVAULT.md](DESIGN_MEMVAULT.md)**。CLI 契約は [SPEC.md](SPEC.md) §2.3b。
+- ⚠ memvault は **「協力的なチームの事故を防ぐ」道具**で、敵対的な同席者からは
+  守れない（socket mode 0600 が唯一の認可境界＝同 UID は全 endpoint を呼べる）。
+
 ### 複数クラウド（端末ごとにマルチ Google アカウント）
 
 1 台の PC が **複数の独立したクラウド**（別 Google アカウント＝別 GCP

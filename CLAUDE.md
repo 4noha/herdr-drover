@@ -17,7 +17,12 @@ cwd 自動 attach／新 Tab 起動を提供する。Python 版 claude-master(cm)
   **別エージェント導入時は `internal/agentid/spec.go` に Spec を足すだけ**
   （BinNames は herdr の lookup_agent 表の要素にすること＝ValidateSpecs が検証）
 - 機能別設計: [DESIGN_SLAVE.md](DESIGN_SLAVE.md)＋[DESIGN_SLAVE_SPEC.md](DESIGN_SLAVE_SPEC.md)
-  （共用 PC）／[DESIGN_SSH_FORWARD.md](DESIGN_SSH_FORWARD.md)（SSH 転送）
+  （共用 PC）／[DESIGN_SSH_FORWARD.md](DESIGN_SSH_FORWARD.md)（SSH 転送）／
+  **[DESIGN_MEMVAULT.md](DESIGN_MEMVAULT.md)（共用 slave の AWS/GCP/GitHub 認証＝
+  外部プロダクト [4noha/memvault](https://github.com/4noha/memvault) 連携）**。
+  drover が持つのは **control plane だけ**（claim/release/status/whoami/job）で、
+  **inject 経路は意図的に持たない**（raw material は operator laptop から出さない）。
+  CLI 契約の正は SPEC.md §2.3b
 - **再開時はまず TODO.md を読む**（in-flight タスク・残課題・デプロイ手順の正）
 
 ## アーキテクチャ（要点）
