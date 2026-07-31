@@ -541,8 +541,45 @@ core dump 経由の漏洩（`RLIMIT_CORE=0`）。
   協力的な少人数を分ける」ためのもの。
 
 ⚠ したがって **memvault は「協力的なチームの事故を防ぐ」道具**であり、
-「敵対的な同席者から守る」道具ではない。後者が要件なら per-UID 隔離
-（`reference_macos_per_uid_daemon` の方向）かハードウェア鍵に行く。
+「敵対的な同席者から守る」道具ではない。
+
+### 8.1 per-UID 隔離の実効範囲（2026-08-01 実測）
+
+daemon を専用アカウント（`_shared_noaki` UID/GID 401・home `/Users/_shared_noaki`
+mode 700・shell `/usr/bin/false`・`AuthenticationAuthority` 無し＝ログイン不可）で
+動かす形を slave-1 / slave-2 の 2 台で運用中。**効く範囲と効かない範囲を実測で
+確定させたので、「per-UID にしたから敵対的同席者にも耐える」とは書かないこと**。
+
+**効く（kernel authz）**: UNIX socket は mode 0600＋親ディレクトリ 700 で、
+共用ログインからの `connect(2)` は EACCES（errno 13）。実測:
+
+```
+$ ls -la /Users/_shared_noaki/.memvault.sock
+ls: /Users/_shared_noaki/.memvault.sock: Permission denied
+```
+
+**効かない (1) — TCP 面に UID 認可が無い**: proxy（9010）と metadata（9011）は
+`127.0.0.1` に bind するだけで、**呼び出し元 UID を一切見ない**。実測で
+`nobody` からでも応答する。materials が実際に出ていくのはこの経路なので、
+per-UID 化は**漏洩経路そのものには触れていない**。metadata 側の唯一の門は
+`Metadata-Flavor: Google` ヘッダで、memvault 自身のコメントが
+"a weak defence" と書いている（ヘッダ無し=403・未 inject=503 は実測どおり）。
+
+**効かない (2) — sudo で迂回できる**: 共用ログインは 2 台とも
+`admin` グループに属する。slave-1 はさらに `/etc/sudoers.d/memvault-runner` が
+`NOPASSWD: ALL` なので、**このログインを使える人は誰でも**
+`sudo -n -u _shared_noaki memvault status` で 0600 境界を越えられる。slave-2 は
+NOPASSWD を作らなかったが、共用パスワードを知っていれば同じことができる。
+＝**共用ログインの上では per-UID 隔離は構造的に有効でない**。
+
+したがって per-UID で実際に得られているのは「敵対的同席者への耐性」ではなく
+**事故の抑止**（他人の socket を素で掴めない・`ls` で他人の材料の存在が見えない・
+プロセス所有者で監査できる）である。敵対的同席者が要件なら**ログイン自体を
+分ける**（per-UID の daemon ではなく per-UID の**ログイン**）かハードウェア鍵。
+
+なお per-UID 化は consumer を全部連れて行かないと**認証が全断する**
+（socket が 0700 home に移るため）。その修復＝memvault
+`tools/memvault-git-credential`（TODO.md §A0 の 2026-08-01 節）。
 
 ## 9. multi-owner モデルの要点（drover が叩く相手の状態機械）
 
@@ -562,13 +599,25 @@ core dump 経由の漏洩（`RLIMIT_CORE=0`）。
 - ✅ drover 側 CLI・client 実装（`memvault.go` 316 行 / `memvaultclient/client.go` 331 行）
   ＝ブランチ `feat/memvault-integration`（commit `0b264bc` / `78492c9` / `c680504`）。
 - ⏳ **未 merge**（`main` は `v0.5.34` = `da25a20`。feat は main から 3 commit 先）。
-- ⏳ **pane env への `MEMVAULT_*` 自動注入は未実装**。現状は各人の `~/.zshenv`
-  に `export MEMVAULT_SOCKET=...` を置く運用（`gh-mv` が要求する形）。drover が
-  pane 生成時に注入する余地はあるが、**socket 名 = 個人名なので「この pane の
-  operator は誰か」を drover が決める必要があり、設計判断が残っている**。
-- ⏳ 実機 e2e（AWS / GCP / GitHub の 3 系統を共用 slave 上で通す）は未記録。
-- ⚠ **slave の `/etc/sudoers.d/memvault-runner` が `NOPASSWD: ALL` のまま**
+- ⏳ **pane env への `MEMVAULT_*` 自動注入は未実装**。現状は各人が**自分の
+  セッションで** `export MEMVAULT_SOCKET=...` する運用。⚠ **`~/.zshenv` には
+  書かない**＝共用ログインでは全員のシェルに読まれるので、他人のシェルに自分の
+  vault を押し込む（自分の名前でコミットしつつ他人のトークンで push する状態）。
+  `.zshenv` に置くのは PATH だけ。drover が pane 生成時に注入する余地はあるが、
+  **socket 名 = 個人名なので「この pane の operator は誰か」を drover が決める
+  必要があり、設計判断が残っている**。
+- ⏳ 実機 e2e（AWS / GCP / GitHub の 3 系統を共用 slave 上で通す）は未記録
+  （材料の実 inject はユーザー判断で今回スコープ外＝両 slave の daemon は
+  全 kind `*_loaded: false`）。
+- ⚠ **slave-1 の `/etc/sudoers.d/memvault-runner` が `NOPASSWD: ALL` のまま**
   ＝要件に絞った whitelist へ戻す作業が残っている（TODO.md 側で追跡）。
+  **slave-2 には作っていない**（対話 sudo のみ）。
+- ⚠ **`~/bin/ai-agent` は per-UID を知らない**。`ai-agent status` は socket と
+  port を共用 UID から stat/lsof して判定するので、per-UID daemon を
+  **`down` と誤報する**（slave-1 実測: noaki が `MEMVAULT down / PROXY down`
+  なのに daemon は `state = running` / pid 24081）。`ai-agent` は slave 上に
+  しか無く（drover も memvault も管理していない）＝どこで版管理するかの
+  判断ごと未了。
 
 ## 参照
 

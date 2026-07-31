@@ -886,16 +886,27 @@ TODO の out-of-scope 宣言どおりで、対応するなら移植作業が要�
   →`c680504`（split-socket `$MEMVAULT_CTRL_SOCKET` / `$MEMVAULT_USE_SOCKET`）
   →`1b3febb`（設計・仕様資料）→ 実測で見つけた 2 件の修正。
 - ⏳ **未 merge**（main は v0.5.34 = `da25a20`）。**対外操作＝ユーザー明示確認後**。
-- ⏳ **pane env への `MEMVAULT_*` 自動注入は未実装**。現状は各人の `~/.zshenv` に
-  `export MEMVAULT_SOCKET="$HOME/.memvault-<name>.sock"` を置く運用（memvault repo の
-  `tools/gh-mv` がこの形を要求。`.zshenv` は非対話 shell も読む＝エージェント
-  session から `gh` が使える）。⚠ **`tools/gh-mv` は
-  `origin/feat/gh-mv-tool`（`5890285`）にしか無い**＝`feat/multi-owner-retention`
-  だけを入れた slave では `gh` 経路が成立しない。**drover が注入するには「この pane の operator は
-  誰か」を決める設計判断が要る**＝未着手。
+- ⏳ **pane env への `MEMVAULT_*` 自動注入は未実装**。現状は各人が**自分の
+  セッションで** `export MEMVAULT_SOCKET=...` する運用。⚠ **`~/.zshenv` には
+  書かない**（共用ログインなので全員のシェルに読まれる＝他人のシェルに自分の
+  vault の socket を押し込むことになり、「自分の名前でコミットしつつ他人の
+  トークンで push」が起きる）。`.zshenv` に入れるのは PATH だけ＝両 slave で
+  `~/.local/bin` と `~/bin` を通す形に統一済（2026-08-01。slave-2 は
+  `.zshenv` 自体が無く、非対話 shell に PATH が届いていなかった）。
+  **drover が注入するには「この pane の operator は誰か」を決める設計判断が要る**
+  ＝未着手。
+- ✅ **`tools/gh-mv` は `feat/multi-owner-retention` に取り込み済**（2026-08-01・
+  commit `7b414c8`。以前は `origin/feat/gh-mv-tool` にしか無かった）。
+  同時に `tools/memvault-git-credential` を新設＝**per-UID デプロイでの
+  git/gh 認証の全断を修正**（下記）。
 - ⏳ 実機 e2e（AWS / GCP / GitHub の 3 系統を共用 slave で通す）は未記録。
-- ⚠ **slave の `/etc/sudoers.d/memvault-runner` が `NOPASSWD: ALL` のまま**
+  材料を実際に inject する検証は**ユーザー判断で今回スコープ外**（両 slave の
+  daemon はいま全 kind `*_loaded: false`）。
+- ⚠ **slave-1 の `/etc/sudoers.d/memvault-runner` が `NOPASSWD: ALL` のまま**
   ＝必要最小の whitelist へ戻す（放置すると共用機で無制限 sudo が残る）。
+  **slave-2 には作らなかった**（2026-08-01・ユーザー了承済）＝slave-2 の
+  制御プレーンは対話 sudo のみ。`memvault-git-credential` の昇格も
+  `sudo -n` が通らなければ loud に失敗する（必要な narrow ルールを提示）。
 **2026-07-31 の実測で判明した 3 件**（隔離した実 daemon で全経路を通した。詳細と
 再現手順は [DESIGN_MEMVAULT.md](DESIGN_MEMVAULT.md) §5.4）:
 
@@ -964,6 +975,52 @@ FAIL することを確認済**（鉄則②）。daemon は `--socket`/`--ctrl-s
 - ⚠ `gofmt -l` が 8 ファイルを挙げるが**すべて HEAD 時点で既に未整形**
   （`jobEnd` の `writeJSON` map の alignment 等）＝無関係な整形は commit しない
   （鉄則⑤）。
+
+**2026-08-01: per-UID デプロイの consumer 全断を修正**（memvault commit `7b414c8`）。
+slave-1 を per-UID（daemon を専用アカウント `_shared_noaki` UID 401 で動かし
+socket をその 0700 home に置く）へ移した際、**共用ログインからの git/gh 認証が
+全て失敗していた**のを実再現して修正:
+
+```
+$ printf 'protocol=https\nhost=github.com\n\n' | git credential fill
+fatal: could not read Password for 'https://x-access-token@github.com': Device not configured
+```
+
+socket が `connect(2)` で EACCES になるのは kernel authz が効いている**正しい**
+状態＝壊れていたのは consumer 側で、原因は 2 つだった。
+
+1. `~/.gitconfig` の helper が socket パスをハードコード＝移行で死んだパスを
+   叩き続ける。credential helper は stderr しか説明手段が無いので git 側には
+   上記の無内容なメッセージしか出ない。
+2. `tools/gh-mv` が到達不能を `[ ! -S "$MEMVAULT_SOCKET" ]` だけで判定し
+   「memvault daemon not running?」と報告＝この test は **socket が無いときと
+   親ディレクトリが探索不可（EACCES）なときの両方で false** になるので、
+   正常稼働している daemon を再起動させに行かせる誤診断。さらに未設定時の
+   ヒントが**同僚の socket だけを候補として列挙**していた（slave-1 実測で
+   `/Users/p-ad-share0001/.memvault-suzuki-toshifusa.sock` の 1 件）。
+
+対処＝`tools/memvault-git-credential` を新設し、socket 解決／到達判定／
+per-UID の昇格をそこに一元化。`gh-mv` も `.zshrc` の `gh()` もこれに委譲する
+（git と gh が別の vault を掴む余地を構造的に消す）。
+
+- socket は env（`MEMVAULT_USE_SOCKET` → `MEMVAULT_SOCKET`）由来にし、
+  **推測はしない**＝共用ログインでは同僚の vault も同一 UID から connect
+  できるため、自動選択は他人のトークンで push することになる。未設定はエラー。
+- 到達不能なら「存在しない」ではなく**探索不可な祖先ディレクトリを特定して
+  所有者を割り出し**、`sudo -n -u <owner>` が通る場合だけ昇格して
+  `/usr/local/bin/memvault` を叩く。通らなければ必要な narrow sudo ルールを提示。
+- 診断順を **socket → binary** に入れ替え（per-UID ホストでは memvault が
+  `/usr/local/bin` にしか無い＝このログインの PATH 外。先に「binary not found」
+  と言うと既にある binary を入れに行かせる）。
+- `.zshrc` の `gh()` は**失敗時に黙って無認証 `gh` へ落ちていた**（鉄則⑤違反）
+  ＝per-UID では毎回無認証になっていた。`gh-mv` へ委譲し理由を stderr に出す形へ。
+
+回帰テストは実 zsh でスクリプトを起動する Go テスト（`go test ./...` に載る）
+＝`tools/ghmv_test.go`・`tools/gitcredential_test.go`。per-UID は mode 000 の
+ディレクトリで代替（path walk の EACCES は同一で、第 2 アカウントと違い権限不要）。
+**修正前のコードで 7/7 FAIL することを確認済**（鉄則②）。実機 slave-1 でも
+per-UID 経路の開通を確認（sudo 昇格 → daemon が `no credential for host` と正答）、
+suzuki の同一 UID 経路にも回帰なし。
 
 **実測で「資料どおり」を確認した項目**（回帰の基準線）: claim/release conflict=
 exit 3・usage=exit 2・socket 解決順（CTRL > legacy）とフォールバック・到達不能は
