@@ -213,7 +213,7 @@ echo '{"github.com":"github_pat_...","gitlab.com":"glpat-..."}' \
   変更させない（トークン寿命は vault が単独で所有する）。404 時は stderr に
   「inject git kind first」を出し、git は次の helper／プロンプトへ落ちる。
 
-### 5.2 kind `github_app` — App installation token を鍵から都度発行
+### 5.2 kind `github_app` — ⚠ **inject までしか繋がっていない（未完）**
 
 ```json
 {"app_id":"123456","installation_id":"78901234",
@@ -221,17 +221,40 @@ echo '{"github.com":"github_pat_...","gitlab.com":"glpat-..."}' \
 ```
 
 RSA 秘密鍵は inject 時に 1 度だけパースされ、**vault メモリから出ない**。
-そこから installation access token（`ghs_*`）を発行してキャッシュする。
-`installation_id` が「どの repo 群に対して動けるか」を決めるので、同一 App の
-複数 installation は複数回 inject する。
+`GitHubAppStore` は installation access token（`ghs_*`）を発行してキャッシュする
+機能を持つ。
 
-PAT より **App が望ましい**: 権限が repo 単位で絞れ、token 自体が短命で、
-発行元の鍵を失効させれば全 token が死ぬ。
+⚠ **だが 2026-07-31 時点でその発行経路はどの endpoint からも呼ばれていない**。
+`/git/credential` は `slot.git`（kind `git`）だけを見るので、**`github_app` を
+inject しても git 認証は通らない**。実測:
+
+```
+memvault inject github_app          # → {"ok":true,"kind":"github_app"}
+curl '/git/credential?host=github.com'
+                                    # → HTTP 404 no git credential held
+memvault status                     # → github_app_loaded=true, git_loaded=false
+```
+
+`daemon.go` 内で `sl.ghapp` を触るのは inject / wipe / `Loaded()`（status 用）
+だけ＝**token を作る側の呼び出しが無い**。したがって現状 GitHub 認証は
+**kind `git`（§5.1）だけが実働**で、`github_app` は「材料は保持できるが使えない」
+状態。`status` に `github_app_loaded: true` が出ても**認証が通る保証にならない**
+（これが罠。`git_loaded` の方を見る）。
+
+将来これを繋げば PAT より **App の方が望ましい**: 権限が repo 単位で絞れ、token
+自体が短命で、発行元の鍵を失効させれば全 token が死ぬ。
 
 ### 5.3 `gh` CLI
 
 `gh` は git-credential helper を見ないので wrapper を使う（memvault repo の
-`tools/gh-mv`）。要点:
+`tools/gh-mv`）。
+
+⚠ **`tools/gh-mv` は別ブランチ `origin/feat/gh-mv-tool`（commit `5890285`）に
+しか無い**。`origin/main` にも、drover が相手にしている
+`feat/multi-owner-retention` にも**入っていない**（実測）。使うにはその
+ブランチから持ってくるか、cherry-pick が必要。
+
+要点:
 
 - `git-credential get` で毎回トークンを取り、**`GH_TOKEN` env として gh の子
   プロセスにだけ渡す**。**OS keychain には保存しない**（vault の TTL モデルを保つ）。
@@ -242,9 +265,9 @@ PAT より **App が望ましい**: 権限が repo 単位で絞れ、token 自�
   `export MEMVAULT_SOCKET="$HOME/.memvault-<your-name>.sock"` を置く運用
   （`.zshenv` は非対話 shell も読む）。
 
-⚠ **`git_loaded` / `git_hosts` / `github_app_loaded` は `/status` に出るように
-なったばかり**（memvault 側の未コミット差分）。それ以前の daemon では
-`herdr-drover memvault status` の出力にこの 3 つが現れない。
+⚠ **`git_loaded` / `git_hosts` / `github_app_loaded` は `/status` の top-level に
+出るようになったばかり**（memvault 側 `feat/multi-owner-retention`）。それ以前の
+daemon ではこの 3 つが top-level に無い（`slots[""]` 側には出る）。
 
 ## 5.4 ⚠ 実測 trap（2026-07-31・隔離した実 daemon で確認）
 
@@ -305,6 +328,11 @@ ctrl/use 分離の意図が達成されない。分離したいなら `--socket`
 検証目的で daemon を立てるときは **`--socket` を省略すると本番運用中の
 `$HOME/.memvault.sock` を奪う**ので必ず明示すること。
 
+**2026-07-31 対処**: 挙動そのものは single-socket 互換のため据え置き（変えると
+既存 slave の `.zshenv` 運用が全部壊れる）。代わりに memvault README に
+「#### Split-socket mode」節を新設し、この catch-all 挙動と「本番 socket を
+奪い得る」ことを明記した（commit `8dec677`）。
+
 ### (c) `herdr-drover memvault status` が daemon の top-level 5 キーを捨てていた
 
 **2026-07-31 修正済**。`memvaultclient.Status` の struct にフィールドが無いキーが
@@ -336,7 +364,61 @@ skip 禁止）違反**。
   「daemon が返したキーが 1 つでも出力に無ければ FAIL」を固定。旧コード
   （typed struct 表示）では上記 5 キーで実際に FAIL することを確認済。
 
-### (d) 検証で確認できた「資料どおり」の項目
+### (d) 同梱 CLI が daemon 自身の split-socket env を読んでいなかった
+
+**2026-07-31 memvault 側で修正**（commit `8dec677`）。(b) の続きで見つけたもの。
+daemon は split-socket 起動時に `$MEMVAULT_CTRL_SOCKET` / `$MEMVAULT_USE_SOCKET`
+を announce するのに、**同梱 `memvault` CLI 側は `$MEMVAULT_SOCKET` 一本しか
+見ていなかった**＝split-socket で起動した daemon に対して**全 11 サブコマンドが
+legacy path を叩き続ける**。legacy socket が無い構成では即死、ある構成では
+catch-all に落ちて (b) の分離が完全に無意味化する。
+
+`platform.CtrlSocketPath()` / `UseSocketPath()` を追加し、plane ごとに
+再ルーティング（use-plane = `gcp-id-token` / `git-credential` / `aws-creds`、
+残り 8 つが control-plane）。**plane 間の相互 fallback はしない**——誤った plane
+へ落ちると (e) の 404 になるだけで、silent に間違った結果になる。
+
+drover 側は最初から `internal/memvaultclient` が CTRL を優先していたので影響なし
+（§5.4(g) の実測表で確認済）。
+
+### (e) 誤った plane を叩いた 404 が「材料が無い」と誤診断される
+
+**2026-07-31 memvault 側で修正**（commit `8dec677`）。404 には 2 種類ある:
+
+| 出どころ | 本文 | 意味 |
+|---|---|---|
+| handler の `writeErr` | JSON（`{"error":…}`） | endpoint はある。「その host の材料を持っていない」 |
+| net/http の mux | `404 page not found`（text/plain） | **この socket にその endpoint が無い** |
+
+これを区別せず、後者にも「inject git kind first」と出していた＝**既に入っている
+材料を再 inject しに行かされる**。use-plane の呼び出しが ctrl socket に着地する
+のは split-socket 移行中に普通に起きる。`isUnknownEndpoint()`（404 かつ本文が
+`{` で始まらない）で判別し、wrong-plane であることと正しい env 名を告げるように
+した。
+
+### (f) inherit token が一意でなかった（既存 flaky test の真因）
+
+**2026-07-31 memvault 側で修正**（commit `8dec677`）。`./...` で
+`TestInheritTokenTampered` が落ちたので**自分の変更のせいだと決めつけず**
+bisect した結果、**HEAD で 30 回中 3 回 FAIL** する既存 flaky だった。真因は
+テストではなく本体:
+
+`base64.RawURLEncoding` は**末尾の未使用ビットを無視して decode する**。payload の
+長さが 3 mod 4 だと最終文字は 2 bit しか意味を持たないので、**4 通りのうち 3 通りが
+同一に decode する**。実測（200k 回 brute-force で捕獲）:
+
+```
+...MTU  → alice|bob|1785482415
+...MTX  → alice|bob|1785482415   ← 別の token 文字列が同じ grant として検証を通る
+```
+
+署名検証は通るので**認可としては壊れていない**が、**token 文字列が 1 つの grant の
+一意な名前でなくなる**＝revocation list / replay cache / audit の dedup が
+「同じ grant の別表記」を取りこぼす。`base64.RawURLEncoding.Strict()` へ変更
+（非正規パディングを拒否）。テスト側も「最終文字だけ叩く」確率的な形をやめ、
+**両 segment の全 index を決定的に sweep** する形に書き換え。修正後 flaky 0/30。
+
+### (g) 検証で確認できた「資料どおり」の項目
 
 | 主張 | 実測 |
 |---|---|

@@ -889,7 +889,9 @@ TODO の out-of-scope 宣言どおりで、対応するなら移植作業が要�
 - ⏳ **pane env への `MEMVAULT_*` 自動注入は未実装**。現状は各人の `~/.zshenv` に
   `export MEMVAULT_SOCKET="$HOME/.memvault-<name>.sock"` を置く運用（memvault repo の
   `tools/gh-mv` がこの形を要求。`.zshenv` は非対話 shell も読む＝エージェント
-  session から `gh` が使える）。**drover が注入するには「この pane の operator は
+  session から `gh` が使える）。⚠ **`tools/gh-mv` は
+  `origin/feat/gh-mv-tool`（`5890285`）にしか無い**＝`feat/multi-owner-retention`
+  だけを入れた slave では `gh` 経路が成立しない。**drover が注入するには「この pane の operator は
   誰か」を決める設計判断が要る**＝未着手。
 - ⏳ 実機 e2e（AWS / GCP / GitHub の 3 系統を共用 slave で通す）は未記録。
 - ⚠ **slave の `/etc/sudoers.d/memvault-runner` が `NOPASSWD: ALL` のまま**
@@ -913,12 +915,13 @@ TODO の out-of-scope 宣言どおりで、対応するなら移植作業が要�
    踏み方でちょうど警告が出ない**。エントリ不在は「空」で確定（生成直後の slot は
    必ず空）、`slots` オブジェクト自体が無い応答だけが判定不能。
    なお運用としては multi-owner なら **inject にも `--owner` を明示**が正。
-3. ⚠ **未修正（上流の docs 事項）**: split-socket でも `--socket` 省略時は legacy
-   socket が `$HOME` に作られ全 endpoint を受ける（deprecation ログは出る）＝
-   ctrl/use 分離の意図が達成されない。**検証で daemon を立てるときは `--socket` を
-   必ず別パスへ明示**（省略すると本番運用中の `$HOME/.memvault.sock` を奪う。
-   実際に踏んだ）。memvault README の config reference に `--ctrl-socket` /
-   `--use-socket` の記載が無いこと自体も未了。
+3. ✅ **文書化済（挙動は意図的に据え置き）**: split-socket でも `--socket` 省略時は
+   legacy socket が `$HOME` に作られ全 endpoint を受ける（deprecation ログは出る）
+   ＝ctrl/use 分離の意図が達成されない。single-socket 互換のため挙動は変えず、
+   memvault README に「#### Split-socket mode」節を新設して明記した。
+   **検証で daemon を立てるときは `--socket` を必ず別パスへ明示**（省略すると
+   本番運用中の `$HOME/.memvault.sock` を奪う。実際に踏んだ）。README の config
+   reference にも `--ctrl-socket` / `--use-socket` を追記済。
 
 **回帰テスト**（実 memvault daemon を起動。`memvault` が PATH に無い環境では
 Skip、`MEMVAULT_TEST_BIN` で上書き可）:
@@ -927,12 +930,40 @@ FAIL することを確認済**（鉄則②）。daemon は `--socket`/`--ctrl-s
 `--use-socket` すべて `/tmp` 配下へ明示（上記 3 の事故防止＋`sun_path` 104B）、
 停止は自分が spawn した PID のみ。
 
-**memvault 側（`~/works/tools/memvault`・branch `feat/multi-owner-retention`）**:
+**memvault 側（`~/works/tools/memvault`・branch `feat/multi-owner-retention`）**
+＝commit `8dec677`。drover の資料を書くために実経路を通した副産物として、
+**memvault 本体のバグ 2 件＋既存 flaky test 1 件**が出た:
 
 - ✅ `/status` top-level に `git_loaded` / `git_hosts` / `github_app_loaded` を
-  出す差分を commit。
-- ✅ README に `git` / `github_app` kind の行と `--ctrl-socket` / `--use-socket`
-  の記載（+ 上記 3 の trap）を追記。
+  出す差分を commit（drover 側 ① の daemon 側の対）。
+- ✅ **同梱 CLI が daemon 自身の split-socket env を読んでいなかった**。daemon は
+  `$MEMVAULT_CTRL_SOCKET` / `$MEMVAULT_USE_SOCKET` を announce しているのに、
+  client 側は `$MEMVAULT_SOCKET` 一本しか見ていない＝split-socket で起動した
+  daemon には**全 11 サブコマンドが届かない**（legacy socket が無い構成では即死、
+  ある構成では catch-all に落ちて分離が無意味化）。`platform.CtrlSocketPath()` /
+  `UseSocketPath()` を追加し plane ごとに再ルーティング（plane 間の相互
+  fallback はしない）。
+- ✅ **誤った plane を叩いた 404 が「材料が無い」と誤診断されていた**。handler の
+  `writeErr` は JSON 本文、net/http mux の未登録は `404 page not found`（text/plain）
+  ＝区別可能。区別せず「inject git kind first」と出していたので、既に入っている
+  材料を再 inject しに行かされる。`isUnknownEndpoint()` で判別し wrong-plane と
+  正しい env 名を告げる。
+- ✅ **inherit token が一意でなかった**（既存 flaky test の真因）。
+  `base64.RawURLEncoding` は末尾の未使用ビットを無視するため、3-mod-4 の payload
+  では最終文字 4 通りのうち **3 通りが同一に decode**（実測: `...MTU` と `...MTX`
+  がともに `alice|bob|1785482415`）。token 文字列が 1 つの grant の一意な名前に
+  ならず revocation list / replay cache / audit の dedup が壊れる。`.Strict()`
+  へ変更。`TestInheritTokenTampered` は最終文字のみ叩く旧版が **HEAD で 3/30
+  FAIL**（私の変更前から）＝両 segment の全 index を決定的に sweep する形へ。
+- ✅ README に `git` / `github_app` kind の行と `--ctrl-socket` / `--use-socket`、
+  「Split-socket mode」節（上記 3 の trap 込み）を追記。
+- ✅ 実 daemon e2e を新設（`internal/client/client_test.go`・
+  `internal/platform/socket_test.go`）。2 件のバグとも**修正前のコードで FAIL
+  することを確認済**（鉄則②。`git stash` は新シンボルごと消えてビルド失敗＝
+  何も証明しないので、挙動だけを surgical に戻して確認した）。
+- ⚠ `gofmt -l` が 8 ファイルを挙げるが**すべて HEAD 時点で既に未整形**
+  （`jobEnd` の `writeJSON` map の alignment 等）＝無関係な整形は commit しない
+  （鉄則⑤）。
 
 **実測で「資料どおり」を確認した項目**（回帰の基準線）: claim/release conflict=
 exit 3・usage=exit 2・socket 解決順（CTRL > legacy）とフォールバック・到達不能は
