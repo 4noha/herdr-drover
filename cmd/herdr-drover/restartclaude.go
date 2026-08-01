@@ -446,7 +446,12 @@ func restartOneClaudePane(api *herdrapi.Client, t restartTarget, opt restartOpti
 			t.TabID, leaf.PaneID, t.PaneID)
 	}
 	if len(leaf.Command) == 0 {
-		return "skip", "pane に launch argv が無い（shell pane＝claude を直接起動していない）"
+		// ⚠**種別を固定文字列で書かない**。ここは "claude" 決め打ちで、opencode の
+		// pane を skip したときに「claude を直接起動していない」と**利用者に嘘を
+		// 表示していた**（実測 2026-08-01）。同種の事故が `update-agent-cli` の
+		// 「更新口を持つのは claude のみ」でもあった＝メッセージに種別名を焼かない。
+		return "skip", fmt.Sprintf(
+			"pane に launch argv が無い（shell pane＝%s を直接起動していない）", t.AgentKind)
 	}
 	// identity が決まっていても、argv が**そのエージェント本体の直接起動**で
 	// なければ触らない。例: `zsh -lc '… claude'` は末尾に --resume を足しても

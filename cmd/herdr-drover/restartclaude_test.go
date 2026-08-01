@@ -833,3 +833,52 @@ func reportTestSession(t *testing.T, api *herdrapi.Client, pane, agent, ref stri
 		t.Fatalf("report_agent_session(%s): %v", pane, err)
 	}
 }
+
+// TestRestartSkipMessageUsesActualAgentKind は **skip 理由に種別名を焼き込まない**
+// ことを固定する（2026-08-01 の実バグ）。
+//
+// `len(leaf.Command)==0`（shell から起動された pane）の skip 理由が "claude" 固定で、
+// **opencode の pane を skip したときに「claude を直接起動していない」と利用者に嘘を
+// 表示していた**。同種の事故が `update-agent-cli` の「更新口を持つのは claude のみ」
+// でもあり、どちらも「メッセージに種別名を焼く」ことが原因。
+//
+// 旧コード（固定文字列）ではこのテストは FAIL する。
+func TestRestartSkipMessageUsesActualAgentKind(t *testing.T) {
+	sock := startHerdrForTest(t)
+	api := herdrapi.New(sock)
+
+	// launch argv を持たない pane（＝workspace の root pane は shell）を用意し、
+	// そこに opencode の identity を報告する＝実運用の「shell から起動した」形。
+	ws, err := api.WorkspaceCreate()
+	if err != nil {
+		t.Fatalf("workspace.create: %v", err)
+	}
+	pane := ws.RootPane.PaneID
+	if err := api.ReportAgent(pane, "test-native", "opencode", "idle"); err != nil {
+		t.Fatalf("report_agent: %v", err)
+	}
+	if err := api.ReportAgentSession(pane, "herdr:opencode", "opencode",
+		"ses_0453f4bacffeVovPPMlEdXPNTj"); err != nil {
+		t.Fatalf("report_agent_session: %v", err)
+	}
+	waitCond(t, 15*time.Second, "opencode identity が反映", func() bool {
+		p, e := api.PaneGet(pane)
+		return e == nil && p != nil && p.Agent == "opencode" && p.AgentSession.Value != ""
+	})
+
+	var log bytes.Buffer
+	results, err := restartClaudePanes(api, restartOptions{SID: pane, Agent: "opencode"}, &log)
+	if err != nil {
+		t.Fatalf("restartClaudePanes: %v", err)
+	}
+	if len(results) != 1 || results[0].Status != "skip" {
+		t.Fatalf("results = %+v（launch argv 無しは skip のはず）", results)
+	}
+	d := results[0].Detail
+	if !strings.Contains(d, "opencode") {
+		t.Errorf("skip 理由に実際の種別名が出ていない: %q", d)
+	}
+	if strings.Contains(d, "claude") {
+		t.Errorf("skip 理由に claude が焼き込まれている（別種別なのに嘘を表示する）: %q", d)
+	}
+}
