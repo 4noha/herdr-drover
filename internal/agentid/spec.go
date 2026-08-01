@@ -79,8 +79,11 @@ var resumeSpecs = map[string]ResumeSpec{
 	// argv[0] が agent 名と違う唯一の例。
 	"cursor": {Supported: true, Flag: "--resume", Form: FormSpace, Argv0: "cursor-agent", Kinds: []string{"id"}},
 	// `<bin> --session <v>`
-	"kimi":     {Supported: true, Flag: "--session", Form: FormSpace, Kinds: []string{"id"}},
-	"opencode": {Supported: true, Flag: "--session", Form: FormSpace, Kinds: []string{"id"}},
+	"kimi": {Supported: true, Flag: "--session", Form: FormSpace, Kinds: []string{"id"}},
+	// opencode は `-s, --session <id>`（実測 1.18.10）。⚠`-c, --continue` は「直前の
+	// セッション」で **id を取らない**別物なので alias に入れない（入れると値のある
+	// --session を落とし損ねる／付け直しで意味が変わる）。
+	"opencode": {Supported: true, Flag: "--session", Aliases: []string{"-s"}, Form: FormSpace, Kinds: []string{"id"}},
 	"kilo":     {Supported: true, Flag: "--session", Form: FormSpace, Kinds: []string{"id"}},
 	"pi":       {Supported: true, Flag: "--session", Form: FormSpace, Kinds: []string{"id", "path"}},
 	// `<bin> --thread <v>`
@@ -131,6 +134,13 @@ var updaterSpecs = map[string]UpdaterSpec{
 	// DL 規模は claude の ~250MB とは桁違いに小さい（実測の版チェックは数秒）が、
 	// 遅回線を見込んで他と同じ上限に揃える。
 	"copilot": {VersionArgv: []string{"--version"}, UpdateArgv: []string{"update"}, Timeout: 15 * time.Minute},
+	// opencode: `opencode upgrade`（--help "upgrade opencode to the latest or a
+	// specific version"）。**導入経路を自分で検知する**のが devin との決定的な違いで、
+	// 実測（1.18.10・brew 導入）では `Using method: brew` と自己申告し、最新なら
+	// `upgrade skipped: 1.18.10 is already installed` で **非対話 rc=0 完走**した。
+	// ＝brew 管理と食い違わないので自己更新を載せてよい。
+	// 版の出力は素の "1.18.10"（製品名を含まない）。
+	"opencode": {VersionArgv: []string{"--version"}, UpdateArgv: []string{"upgrade"}, Timeout: 15 * time.Minute},
 	// devin: **`UpdateArgv` を意図的に nil にする**（＝自己更新の口なし・再起動のみ）。
 	// `devin update` サブコマンド自体は存在するが（--help "Check for updates and
 	// optionally install them"）、**非対話では完走しない**ことを実測した
@@ -191,6 +201,11 @@ var installSpecs = map[string]InstallSpec{
 	// copilot のみ**なので候補もそれだけに絞る（cursor で `agent` を外したのと同じ理由
 	// ＝未確認の名前を候補に混ぜると別物を掴みうる）。
 	"copilot": {BinNames: []string{"copilot"}},
+	// opencode: `brew install anomalyco/tap/opencode`（公式 tap・要 ripgrep）が
+	// `opencode` を PATH に置く（実測 /opt/homebrew/bin/opencode → Cellar への symlink）。
+	// 公式は curl インストーラと `npm i -g opencode-ai` も提供する。
+	// alias 表の open-code は**実行ファイル名としては未確認**なので載せない。
+	"opencode": {BinNames: []string{"opencode"}},
 	// devin: `brew install --cask devin-cli` が `devin` を PATH に置く
 	// （実測 /opt/homebrew/bin/devin。公式は curl インストーラも提供）。
 	// alias 表の devin-cli は**実行ファイル名としては未確認**なので載せない。
@@ -222,6 +237,9 @@ var modelSpecs = map[string]ModelSpec{
 	// copilot: `--model <model>`（"use 'auto' to let Copilot pick automatically"）。
 	// 短縮形なし（実測 1.0.75）。
 	"copilot": {Flag: "--model"},
+	// opencode: `-m, --model <provider/model>`（実測 1.18.10。値は "provider/model" 形＝
+	// 他エージェントと語彙がまったく違う good example）。短縮形 -m あり。
+	"opencode": {Flag: "--model", Aliases: []string{"-m"}},
 	// devin: `--model <MODEL>`（例 "claude-sonnet-4" / "opus" / "codex"・env DEVIN_MODEL）。
 	// 短縮形なし（実測 3000.2.17）。⚠値の語彙は agent 固有＝claude の `opus` と
 	// 文字列が被っていても**同じ意味とは限らない**（型 doc の警告どおり種別を跨がない）。

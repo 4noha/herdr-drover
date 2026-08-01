@@ -379,18 +379,40 @@ organize / producer が共有）。権威は強い順に:
 | 自己更新 | `copilot update` ✅ 非対話で完走 | ❌ **非対話で完走しない**（rc=130）＝Spec に載せない |
 | `--model` | ✅（短縮形なし） | ✅（短縮形なし・env `DEVIN_MODEL`） |
 
-#### 「resume 後の hook 再発火」の一覧（2026-07-26 に cursor を計測して確定）
+#### 「resume 後の hook 再発火」の一覧（2026-08-01 に opencode を追加して確定）
 
-| claude | codex | cursor | copilot | devin |
-|---|---|---|---|---|
-| ✅ する | ❌ しない | ❌ しない | ❌ しない | ✅ する |
+| claude | codex | cursor | copilot | devin | opencode |
+|---|---|---|---|---|---|
+| ✅ する | ❌ しない | ❌ しない | ❌ しない | ✅ する | ❌ しない |
 
-⚠ **再発火しないのが多数派（5 種中 3 種）**。❌ の種別は 1 回目の restart で
+⚠ **再発火しないのが多数派（6 種中 4 種）**。❌ の種別は 1 回目の restart で
 `agent_session` が消えるため、**同じ pane を 2 回目に restart すると素起動になる**
 （会話が失われる）。herdr / 各エージェント側の性質で drover では埋められない。
 運用は **`--dry-run` で `--resume <ref>` が組み立てられるか確認してから実行**する。
 cursor の計測は「restart → 画面に元の発話が復元されている（＝resume は成功）／
 `agent_session` は `None` に落ちる」を実 pane で確認した。
+
+#### opencode（2026-08-01 追加・会話 e2e まで実機検証済み）
+
+| 事項 | opencode 1.18.10 |
+|---|---|
+| 導入 | `brew install anomalyco/tap/opencode`（公式 tap・要 ripgrep）。curl / `npm i -g opencode-ai` も公式 |
+| 実行ファイル | `opencode` |
+| 版の出力 | 素の `1.18.10`（製品名を含まない） |
+| resume argv | `--session <id>`（`-s` 短縮形あり） |
+| **会話 ref の形** | ⚠**`ses_` + base62 風**（実測 `ses_0453f4bacffeVovPPMlEdXPNTj`） |
+| restart 実機（会話復元） | ✅（トークン数まで一致） |
+| resume 後の hook 再発火 | ❌ **しない** |
+| 自己更新 | `opencode upgrade` ✅ 非対話で完走 |
+| `--model` | ✅（`-m` あり・値は **`provider/model` 形**） |
+
+⚠ **`opencode upgrade` は導入経路を自分で検知する**（実測: brew 導入なら
+`Using method: brew` と自己申告し、最新なら `upgrade skipped` で rc=0）。devin と違い
+**brew 管理と食い違わない**ので自己更新を Spec に載せてよい。
+
+⚠ ResumeSpec の Aliases に **`-c, --continue` を入れてはいけない**。`--continue` は
+「直前のセッション」で **id を取らない別物**＝alias に入れると値のある `--session` を
+落とし損ねる。
 
 ⚠ **devin の会話 ref は UUID ではない**（`resolute-lynx`）。`ValidSessionRef` が
 「非空・512B 以下・制御文字なし」しか見ない設計だからそのまま通った。

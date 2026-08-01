@@ -47,7 +47,7 @@
 **「drover が argv を組み立て直す機能」**（resume / 更新 / モデル切替 / シムからの
 新規起動）で、これは `internal/agentid` の Spec を持つ種別だけが対象になる。
 
-### 実機で検証済み（5 種）
+### 実機で検証済み（6 種）
 
 | | 会話 resume | restart<br>-agent-session | update<br>-agent-cli | `--model` | シムから<br>新規起動 |
 |---|---|---|---|---|---|
@@ -56,6 +56,7 @@
 | **cursor** | `--resume <id>`<br>（実行名 `cursor-agent`） | ✅ | ✅ `cursor-agent update` | ✅ | ✅ |
 | **copilot** | `--resume=<id>`（`-r`） | ✅ | ✅ `copilot update` | ✅ | ✅ |
 | **devin** | `--resume <id>`（`-r`） | ✅ | ⚠ **版取得のみ** | ✅ | ✅ |
+| **opencode** | `--session <id>`（`-s`） | ✅ | ✅ `opencode upgrade` | ✅（`-m` も） | ✅ |
 
 ⚠ **devin の自己更新は意図的に載せていない。** `devin update` は存在するが
 **非対話で完走しない**（stdin を閉じると rc=130）うえ Homebrew cask 管理と食い違う。
@@ -64,24 +65,26 @@
 
 #### 実測した差（会話の再開まわり）
 
-| 事項 | claude | codex | cursor | copilot | devin |
-|---|---|---|---|---|---|
-| `agent_session` の発火契機 | 起動時 | 初回発話時 | 初回発話時<br>（要 trust 通過） | 初回発話時まで<br>には付与 | 初回発話時まで<br>には付与 |
-| 会話 ref の形 | uuid v4 | uuid v7 系 | uuid v4 | uuid v4 | **単語スラッグ**<br>（例 `resolute-lynx`） |
-| resume で会話復元 | ✅ | ✅ | ✅ | ✅ | ✅ |
-| resume 後の hook 再発火 | ✅ | ❌ | ❌ | ❌ | ✅ |
+| 事項 | claude | codex | cursor | copilot | devin | opencode |
+|---|---|---|---|---|---|---|
+| `agent_session` の発火契機 | 起動時 | 初回発話時 | 初回発話時<br>（要 trust 通過） | 初回発話時まで<br>には付与 | 初回発話時まで<br>には付与 | 初回発話時まで<br>には付与 |
+| 会話 ref の形 | uuid v4 | uuid v7 系 | uuid v4 | uuid v4 | **単語スラッグ**<br>（例 `resolute-lynx`） | **`ses_` + base62 風**<br>（例 `ses_0453f4ba…`） |
+| resume で会話復元 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| resume 後の hook 再発火 | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ |
 
-⚠ **再発火しないのが多数派（5 種中 3 種）**。「resume 後の hook 再発火」が ❌ の
+⚠ **再発火しないのが多数派（6 種中 4 種）**。「resume 後の hook 再発火」が ❌ の
 種別は、**同じ pane を 2 回目に restart すると素起動になる**（会話が失われる）。
 1 回目の restart で `agent_session` が消えるためで、herdr / 各エージェント側の性質
 ＝drover では埋められない。**`--dry-run` で `--resume <ref>` が出るか確認してから
 実行する**のが安全（ref が出なければ素起動になる）。
 
-⚠ **会話 ref は UUID とは限らない**（devin は単語スラッグ）。drover は値の書式で
-判定せず「非空・512B 以下・制御文字なし」しか見ない＝**書式ヒューリスティックを
-入れてはいけない**。
+⚠ **会話 ref は UUID とは限らない**。実測で **3 系統**ある: UUID（claude/cursor/
+copilot/codex）／**単語スラッグ**（devin `resolute-lynx`）／**`ses_` + base62 風**
+（opencode `ses_0453f4bacffeVovPPMlEdXPNTj`）。drover は値の書式で判定せず
+「非空・512B 以下・制御文字なし」しか見ない＝**書式ヒューリスティックを入れては
+いけない**（入れた瞬間に devin か opencode が resume 不能になる）。
 
-### Spec はあるが実機未検証（9 種）
+### Spec はあるが実機未検証（8 種）
 
 resume の argv 形だけ herdr のソースから写経してある。更新 / モデル切替 / シムからの
 新規起動は**推測で書かない方針**のため未対応（実 CLI を入れて実測すれば足せる）。
@@ -89,7 +92,7 @@ resume の argv 形だけ herdr のソースから写経してある。更新 / 
 | resume の形 | 該当 |
 |---|---|
 | `--resume <id>` | droid / hermes / qodercli |
-| `--session <id>` | kimi / opencode / kilo / pi（`path` kind も） |
+| `--session <id>` | kimi / kilo / pi（`path` kind も） |
 | `--thread <id>` | mastracode |
 | `--resume=<id>` | omp（`-r`・`path` kind も） |
 
@@ -110,8 +113,8 @@ resume の argv 形だけ herdr のソースから写経してある。更新 / 
   ならない（表に無い名前で起動すると herdr の検出に一切載らない）。`ValidateSpecs()`
   が起動時に静的検証する。
 - ⚠ **モデル名は種別ごとに互換でない**（claude=`opus` / codex=`gpt-5` /
-  cursor=`sonnet-4-thinking` / devin=`claude-sonnet-4`）。`--model` は `--agent` と
-  併用する。
+  cursor=`sonnet-4-thinking` / devin=`claude-sonnet-4` / **opencode=`provider/model` 形**）。
+  `--model` は `--agent` と併用する。
 
 ## 使い方
 
