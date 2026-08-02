@@ -1028,6 +1028,43 @@ loud に exit 1・`--job-id` 省略で `$HERDR_PANE_ID`・`job end` 冪等・job
 不能はエラー・git host の両方向小文字化と exact-match・未知 host は 404・
 metadata の 403（ヘッダ無し）/503（未 inject）/応答 `Metadata-Flavor: Google`。
 
+**2026-08-02: slave-2 も per-UID 化・2 台の版ズレ解消**。設計とレシピ・trap の
+正は [DESIGN_MEMVAULT.md](DESIGN_MEMVAULT.md) §8.2（ここは経緯と残件だけ）。
+
+- ✅ **ai-slave-2 (LPH77XYYC7 / 共用ログイン `p-ad-share0106`) を per-UID へ**。
+  アーキテクチャはユーザー判断で **slave-1 と同形**（監査の推奨は「per-UID に
+  しても共用ログインでは隔離が構造的に効かない＝ログインを分けるべき」だが、
+  実測した弱点を提示した上で同形が選ばれた）。**材料の inject は今回スコープ外**
+  （検証は 404/503 の形で行う）。結果: pid 41196 `_shared_noaki`・plist は
+  slave-1 と `plutil -p` diff 空・suzuki の pid 36571 無傷・`/etc/sudoers.d/`
+  空のまま。ログ `/tmp/mv-bootstrap2.log` が `BOOTSTRAP_DONE` で終了。
+  - sudo パスワードは**ユーザーが herdr pane に対話入力**（Tab
+    `↗mv-bootstrap slave-2` = `w1P:t7`）。⚠ `layout.apply` で作った pane は
+    **command が exit した時点で閉じる**（shell を挟んでいないため）ので、
+    結果はスクリプト側のログファイルから回収する前提で組む必要がある。
+  - スクリプトは slave-1 のものを流用しつつ **`NOPASSWD: ALL` を作らない**形へ
+    変更。他人の daemon を殺さないよう `OLD_PID=54913` / `KEEP_PID=36571` を
+    STEP_0 で検査（command line が `memvault serve … --proxy-port 9010` で
+    所有者が共用ログインでなければ `die`）。
+- ✅ **版ズレを解消**。slave-1 の daemon binary が `61cccde` 相当
+  （`e2e5bfe9…`）のままで、`/status` に `git_loaded` / `git_hosts` /
+  `github_app_loaded` が**無い**＝このブランチで直したバグ（`8dec677`）を
+  実機が踏んでいた。`94a4eccd…`（`7187e26`）へ更新し 5 キー全 PRESENT を確認
+  （`.bak` = `/usr/local/bin/memvault.bak.61cccde`。手順と注意は §8.2）。
+  restart は inherit token を全失効させるので、**両 daemon が全 kind
+  `*_loaded: false`＝失うものが無いことを確認してから**実行した。
+  更新後に 2 台で同一パスを測って応答が完全一致することを確認済
+  （以前 2 台で食い違って見えた metadata の 200/503 は、叩いたパスが
+  `/computeMetadata/v1/` と `…/service-accounts/default/token` で違っただけ＝機差なし）。
+- ⏳ **残件: slave-2 の use-plane が共用ログインから到達不能**。`git` / `gh` は
+  `memvault-git-credential` が理由を loud に出して落ちる（daemon は正常・
+  共用 UID から見えないだけ）。NOPASSWD を作らないという判断の直接の帰結。
+  narrow ルール（`_shared_noaki` として `/usr/local/bin/memvault git-credential`
+  のみ）を入れるか、対話 sudo を持つセッション限定で使うかの判断待ち。
+- ⏳ **残件: `~/bin/ai-agent` が per-UID daemon を `down` と誤報**（2 台とも）。
+  `ai-agent` は slave 上にしか無く drover も memvault も管理していない＝
+  版管理をどこに置くかの判断が先。
+
 ### A. SSH エージェント転送 — Phase 3（実機 e2e）保留中
 
 共用 slave 上で owner の SSH 鍵を**ディスクに置かず**一時的に git/gh 認証する

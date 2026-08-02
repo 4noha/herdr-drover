@@ -581,6 +581,61 @@ NOPASSWD を作らなかったが、共用パスワードを知っていれば�
 （socket が 0700 home に移るため）。その修復＝memvault
 `tools/memvault-git-credential`（TODO.md §A0 の 2026-08-01 節）。
 
+### 8.2 per-UID 構築のレシピと踏んだ trap（slave-1 / slave-2 実測）
+
+2 台とも同一の形（アカウント `_shared_noaki` UID/GID 401・plist
+`/Library/LaunchDaemons/com.4noha.memvault-noaki.plist` root:wheel 644 で
+`UserName` / `RunAtLoad` / `KeepAlive`）で稼働中。**2 台の plist は
+`plutil -p` の diff が空**＝差分は無い。
+
+| | ai-slave-1 (N9HTQCR6G0) | ai-slave-2 (LPH77XYYC7) |
+|---|---|---|
+| 共用ログイン | `p-ad-share0001` | `p-ad-share0106` |
+| daemon pid / owner | 96432 / `_shared_noaki` | 41196 / `_shared_noaki` |
+| daemon binary | `/usr/local/bin/memvault` `94a4eccd…` | 同一 sha |
+| `/etc/sudoers.d/memvault-runner` | ⚠ `NOPASSWD: ALL` | **無し**（意図的） |
+| 共用 UID からの use-plane | 通る（sudo 昇格が効く） | ⚠ **通らない** |
+| 他人の daemon | suzuki pid 12838（9020/9021） | suzuki pid 36571（9020/9021） |
+
+**構築で踏んだ trap 2 件**（どちらも launchd が `EX_CONFIG`(78) で即死し、
+理由をどこにも書かない形で出る）:
+
+1. **`StandardOutPath` / `StandardErrorPath` を `/var/log/` に置くと起動しない**。
+   `/var/log` は root:wheel 755＝daemon user（UID 401）が `open()` できない。
+   launchd はこれを exit 78 として報告するだけで、パスは何も言わない。
+   ⇒ **ログは daemon user の 700 home 配下に置く**。
+2. **binary を共用ログインの `$HOME/bin` に置くと起動しない**。共用 home は
+   `drwxr-x--- <share>:staff` で、UID 401 は `staff` に属さない＝同じく exit 78。
+   ⇒ **binary は `/usr/local/bin`**（結果として、共用ログインの PATH 外に
+   なる＝§A0 の「診断順を socket → binary に入れ替えた」理由でもある）。
+
+**port は勝手に取らない**。`~/bin/ai-agent` の契約が
+`PROXY_PORT=$((9000 + slot*10))` / `METADATA_PORT=$((9001 + slot*10))`
+＝noaki=slot 1（9010/9011）・suzuki=slot 2（9020/9021）・**slot 3（9030/9031）は予約**。
+
+**移行時の検証セット**（2 台で同一の結果になったもの。回帰の基準線）:
+
+```
+共用 UID から socket        -> connect: permission denied   （kernel authz が効いている）
+proxy   9010 /              -> 404  no route for path       （routes 未 inject。503 ではない）
+meta    9011 /computeMetadata/v1/                    -> 200 （応答本文 "computeMetadata/"）
+meta    9011 …/service-accounts/default/token        -> 503 （gcp 未 inject）
+meta    9011 ヘッダ無し                              -> 403
+他人の daemon pid           -> 変化なし
+```
+
+⚠ **proxy の未 inject は 404**（`503` ではない）。memvault の
+`proxy.go` は route 表を引いてから判定するので、材料が無い状態では
+「経路が無い」として 404 になる＝§5.4(e) の誤診断と同じ形。metadata 側だけが
+503 を返す。
+
+⚠ **slave-2 の use-plane は共用ログインから使えない**（`git` / `gh` は
+`memvault-git-credential` の「per-UID daemon が持っている・昇格できない」旨の
+説明で loud に落ちる）。NOPASSWD を作らないというユーザー判断の直接の帰結で、
+壊れているのではない。使うには helper が印字する narrow ルール
+（`_shared_noaki` として `/usr/local/bin/memvault git-credential` のみ）を
+入れるか、対話 sudo を持つセッションから使う。未了として §10 に置いた。
+
 ## 9. multi-owner モデルの要点（drover が叩く相手の状態機械）
 
 - **slot map** = default slot（owner `""`）+ owner ごとの slot。`--owner` 無しの
@@ -612,12 +667,25 @@ NOPASSWD を作らなかったが、共用パスワードを知っていれば�
 - ⚠ **slave-1 の `/etc/sudoers.d/memvault-runner` が `NOPASSWD: ALL` のまま**
   ＝要件に絞った whitelist へ戻す作業が残っている（TODO.md 側で追跡）。
   **slave-2 には作っていない**（対話 sudo のみ）。
+- ⏳ **slave-2 の use-plane が共用ログインから到達不能**（§8.2 末尾）。narrow
+  sudo ルールを入れるか「owner の対話セッションから使う」で確定させるかの
+  判断が残っている。**daemon 自体は正常**（共用 UID から見えないだけ）。
+- ✅ **2 台の daemon binary の版ズレを解消**（2026-08-02）。slave-1 は
+  `61cccde` 相当（`e2e5bfe9…`）のままで、`/status` に `git_loaded` /
+  `git_hosts` / `github_app_loaded` が**無い**＝まさに `8dec677` で直した
+  バグを踏んでいた。`94a4eccd…`（`7187e26`）へ更新して 5 キー全 PRESENT を確認。
+  手順は **`.bak` を取る → `rm`→`cp`（新 inode。上書き `cp` は macOS 署名
+  キャッシュで SIGKILL）→ `chown root:wheel` / `chmod 755` →
+  `launchctl kickstart -k system/com.4noha.memvault-noaki`**。
+  ⚠ **restart は発行済み inherit token を全部失効させる**（§9）ので、材料を
+  持っている daemon では事前に owner へ確認する。今回は 2 台とも
+  全 kind `*_loaded: false`＝失うものが無いことを確認してから実行した。
 - ⚠ **`~/bin/ai-agent` は per-UID を知らない**。`ai-agent status` は socket と
   port を共用 UID から stat/lsof して判定するので、per-UID daemon を
   **`down` と誤報する**（slave-1 実測: noaki が `MEMVAULT down / PROXY down`
-  なのに daemon は `state = running` / pid 24081）。`ai-agent` は slave 上に
-  しか無く（drover も memvault も管理していない）＝どこで版管理するかの
-  判断ごと未了。
+  なのに daemon は `state = running` / pid 24081）。**2 台とも同じ誤報**。
+  `ai-agent` は slave 上にしか無く（drover も memvault も管理していない）＝
+  どこで版管理するかの判断ごと未了。
 
 ## 参照
 
