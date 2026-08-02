@@ -893,6 +893,200 @@ TODO の out-of-scope 宣言どおりで、対応するなら移植作業が要�
     update の Windows 経路はテスト未整備**。常駐化は `scripts/windows/install-task.ps1`
     へ移した（install.go の Windows 移植は未了＝当面この PowerShell が正）。
 
+### A0. memvault 連携（共用 slave の AWS/GCP/GitHub 認証） — 未 merge
+
+**設計・仕様資料は新設済み＝[DESIGN_MEMVAULT.md](DESIGN_MEMVAULT.md)**（材料の
+入れ方・消費経路・脅威モデル・SSH 転送との使い分け）／CLI 契約は
+[SPEC.md](SPEC.md) §2.3b。外部プロダクト
+[4noha/memvault](https://github.com/4noha/memvault) の daemon が実体で、drover は
+**control plane の thin wrapper のみ**（inject 経路は意図的に持たない）。
+
+- ✅ **実装済み**（ブランチ `feat/memvault-integration`）:
+  `cmd/herdr-drover/memvault.go`＋`internal/memvaultclient/client.go`
+  ＋`cmd/herdr-drover/memvault_status_test.go`（実 daemon e2e）。
+  commit `0b264bc`（multi-owner control plane）→`78492c9`（job register/end）
+  →`c680504`（split-socket `$MEMVAULT_CTRL_SOCKET` / `$MEMVAULT_USE_SOCKET`）
+  →`1b3febb`（設計・仕様資料）→ 実測で見つけた 2 件の修正。
+- ⏳ **未 merge**（main は v0.5.34 = `da25a20`）。**対外操作＝ユーザー明示確認後**。
+- ⏳ **pane env への `MEMVAULT_*` 自動注入は未実装**。現状は各人が**自分の
+  セッションで** `export MEMVAULT_SOCKET=...` する運用。⚠ **`~/.zshenv` には
+  書かない**（共用ログインなので全員のシェルに読まれる＝他人のシェルに自分の
+  vault の socket を押し込むことになり、「自分の名前でコミットしつつ他人の
+  トークンで push」が起きる）。`.zshenv` に入れるのは PATH だけ＝両 slave で
+  `~/.local/bin` と `~/bin` を通す形に統一済（2026-08-01。slave-2 は
+  `.zshenv` 自体が無く、非対話 shell に PATH が届いていなかった）。
+  **drover が注入するには「この pane の operator は誰か」を決める設計判断が要る**
+  ＝未着手。
+- ✅ **`tools/gh-mv` は `feat/multi-owner-retention` に取り込み済**（2026-08-01・
+  commit `7b414c8`。以前は `origin/feat/gh-mv-tool` にしか無かった）。
+  同時に `tools/memvault-git-credential` を新設＝**per-UID デプロイでの
+  git/gh 認証の全断を修正**（下記）。
+- ⏳ 実機 e2e（AWS / GCP / GitHub の 3 系統を共用 slave で通す）は未記録。
+  材料を実際に inject する検証は**ユーザー判断で今回スコープ外**（両 slave の
+  daemon はいま全 kind `*_loaded: false`）。
+- ⚠ **slave-1 の `/etc/sudoers.d/memvault-runner` が `NOPASSWD: ALL` のまま**
+  ＝必要最小の whitelist へ戻す（放置すると共用機で無制限 sudo が残る）。
+  **slave-2 には作らなかった**（2026-08-01・ユーザー了承済）＝slave-2 の
+  制御プレーンは対話 sudo のみ。`memvault-git-credential` の昇格も
+  `sudo -n` が通らなければ loud に失敗する（必要な narrow ルールを提示）。
+**2026-07-31 の実測で判明した 3 件**（隔離した実 daemon で全経路を通した。詳細と
+再現手順は [DESIGN_MEMVAULT.md](DESIGN_MEMVAULT.md) §5.4）:
+
+1. ✅ **修正済**: `memvault status` が daemon の top-level 5 キーを silent に
+   捨てていた（`git_loaded` / `git_hosts` / `github_app_loaded` /
+   `kind_ttl_remain_sec` / `routes`）＝鉄則⑤違反。**GitHub 材料の有無と残 TTL が
+   top-level に出ていなかった**。`Status.Raw`（同じ body を 2 回 decode）を足し、
+   **表示は Raw／分岐は typed field** の規約を struct doc に明記。struct に 5
+   フィールド足す案は「次の拡張で同じ穴が空く」ので採らなかった。
+2. ✅ **緩和済**: `active_operator` が居ると inject 先と参照先の slot がズレる
+   （memvault 側の仕様）。`inject` は `--owner` 省略で default slot、参照側は
+   active operator の slot を見る＝**404 が「host 違い」に見えて実は slot 違い**。
+   `status` / `whoami` が検出して stderr に警告を出すようにした（stdout の JSON は
+   素のまま）。⚠ **判定を書くときに二次の trap を踏んだ**: `claim` は slot を
+   materialize しない（memvault の slot は lazy 生成）ので claim 直後の `/status`
+   に active slot のキーは無い。この不在を「判定不能」扱いにすると**最も普通の
+   踏み方でちょうど警告が出ない**。エントリ不在は「空」で確定（生成直後の slot は
+   必ず空）、`slots` オブジェクト自体が無い応答だけが判定不能。
+   なお運用としては multi-owner なら **inject にも `--owner` を明示**が正。
+3. ✅ **文書化済（挙動は意図的に据え置き）**: split-socket でも `--socket` 省略時は
+   legacy socket が `$HOME` に作られ全 endpoint を受ける（deprecation ログは出る）
+   ＝ctrl/use 分離の意図が達成されない。single-socket 互換のため挙動は変えず、
+   memvault README に「#### Split-socket mode」節を新設して明記した。
+   **検証で daemon を立てるときは `--socket` を必ず別パスへ明示**（省略すると
+   本番運用中の `$HOME/.memvault.sock` を奪う。実際に踏んだ）。README の config
+   reference にも `--ctrl-socket` / `--use-socket` を追記済。
+
+**回帰テスト**（実 memvault daemon を起動。`memvault` が PATH に無い環境では
+Skip、`MEMVAULT_TEST_BIN` で上書き可）:
+`cmd/herdr-drover/memvault_status_test.go`。①②とも**修正前のコードで実際に
+FAIL することを確認済**（鉄則②）。daemon は `--socket`/`--ctrl-socket`/
+`--use-socket` すべて `/tmp` 配下へ明示（上記 3 の事故防止＋`sun_path` 104B）、
+停止は自分が spawn した PID のみ。
+
+**memvault 側（`~/works/tools/memvault`・branch `feat/multi-owner-retention`）**
+＝commit `8dec677`。drover の資料を書くために実経路を通した副産物として、
+**memvault 本体のバグ 2 件＋既存 flaky test 1 件**が出た:
+
+- ✅ `/status` top-level に `git_loaded` / `git_hosts` / `github_app_loaded` を
+  出す差分を commit（drover 側 ① の daemon 側の対）。
+- ✅ **同梱 CLI が daemon 自身の split-socket env を読んでいなかった**。daemon は
+  `$MEMVAULT_CTRL_SOCKET` / `$MEMVAULT_USE_SOCKET` を announce しているのに、
+  client 側は `$MEMVAULT_SOCKET` 一本しか見ていない＝split-socket で起動した
+  daemon には**全 11 サブコマンドが届かない**（legacy socket が無い構成では即死、
+  ある構成では catch-all に落ちて分離が無意味化）。`platform.CtrlSocketPath()` /
+  `UseSocketPath()` を追加し plane ごとに再ルーティング（plane 間の相互
+  fallback はしない）。
+- ✅ **誤った plane を叩いた 404 が「材料が無い」と誤診断されていた**。handler の
+  `writeErr` は JSON 本文、net/http mux の未登録は `404 page not found`（text/plain）
+  ＝区別可能。区別せず「inject git kind first」と出していたので、既に入っている
+  材料を再 inject しに行かされる。`isUnknownEndpoint()` で判別し wrong-plane と
+  正しい env 名を告げる。
+- ✅ **inherit token が一意でなかった**（既存 flaky test の真因）。
+  `base64.RawURLEncoding` は末尾の未使用ビットを無視するため、3-mod-4 の payload
+  では最終文字 4 通りのうち **3 通りが同一に decode**（実測: `...MTU` と `...MTX`
+  がともに `alice|bob|1785482415`）。token 文字列が 1 つの grant の一意な名前に
+  ならず revocation list / replay cache / audit の dedup が壊れる。`.Strict()`
+  へ変更。`TestInheritTokenTampered` は最終文字のみ叩く旧版が **HEAD で 3/30
+  FAIL**（私の変更前から）＝両 segment の全 index を決定的に sweep する形へ。
+- ✅ README に `git` / `github_app` kind の行と `--ctrl-socket` / `--use-socket`、
+  「Split-socket mode」節（上記 3 の trap 込み）を追記。
+- ✅ 実 daemon e2e を新設（`internal/client/client_test.go`・
+  `internal/platform/socket_test.go`）。2 件のバグとも**修正前のコードで FAIL
+  することを確認済**（鉄則②。`git stash` は新シンボルごと消えてビルド失敗＝
+  何も証明しないので、挙動だけを surgical に戻して確認した）。
+- ⚠ `gofmt -l` が 8 ファイルを挙げるが**すべて HEAD 時点で既に未整形**
+  （`jobEnd` の `writeJSON` map の alignment 等）＝無関係な整形は commit しない
+  （鉄則⑤）。
+
+**2026-08-01: per-UID デプロイの consumer 全断を修正**（memvault commit `7b414c8`）。
+slave-1 を per-UID（daemon を専用アカウント `_shared_noaki` UID 401 で動かし
+socket をその 0700 home に置く）へ移した際、**共用ログインからの git/gh 認証が
+全て失敗していた**のを実再現して修正:
+
+```
+$ printf 'protocol=https\nhost=github.com\n\n' | git credential fill
+fatal: could not read Password for 'https://x-access-token@github.com': Device not configured
+```
+
+socket が `connect(2)` で EACCES になるのは kernel authz が効いている**正しい**
+状態＝壊れていたのは consumer 側で、原因は 2 つだった。
+
+1. `~/.gitconfig` の helper が socket パスをハードコード＝移行で死んだパスを
+   叩き続ける。credential helper は stderr しか説明手段が無いので git 側には
+   上記の無内容なメッセージしか出ない。
+2. `tools/gh-mv` が到達不能を `[ ! -S "$MEMVAULT_SOCKET" ]` だけで判定し
+   「memvault daemon not running?」と報告＝この test は **socket が無いときと
+   親ディレクトリが探索不可（EACCES）なときの両方で false** になるので、
+   正常稼働している daemon を再起動させに行かせる誤診断。さらに未設定時の
+   ヒントが**同僚の socket だけを候補として列挙**していた（slave-1 実測で
+   `/Users/p-ad-share0001/.memvault-suzuki-toshifusa.sock` の 1 件）。
+
+対処＝`tools/memvault-git-credential` を新設し、socket 解決／到達判定／
+per-UID の昇格をそこに一元化。`gh-mv` も `.zshrc` の `gh()` もこれに委譲する
+（git と gh が別の vault を掴む余地を構造的に消す）。
+
+- socket は env（`MEMVAULT_USE_SOCKET` → `MEMVAULT_SOCKET`）由来にし、
+  **推測はしない**＝共用ログインでは同僚の vault も同一 UID から connect
+  できるため、自動選択は他人のトークンで push することになる。未設定はエラー。
+- 到達不能なら「存在しない」ではなく**探索不可な祖先ディレクトリを特定して
+  所有者を割り出し**、`sudo -n -u <owner>` が通る場合だけ昇格して
+  `/usr/local/bin/memvault` を叩く。通らなければ必要な narrow sudo ルールを提示。
+- 診断順を **socket → binary** に入れ替え（per-UID ホストでは memvault が
+  `/usr/local/bin` にしか無い＝このログインの PATH 外。先に「binary not found」
+  と言うと既にある binary を入れに行かせる）。
+- `.zshrc` の `gh()` は**失敗時に黙って無認証 `gh` へ落ちていた**（鉄則⑤違反）
+  ＝per-UID では毎回無認証になっていた。`gh-mv` へ委譲し理由を stderr に出す形へ。
+
+回帰テストは実 zsh でスクリプトを起動する Go テスト（`go test ./...` に載る）
+＝`tools/ghmv_test.go`・`tools/gitcredential_test.go`。per-UID は mode 000 の
+ディレクトリで代替（path walk の EACCES は同一で、第 2 アカウントと違い権限不要）。
+**修正前のコードで 7/7 FAIL することを確認済**（鉄則②）。実機 slave-1 でも
+per-UID 経路の開通を確認（sudo 昇格 → daemon が `no credential for host` と正答）、
+suzuki の同一 UID 経路にも回帰なし。
+
+**実測で「資料どおり」を確認した項目**（回帰の基準線）: claim/release conflict=
+exit 3・usage=exit 2・socket 解決順（CTRL > legacy）とフォールバック・到達不能は
+loud に exit 1・`--job-id` 省略で `$HERDR_PANE_ID`・`job end` 冪等・job-id 決定
+不能はエラー・git host の両方向小文字化と exact-match・未知 host は 404・
+metadata の 403（ヘッダ無し）/503（未 inject）/応答 `Metadata-Flavor: Google`。
+
+**2026-08-02: slave-2 も per-UID 化・2 台の版ズレ解消**。設計とレシピ・trap の
+正は [DESIGN_MEMVAULT.md](DESIGN_MEMVAULT.md) §8.2（ここは経緯と残件だけ）。
+
+- ✅ **ai-slave-2 (LPH77XYYC7 / 共用ログイン `p-ad-share0106`) を per-UID へ**。
+  アーキテクチャはユーザー判断で **slave-1 と同形**（監査の推奨は「per-UID に
+  しても共用ログインでは隔離が構造的に効かない＝ログインを分けるべき」だが、
+  実測した弱点を提示した上で同形が選ばれた）。**材料の inject は今回スコープ外**
+  （検証は 404/503 の形で行う）。結果: pid 41196 `_shared_noaki`・plist は
+  slave-1 と `plutil -p` diff 空・suzuki の pid 36571 無傷・`/etc/sudoers.d/`
+  空のまま。ログ `/tmp/mv-bootstrap2.log` が `BOOTSTRAP_DONE` で終了。
+  - sudo パスワードは**ユーザーが herdr pane に対話入力**（Tab
+    `↗mv-bootstrap slave-2` = `w1P:t7`）。⚠ `layout.apply` で作った pane は
+    **command が exit した時点で閉じる**（shell を挟んでいないため）ので、
+    結果はスクリプト側のログファイルから回収する前提で組む必要がある。
+  - スクリプトは slave-1 のものを流用しつつ **`NOPASSWD: ALL` を作らない**形へ
+    変更。他人の daemon を殺さないよう `OLD_PID=54913` / `KEEP_PID=36571` を
+    STEP_0 で検査（command line が `memvault serve … --proxy-port 9010` で
+    所有者が共用ログインでなければ `die`）。
+- ✅ **版ズレを解消**。slave-1 の daemon binary が `61cccde` 相当
+  （`e2e5bfe9…`）のままで、`/status` に `git_loaded` / `git_hosts` /
+  `github_app_loaded` が**無い**＝このブランチで直したバグ（`8dec677`）を
+  実機が踏んでいた。`94a4eccd…`（`7187e26`）へ更新し 5 キー全 PRESENT を確認
+  （`.bak` = `/usr/local/bin/memvault.bak.61cccde`。手順と注意は §8.2）。
+  restart は inherit token を全失効させるので、**両 daemon が全 kind
+  `*_loaded: false`＝失うものが無いことを確認してから**実行した。
+  更新後に 2 台で同一パスを測って応答が完全一致することを確認済
+  （以前 2 台で食い違って見えた metadata の 200/503 は、叩いたパスが
+  `/computeMetadata/v1/` と `…/service-accounts/default/token` で違っただけ＝機差なし）。
+- ⏳ **残件: slave-2 の use-plane が共用ログインから到達不能**。`git` / `gh` は
+  `memvault-git-credential` が理由を loud に出して落ちる（daemon は正常・
+  共用 UID から見えないだけ）。NOPASSWD を作らないという判断の直接の帰結。
+  narrow ルール（`_shared_noaki` として `/usr/local/bin/memvault git-credential`
+  のみ）を入れるか、対話 sudo を持つセッション限定で使うかの判断待ち。
+- ⏳ **残件: `~/bin/ai-agent` が per-UID daemon を `down` と誤報**（2 台とも）。
+  `ai-agent` は slave 上にしか無く drover も memvault も管理していない＝
+  版管理をどこに置くかの判断が先。
+
 ### A. SSH エージェント転送 — Phase 3（実機 e2e）保留中
 
 共用 slave 上で owner の SSH 鍵を**ディスクに置かず**一時的に git/gh 認証する
