@@ -16,8 +16,10 @@
 //   - SCROLL は v1 では無視（DESIGN: herdr の terminal.scroll は共有 runtime
 //     状態＝ローカル表示にも影響するため、リモート scrollback 非対応が明示制約）。
 //     ただし規約上は必ず parse-and-consume する（漏らすと 4B が打鍵化する）。
-//   - IMAGE は parse-and-drop 必須（DESIGN: 漏れると画像バイトが打鍵として
-//     pane に流れる）。payload は保持しない。
+//   - IMAGE は **parse-and-consume 必須**（漏れると画像バイトが打鍵として
+//     pane に流れる）。payload を保持するかは KeepImage で選ぶ:
+//     既定 false=drop（従来）、true=Event.Image に複製（WebImagePaste
+//     オプトイン時のみ）。**consume 自体はどちらでも必須**。
 //
 // cm との意図的な差異（改良）: cm は「先頭でない末尾孤立 0xff」を即 master へ
 // 転送する（parseClientInput の cut スキャンは i+1 < len までしか見ない）ため、
@@ -38,8 +40,9 @@ const (
 	EvResize
 	// EvScroll は viewer のスクロール要求（v1 は呼び出し側で無視）。
 	EvScroll
-	// EvImage は画像貼付フレーム（payload は drop 済み。監査ログ用の
-	// メタ情報のみ保持）。
+	// EvImage は画像貼付フレーム。既定では payload を drop し監査ログ用の
+	// メタ情報（ImageLen/ImageExt）だけを持つ。CMWireParser.KeepImage が
+	// true のときだけ Image に payload を複製する（WebImagePaste オプトイン）。
 	EvImage
 )
 
@@ -58,9 +61,12 @@ type Event struct {
 	// EvScroll（v1 無視だが監査のため値は運ぶ）
 	Dy int
 
-	// EvImage（payload は drop 済み）
+	// EvImage のメタ（payload を drop した場合でも監査ログに残せるよう常に埋める）
 	ImageLen int
 	ImageExt byte
+	// Image は EvImage の payload。KeepImage=false（既定）では常に nil。
+	// 内部バッファから複製済み＝呼び出し側が保持してよい。
+	Image []byte
 
 	// EvInput（内部バッファから複製済み＝呼び出し側が保持してよい）
 	Input []byte
@@ -71,6 +77,14 @@ type Event struct {
 // cm relay の takeover 修正と同じ）。
 type CMWireParser struct {
 	in []byte // 未解析の繰越しバッファ
+
+	// KeepImage は IMAGE payload を Event.Image に複製するか（既定 false＝
+	// 従来どおり drop）。WebImagePaste オプトインの時だけ true にする。
+	//
+	// ⚠ off でも frame 全体（最大 8MiB）は繰越しバッファに載る。フレームを
+	// 消費するには 7+n バイト揃うまで待つ必要があり、それは規約上避けられない
+	// （長さ上限 maxImageBytes がその天井）。KeepImage が省くのは**複製**だけ。
+	KeepImage bool
 }
 
 // Feed は受信バイトを追加し、確定したイベント列を順序保存で返す。
@@ -120,9 +134,14 @@ func (p *CMWireParser) Feed(data []byte) []Event {
 			if len(p.in) < 7+n {
 				return evs // payload 未着＝繰越し（上限 8MiB は上で保証済み）
 			}
-			// payload は drop。監査用メタのみ通知。
+			ev := Event{Kind: EvImage, ImageLen: n, ImageExt: ext}
+			if p.KeepImage {
+				// 繰越しバッファは次 Feed で append により再確保されうる＝
+				// スライス参照のまま渡すと後から中身が変わる。必ず複製する。
+				ev.Image = append([]byte(nil), p.in[7:7+n]...)
+			}
 			p.in = p.in[7+n:]
-			evs = append(evs, Event{Kind: EvImage, ImageLen: n, ImageExt: ext})
+			evs = append(evs, ev)
 			continue
 		}
 		// --- 末尾の孤立 0xff は magic 先頭の可能性があるため繰り越す ---

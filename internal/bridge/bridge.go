@@ -110,6 +110,15 @@ type Bridge struct {
 	// Logf は診断ログ（nil なら log.Printf）。
 	Logf func(format string, args ...any)
 
+	// ImagePaste は Web からの画像貼付を受け付けるか（既定 false=drop）。
+	// true にすると IMAGE フレームの payload をこの PC のクリップボードへ
+	// 載せ、pane へ Ctrl+V(0x16) を注入する。
+	// ⚠ 共用 PC(slave) では有効にしないこと。クリップボードは同一アカウントの
+	//   他人からも読める（DESIGN_SLAVE の脅威モデル）。gate は config 側。
+	ImagePaste bool
+	// ImagePasteDir は画像の一時ファイル置き場（空なら ~/.herdr-drover/paste）。
+	ImagePasteDir string
+
 	// last は最終通信時刻（UnixNano）。conn の read/write 両方向で bump。
 	last atomic.Int64
 	// idleClosed は quiescence 自切断を自分で行った印（conn close 起因の
@@ -392,6 +401,8 @@ func (b *Bridge) observeArgs() []string {
 // goroutine で逐次実行）／SCROLL・IMAGE→消費のみ、を行う。
 func (b *Bridge) readConn(resizeCh chan winSize, connDone chan<- error) {
 	var p CMWireParser
+	// payload を複製するのは受け付ける時だけ（既定は従来どおり drop）。
+	p.KeepImage = b.ImagePaste
 	// carry は read 境界で割れた UTF-8 rune の先頭断片の繰越し（cmwire の
 	// 末尾孤立 0xff と同じ規律）。断片のまま sendInput へ渡すと utf8.Valid が
 	// 両断片とも false → control fallback の attach 副作用（実 PTY resize）
@@ -426,9 +437,9 @@ func (b *Bridge) readConn(resizeCh chan winSize, connDone chan<- error) {
 					// v1 は無視（DESIGN: herdr terminal.scroll は共有
 					// runtime 状態＝ローカル表示にも影響するため非対応）。
 				case EvImage:
-					// parse-and-drop（パーサが payload 消費済み。漏れると
-					// 画像バイトが打鍵として pane に流れる）。
-					b.logf("IMAGE フレームを破棄 (%dB ext=%d)：v1 非対応", ev.ImageLen, ev.ImageExt)
+					// パーサは payload を消費済み（漏れると画像バイトが
+					// 打鍵として pane に流れる）。受け付けるかは ImagePaste。
+					b.handleImage(ev)
 				}
 			}
 		}

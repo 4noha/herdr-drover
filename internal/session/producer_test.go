@@ -650,7 +650,7 @@ func TestBuildSessions(t *testing.T) {
 	agents := []herdrapi.AgentInfo{
 		{PaneID: "w1:p2", Name: "claude", AgentStatus: "working"},
 	}
-	ss := BuildSessions(panes, agents, nil, nil)
+	ss := BuildSessions(panes, agents, nil, nil, false)
 	if len(ss) != 3 {
 		t.Fatalf("3 sessions のはず: %v", ss)
 	}
@@ -718,7 +718,7 @@ func TestBuildSessionsExcludesInjectedPanes(t *testing.T) {
 			AgentStatus: "idle",
 		},
 	}
-	ss := BuildSessions(panes, nil, isInjected, nil)
+	ss := BuildSessions(panes, nil, isInjected, nil, false)
 	if len(ss) != 2 {
 		t.Fatalf("除外後 2 session のはず（自 PC の本物 2 つ・注入 pane 2 種を除外）: got=%d %v", len(ss), ss)
 	}
@@ -743,7 +743,7 @@ func TestBuildSessionsWithoutIsInjectedFalltoTokenOnly(t *testing.T) {
 		{PaneID: "w9:p1", AgentStatus: "working",
 			Tokens: map[string]string{herdrapi.InjTokenPC: "other-pc", herdrapi.InjTokenSID: "w3:p2"}},
 	}
-	ss := BuildSessions(panes, nil, nil, nil) // isInjected=nil
+	ss := BuildSessions(panes, nil, nil, nil, false) // isInjected=nil
 	if len(ss) != 1 || ss[0]["key"] != "w1:p1" {
 		t.Fatalf("nil isInjected でも token 判定は生きるべき: %v", ss)
 	}
@@ -784,7 +784,7 @@ func TestBuildSessionsCarriesAgentKind(t *testing.T) {
 		{PaneID: "w1:p1", Name: "claude-2", AgentStatus: "idle"},
 		{PaneID: "w1:p5", Name: "codex", AgentStatus: "idle"},
 	}
-	got := BuildSessions(panes, agents, nil, nil)
+	got := BuildSessions(panes, agents, nil, nil, false)
 	by := map[string]map[string]any{}
 	for _, s := range got {
 		by[s["key"].(string)] = s
@@ -818,7 +818,31 @@ func TestBuildSessionsStillExcludesInjectedPanes(t *testing.T) {
 		{PaneID: "w1:p1", Cwd: "/a", Agent: "claude",
 			Tokens: map[string]string{herdrapi.InjTokenPC: "other-herdr"}},
 	}
-	if got := BuildSessions(panes, nil, nil, nil); len(got) != 0 {
+	if got := BuildSessions(panes, nil, nil, nil, false); len(got) != 0 {
 		t.Fatalf("注入 pane を push した: %+v", got)
+	}
+}
+
+// TestBuildSessionsImagePaste は image_paste が **true の時だけ載る**ことを見る。
+// false で「載せない」のは後方互換のため（追加キーを知らない旧 Web/旧 agent へ
+// 影響させない。local_ips と同じ規律）。Web はこの値で「送ったのに何も起きない」
+// を事前に伝える。
+func TestBuildSessionsImagePaste(t *testing.T) {
+	panes := []herdrapi.PaneInfo{{PaneID: "w1:p1", Cwd: "/tmp/x", AgentStatus: "idle"}}
+
+	off := BuildSessions(panes, nil, nil, nil, false)
+	if len(off) != 1 {
+		t.Fatalf("session 数 %d", len(off))
+	}
+	if _, ok := off[0]["image_paste"]; ok {
+		t.Fatalf("false のときは image_paste を載せない（後方互換）: %v", off[0])
+	}
+
+	on := BuildSessions(panes, nil, nil, nil, true)
+	if len(on) != 1 {
+		t.Fatalf("session 数 %d", len(on))
+	}
+	if v, ok := on[0]["image_paste"]; !ok || v != true {
+		t.Fatalf("true のとき image_paste=true が載っていない: %v", on[0])
 	}
 }

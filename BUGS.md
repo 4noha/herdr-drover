@@ -1,5 +1,9 @@
 # 既知バグ / 引き継ぎ（2026-07-26 記録）
 
+> ⚠ **BUG-4 / BUG-5 は実装済みだが Cloud Run 未デプロイ**（2026-08-16 時点）。
+> どちらも Web 側の修正を含み、**relay の image を差し替えるまで利用者には届かない**。
+> BUG-5 の drover 側（画像貼付本体）は release＋fleet 配信が要る。
+>
 > ✅ **BUG-1 / BUG-2 / BUG-3 は 2026-07-26 に修正済み**（実 herdr テストで担保・
 > gofmt/build/vet/test 緑）。各節冒頭に「解決」欄を追記した。BUG-3 は本書が推定して
 > いた真因（source 側 tick / mirror producer が再張り）が**誤り**で、実経路は
@@ -216,3 +220,136 @@ busy に見える一因。
 - claude 3 本（audio-router / zvw30-hack / obsidian-vault）は transcript 実在→
   実 claude 直接 `--resume` で会話ごと復元。claude-2(herdr-drover) は transcript
   喪失で復元不可。
+
+---
+
+## BUG-4【P1】Web ターミナルが出力の途中で止まったまま復帰しない（2026-08-08 記録）
+
+### 🚧 実装済み・**未デプロイ**（2026-08-08）
+方針 (a)+(c) を `drover-cloud/web/static/term.js` に実装。判定は純粋関数
+`cmWatchGate`（既存 `cmReconnectGate` と同じ流儀）に切り出し、実 node で真理値表を
+固定する `web/termjs_gate_test.go` を追加（**旧 term.js で FAIL・新で PASS を確認**）。
+gofmt/build/vet/`go test ./...` 全緑。
+⚠ **Cloud Run 未デプロイ＝本番にはまだ効いていない**。反映には relay の image 差し替えが要る
+（`deploy/deploy.sh` は初回構築専用＝env 全置換で事故る。SPEC.md のデプロイ節参照）。
+⚠ 判定表は単体で担保したが、**実際に切れた線が張り直るかは実 relay 越しの確認が必要**。
+
+### 症状
+Web ターミナル（`/term`）を開いて眺めていると、**途中でフッと止まる**。
+以後いくら出力が続いても画面が更新されない。ユーザが**何か入力すると復帰**する。
+
+### 真因（実測で確定・推定ではない）
+**「出力が再開した」ことをブラウザに伝える経路が存在しない。**
+＝**切断の理由が何であれ、そのまま張り直されない**（stickiness が本体）。
+
+1. 切断そのものは仕様どおりでバグではない。閉じているのは **PC 側**:
+   `internal/bridge/bridge.go:61` `DefaultIdle = 30 * time.Second` が
+   「両方向で 30s 無通信ならデータ線を自分から閉じる」。
+   **ブラウザ脚には idle タイマーが無い**（`drover-cloud/web/web.go` `wsViewer` は
+   `st.Wake` を撃って `rl.Accept(..., "viewer")` するだけ）。PC 側が閉じると
+   ペアが落ち、ブラウザの ws も閉じる。
+   - 副次的な契機として Cloud Run の `timeoutSeconds=3600`（実測値）があり、
+     **1 時間を超える連続ストリーム**は途中でも切られる。頻度は低い。
+   - どちらの契機でも症状は同一。**stickiness は「閉じ方」ではなく
+     「再開を伝える手段が無いこと」から来る。**
+2. ブラウザ側の再接続契機は**3 つだけ**（`drover-cloud/web/static/term.js`）:
+   - `:228` onclose 時に**未送出入力が残っている場合**のみ自走再試行
+   - `:261` ユーザ入力
+   - `:335` Firestore `onSnapshot`（`pcs/{pc}/sessions/{sid}` の doc 変化）
+3. その doc は **content_hash が変わった時しか書かれない**
+   （`drover-cloud/state/state.go:95-127` `PushStatus`。差分なしは `continue`）。
+4. doc の中身は `key / session_id / cwd / short_dir / window_name / is_active /
+   agent_status / agent / local_ips` のみ（`internal/session/producer.go:238-260`）。
+   **出力が流れても、どれ一つ変わらない。** 揮発フィールドを載せないのは
+   near-$0 を守るための意図的な設計（同 `producer.go:20-23`）。
+
+⇒ エージェントが `working` のまま **30 秒以上出力を止める**（思考中など）と線が
+閉じる（これが常用の契機。エージェントの思考停止は日常的に 30s を超える）。
+その後**出力が再開しても push が飛ばない**＝ブラウザは張り直さない。
+`agent_status` が遷移する（working→done 等）か、ユーザが入力するまで凍ったまま。
+
+### 実測エビデンス（2026-08-08）
+`mac-studio-herdr` / `w1:p1B`（claude・連続出力中）を 2 分間 5s 間隔で観測:
+
+```
+10:20:07  version=212  updated_at=2026-08-08T01:15:03Z  agent_status=working
+   （…24 サンプル全て同一…）
+10:22:02  version=212  updated_at=2026-08-08T01:15:03Z  agent_status=working
+```
+
+出力が流れ続けた 2 分間、**version も updated_at も一切動かない**
+（`updated_at` は観測開始の 5 分前）。＝ push は飛ばない。
+
+### 修正方針（未着手・要判断）
+❌ **やってはいけない**: 接続を維持する / keepalive を入れる / idle 切断を止める
+（near-$0 の設計目的そのものを壊す）。狙いは常に「**再開したら張り直す**」。
+
+候補:
+- **(a) ブラウザ側だけで完結**: `is_active===true` かつ
+  `document.visibilityState==="visible"` の間だけ、控えめな間隔で
+  `requestConnect("watch")` を試みる。コストは**人が実際に見ている時だけ**発生。
+  Firestore 書込は増えない。`cmReconnectGate` の backoff 規律に載せる。
+- **(b) 粗い output epoch**: producer が「出力があった」ことを 30s 粒度に丸めた
+  フィールドで載せる。push は飛ぶが**書込が最大 1/30s/セッション**に増える
+  （near-$0 とのトレードオフ。`producer.go:20-23` の方針に抵触するため要判断）。
+- (c) `visibilitychange` での再接続（補助。見続けている場合は救えない）。
+
+**推奨は (a)+(c)**。`/ws` ハンドラ自身が接続時に `st.Wake` を撃つので、ブラウザから
+張り直せば PC 側は起きる＝**relay/protocol の変更が要らない**。さらに term.js:212-215
+が `onopen` ごとに `resizeFrame` を送り、これが完全 frame の catch-up を兼ねるので
+**復帰時の再描画も既存のまま正しい**。(b) は `producer.go:20-23` の明示的な設計方針に
+正面から抵触するため、採るならユーザ判断（near-$0 とのトレードオフ）。
+
+⚠ ↗窓 側は v0.5.33 の input-wake（`attach.go`）で同種の穴を塞いだが、
+**Web 経路は完全に別コードで、同等の wake が無い**。
+
+⚠ **修正時は実 relay の websocket 越しに検証すること**（BUG-3 の教訓＝合成
+ストリームで緑にしても本番経路には一度も当たっていなかった）。
+
+---
+
+## BUG-5【P2】Web の画像ペーストが「送信しました」と出るのに何も起きない（2026-08-15 記録）
+
+### ✅ 解決（2026-08-16）
+**回帰ではなく未実装だった。** drover 経由では一度も動いたことがない。
+
+- `internal/bridge/bridge.go` が `IMAGE フレームを破棄：v1 非対応` として捨てて
+  いた（`DESIGN.md` にも parse-and-drop が仕様として書かれていた）。
+- 一方 `term.js` の `sendImageBlob` は**送信キューに載せただけで**
+  「画像を送信（リモートで Ctrl+V 注入）」と表示していた＝**成功表示が嘘**。
+  この Web UI は cm 由来で、cm には実装がある（`WebImagePaste`・既定 off）。
+
+対処（2 本立て）:
+1. **機能を移植**（cm `ptyproxy/server.go` handleImagePaste の移植）。
+   `DROVER_WEB_IMAGE_PASTE`（既定 false=opt-in・file `web_image_paste`）。
+   `CMWireParser.KeepImage` で payload を保持 → 一時ファイル(0600/dir 0700・
+   乱数名) → OS クリップボード(osascript) → pane へ `Ctrl+V(0x16)`。
+   クリップボード投入に失敗したら**注入せずファイルも消す**。TTL 5 分で掃除。
+   ⚠ **`role=slave` は強制 false**（共用 PC のクリップボードは同一アカウントの
+   他人が読める＝DESIGN_SLAVE の脅威モデル）。無効化は必ずログに出す。
+2. **UI が嘘をつかないように**。producer が session doc へ `image_paste: true` を
+   載せ（true の時だけ＝`local_ips` と同じ後方互換規律）、`term.js` は
+   ・確定 false → **送らずに**「この PC は画像貼付が無効です」
+   ・確定 true → 従来の成功表示
+   ・未確定（doc 未着/push 無効）→ 送るが「相手の対応状況は未確認」
+
+### 実測エビデンス（2026-08-15）
+```
+2026/08/15 12:07:00 webterm: bridge sid="w1:p1X":
+  IMAGE フレームを破棄 (527330B ext=1)：v1 非対応
+```
+Android から 527KB の PNG が**サーバまで正しく届いていた**（＝クライアント側の
+クリップボード権限の問題ではない）。ログ全期間で画像の試行は 2 件・両方破棄。
+
+### テスト
+`internal/bridge/imagepaste_test.go`:
+- `TestCMWireKeepImage`（drop/保持の切替・複製であること・分割着信）
+- `TestHandleImageDisabled`（既定は捨てる・クリップボードに触らない）
+- `TestHandleImageEnabled`（0600・中身一致・ext 一致）
+- `TestLandImageClipboardFailureLeavesNothing`（失敗時に残さない）
+- `TestHandleImageInjectsCtrlV`（**実 herdr の pane** に 0x16 到達）
+- `TestHandleImageWithoutPayloadDoesNotInject`（配線が外れても空を貼らない）
+
+`cmd/herdr-drover/config_test.go` に `TestResolveConfigWebImagePaste`
+（既定 off・env>file・不正値エラー・**slave 強制 false**）。
+`internal/session/producer_test.go` に `TestBuildSessionsImagePaste`。

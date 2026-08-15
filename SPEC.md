@@ -610,6 +610,7 @@ workspace.close  workspace.create  workspace.focus  workspace.list  workspace.re
 | `DROVER_MIRROR_AGENTS` | `false` | ↗窓 にリモートの agent_status を転記（**metadata 転記の gate であって注入の gate ではない**） |
 | `DROVER_INJECT_REMOTE` | `true` | 他 PC のセッションを ↗窓 pane として注入するか（file 名 `inject_remote_panes`）。`false` で**既存の注入 pane も撤去**し新規を作らない。producer（Web/スマホ閲覧）は止めない |
 | `DROVER_SHARE_LOCAL_IPS` | — | terminal_title へローカル IP を出す |
+| `DROVER_WEB_IMAGE_PASTE` | `false` | Web ターミナルから届いた画像を**この PC の OS クリップボードへ載せ pane に Ctrl+V(0x16) を注入**する（file 名 `web_image_paste`）。macOS 専用（osascript）。⚠ **`role=slave` では設定を無視して強制 false**＝共用 PC のクリップボードは同一アカウントの他人が読める。有効時は session doc に `image_paste: true` が載り、Web はこれを見て「この PC は無効」を事前表示する（false は**載せない**＝旧 Web と後方互換） |
 
 ### 6.2 ファイル
 
