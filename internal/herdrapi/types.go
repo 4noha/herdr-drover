@@ -277,3 +277,27 @@ func (e Event) Pane() (*PaneInfo, error) {
 	}
 	return d.Pane, nil
 }
+
+// PaneProcess は pane.process_info の foreground_processes 要素。
+// 実採取（herdr 0.7.4）:
+//
+//	{"argv":["-zsh"],"argv0":"zsh","cmdline":"-zsh","cwd":"/Users/x","name":"zsh","pid":39077}
+//
+// argv は null になりうる（schema 上 ["array","null"]）＝nil を許容する。
+type PaneProcess struct {
+	PID     int      `json:"pid"`
+	Name    string   `json:"name"`
+	Argv0   string   `json:"argv0"`
+	Argv    []string `json:"argv"`
+	Cmdline string   `json:"cmdline"`
+	Cwd     string   `json:"cwd"`
+}
+
+// PaneProcessInfo は pane.process_info の結果。pane で今なにが前景に居るかを
+// 返す（reconcile の注入 pane 生存判定に使う。pane が在ることと client が
+// 生きていることは別＝pane を数えるだけでは死んだ ↗窓 を検出できない）。
+type PaneProcessInfo struct {
+	PaneID              string        `json:"pane_id"`
+	ShellPID            int           `json:"shell_pid"`
+	ForegroundProcesses []PaneProcess `json:"foreground_processes"`
+}

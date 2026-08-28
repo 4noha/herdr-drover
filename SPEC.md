@@ -711,6 +711,14 @@ herdr＝drover daemon が exit/再起動しても入れ替わらない。** よ�
     「ローカル未導入のエージェントの既存セッションへ attach だけしたい」が失敗する。
 15. **旧命令名を allowlist から外さない**。まだ更新していない PC の Web/CLI から
     投げられなくなる（先行デプロイの意味が消える）。
+16. **「在ること」は「生きていること」ではない**。pane / token / metadata の一致は
+    存在の権威であって生存の権威ではない。pane を数えて健全と判断する経路は必ず
+    **プロセスの生存（`pane.process_info` の argv exact-match）**まで確認する。
+    同型の欠陥を 2 度踏んでいる: BUG-1（shim の resume backstop が zombie pane を
+    live とみなした）と BUG-6（reconcile が client の死んだ注入 pane を
+    `cur(injected)` に数え続け、再起動後の ↗窓 全滅を自己修復しなかった）。
+    ⚠ 生存確認は**間引く**（ndjson は 1 接続=1 リクエスト）。復活は pane を作り直さず
+    残ったシェルに同じ argv を打ち直す（pane_id / Tab / 配置を保つ）。
 
 ---
 

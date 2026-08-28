@@ -383,6 +383,21 @@ func (c *Client) PaneLayout(paneID string) (*PaneLayoutSnapshot, error) {
 	return &out.Layout, nil
 }
 
+// PaneProcessInfo は pane の前景プロセスを返す（pane.process_info）。
+// 注入 pane に attach client が本当に生きているかの判定に使う。pane の存在や
+// token の一致は「生きている」ことを意味しない（BUG-1 と同型の罠）。
+func (c *Client) PaneProcessInfo(paneID string) (*PaneProcessInfo, error) {
+	var out struct {
+		ProcessInfo PaneProcessInfo `json:"process_info"`
+	}
+	if err := c.call("pane.process_info", struct {
+		PaneID string `json:"pane_id"`
+	}{paneID}, &out); err != nil {
+		return nil, err
+	}
+	return &out.ProcessInfo, nil
+}
+
 // PaneSplit は target pane を direction（"right"|"down"）に分割し新 pane を作る
 // （既定シェル）。テストで複数 pane の tab を組むのに使う（シム本体は使わない）。
 func (c *Client) PaneSplit(paneID, direction string) error {

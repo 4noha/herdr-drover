@@ -353,3 +353,66 @@ Android から 527KB の PNG が**サーバまで正しく届いていた**（�
 `cmd/herdr-drover/config_test.go` に `TestResolveConfigWebImagePaste`
 （既定 off・env>file・不正値エラー・**slave 強制 false**）。
 `internal/session/producer_test.go` に `TestBuildSessionsImagePaste`。
+
+---
+
+## BUG-6【P1】↗窓 の client が死んでも reconcile が「健全」と報告し続ける（2026-08-28）
+
+### ✅ 解決（2026-08-28）
+`reconcileRemote` に **client 生存確認**（`ensureInjectClient`）を追加した。
+pane の前景に `<selfExe> attach <pc> <sid>` が **argv exact-match** で居なければ
+「死んでいる」と判定し、前景が既知シェルなら**同じ pane のまま**同じ argv を
+打ち込んで復活させる（`REVIVE` をログ）。前景がシェル以外なら**触らず理由を出す**
+（ユーザーが自分で動かしている pane に打ち込まないため）。
+
+### 症状
+マシン/herdr の再起動後、**↗窓 が全滅する**。pane と Tab は残り、token も title も
+正しいのに中身は**素のシェル**で、リモートの画面は二度と出てこない。
+reconcile は毎周 `[reconcile] desired=12 cur(injected)=12 pending=0` と
+**健全を報告し続ける**ので、ログを見ても異常に気づけない。
+
+⚠ **この状態の pane に打鍵すると、ローカル PC のシェルでコマンドが実行される**
+（リモートに届かない）。2026-08-28 の実機調査で、4 PC 分 12 枚すべてがこの状態
+だった（`pane process-info` の前景が全部 `-zsh`／`herdr-drover attach` プロセスは
+システム上に 1 つも無し。8/24 の再起動以降ずっと）。
+
+### 再現
+1. 注入 pane が出ている状態で herdr（またはマシン）を再起動する。
+2. レイアウト復元後、`herdr pane process-info --pane <↗pane>` を見る
+   → 前景が `-zsh`（`herdr-drover attach` ではない）。
+3. `~/.herdr-drover/agent.log` は `desired=N cur(injected)=N pending=0` のまま。
+
+### 真因（確定）
+`cur` は **pane.list の token（＋injectindex）だけ**で構築されており、
+「pane が在る」ことと「client が生きている」ことを区別していなかった
+（`reconcile.go` の cur 構築コメントは *判定の権威は token / index* と明記して
+いるが、それは**存在**の権威であって**生存**の権威ではない）。
+desired 側に一致する pane が 1 枚見つかれば `else` 分岐（＝既存扱い）に落ち、
+title と agent_status を転記するだけで**プロセスを一切見ていなかった**。
+
+**BUG-1 と同型**（metadata 一致だけで live を見ない）。BUG-1 は shim の
+`findAgentPaneByResumeRef`、本件は reconcile の cur ——同じ罠を 2 箇所で踏んだ。
+
+### 修正で踏まないようにしたこと
+- **「command が exit した pane」はこの状態にならない**。実測すると herdr は
+  **pane ごと閉じる**（`TestExploreDeadInjectPane` で確認 → 通常の CREATE 経路が
+  拾う）。復元由来の「pane は在るが client が居ない」だけが対象。
+- **pane を作り直さない**。close→CREATE だと pane_id・Tab・配置が変わり、
+  ユーザーの窓が消える。残ったシェルに打ち込む方式なら継続する。
+- **`pane.run` は wire API に無い**（`herdr api schema` で実測。CLI 専用）。
+  復活は `pane.send_text` ＋ `pane.send_keys("enter")`＝手作業と同じ経路。
+- **thrash 防止**: 生存確認は 1 pane あたり `injLivenessEvery`（既定 60s）に間引く。
+  client が即死する環境で毎 tick 打ち込み続けない。ndjson は 1 接続=1 リクエスト
+  なので毎周 全 pane に `process_info` を投げないためでもある。
+
+### テスト（`cmd/herdr-drover/reconcilelive_test.go`）
+実 herdr（隔離ソケット）で「pane は在るが前景がシェル」を再現する:
+- `TestReconcileRevivesDeadInjectClient` — 復活すること＋**pane_id が変わらない**こと。
+  **`ensureInjectClient` の呼び出しを外すと FAIL することを確認済み**（旧挙動）。
+- `TestReconcileLeavesUnknownForegroundAlone` — 前景がシェル以外なら打ち込まない。
+- `TestInjClientAliveExactMatch` — 別 pc/別 sid/別バイナリ/余分な引数は「生存」にしない。
+- `TestInjForegroundShell` — 既知シェルのみ復活対象（混在は対象外）。
+
+### 併せて直したもの
+`herdr-drover help` の「未実装（後続フェーズ）: attach」は**誤り**（attach は
+実装済み・reconcile が注入 pane 内で起動している）。実際の説明に差し替えた。

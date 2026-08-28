@@ -45,6 +45,127 @@ const (
 	injWorkspace = herdrapi.InjWorkspaceLabel
 )
 
+// ── 注入 pane の「生存」判定（v0.5.37）─────────────────────────────────
+//
+// **pane が在ることと attach client が生きていることは別**。herdr 再起動
+// （マシン再起動を含む）でレイアウトが復元されると、注入 pane は token を
+// 保ったまま**素のシェルとして**戻る（2026-08-28 実機で確認: 4 PC 分 12 枚
+// 全部が前景 `-zsh`・client プロセス皆無。それでも reconcile は
+// `desired=12 cur(injected)=12 pending=0` と健全を報告し続けた）。
+// cur は token 付き pane を数えているだけで生存を見ていなかった＝BUG-1
+// （metadata 一致だけで live を見ない）と同型の欠陥。
+//
+// ⚠ 「command が exit した pane」はこの状態にならない。実測では herdr が
+// **pane ごと閉じる**（TestExploreDeadInjectPane で確認）→ 通常の CREATE 経路が
+// 拾う。ここで扱うのは復元由来の「pane は在るが client が居ない」だけ。
+var (
+	// injShellNames は「client が終わって残ったシェル」を exact-match で見分ける表。
+	// ヒューリスティックにしない: ここに無い前景は**触らない**（ユーザーが自分で
+	// 何か動かしている pane に勝手にコマンドを打たないため）。
+	injShellNames = map[string]bool{
+		"sh": true, "bash": true, "zsh": true, "dash": true, "fish": true, "ksh": true,
+	}
+	// injLivenessEvery は 1 pane あたりの生存確認の最短間隔。毎 tick 全 pane に
+	// process_info を投げると ndjson 接続が増える（1 接続=1 リクエスト）ので間引く。
+	// 同時に**復活の thrash 防止**も兼ねる（client が即死する環境で毎 tick
+	// 打ち込み続けない）。テストから短縮する。
+	injLivenessEvery = 60 * time.Second
+	// injLivenessAt は paneID → 最後に生存確認した時刻。reconcileRemote は
+	// runRemoteInject の単一 goroutine から呼ばれる（並行呼び出しは無い）。
+	injLivenessAt = map[string]time.Time{}
+)
+
+// injClientAlive は pane の前景に attach client が居るかを **argv exact-match**
+// で判定する（名前や部分一致で推測しない＝別 pc/sid の client を自分のものと
+// 誤認しないため）。
+func injClientAlive(fps []herdrapi.PaneProcess, selfExe, pc, sid string) bool {
+	want := []string{selfExe, "attach", pc, sid}
+	for _, fp := range fps {
+		if len(fp.Argv) != len(want) {
+			continue
+		}
+		same := true
+		for i := range want {
+			if fp.Argv[i] != want[i] {
+				same = false
+				break
+			}
+		}
+		if same {
+			return true
+		}
+	}
+	return false
+}
+
+// injForegroundShell は前景が**シェルだけ**なら その名前 を返す（復活してよい
+// 状態）。前景が空、または表に無いプロセスが混ざっていれば ""＝触らない。
+func injForegroundShell(fps []herdrapi.PaneProcess) string {
+	if len(fps) == 0 {
+		return "" // 前景不明＝触らない
+	}
+	name := ""
+	for _, fp := range fps {
+		n := strings.TrimPrefix(fp.Name, "-")
+		if !injShellNames[n] {
+			return ""
+		}
+		name = n
+	}
+	return name
+}
+
+// shQuote は argv 要素を sh の単一引用で包む（パスに空白があっても壊さない）。
+func shQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
+
+// reviveInjectPane は残ったシェルに attach client のコマンド行を打ち込んで
+// 復活させる。**pane を作り直さない**（pane_id / Tab / 配置が変わらない＝
+// ユーザーの窓が消えない）。pane.run は wire API に無い（schema 実測）ので
+// send_text + send_keys("enter") を使う＝手作業と同じ経路。
+func reviveInjectPane(api *herdrapi.Client, paneID string, argv []string) error {
+	q := make([]string, len(argv))
+	for i, a := range argv {
+		q[i] = shQuote(a)
+	}
+	if err := api.PaneSendText(paneID, strings.Join(q, " ")); err != nil {
+		return err
+	}
+	return api.PaneSendKeys(paneID, "enter")
+}
+
+// ensureInjectClient は注入 pane の client 生存を確認し、死んでいれば復活させる。
+// 判定できない/触ってはいけない場合は**必ず理由をログに出す**（silent skip 禁止）。
+func ensureInjectClient(api *herdrapi.Client, paneID, selfExe, pc, sid string, lg *log.Logger, now time.Time) {
+	if last, ok := injLivenessAt[paneID]; ok && now.Sub(last) < injLivenessEvery {
+		return // 間引き中（次の窓で確認する）
+	}
+	injLivenessAt[paneID] = now
+	info, err := api.PaneProcessInfo(paneID)
+	if err != nil {
+		lg.Printf("[reconcile] process_info 失敗 pane=%s（生存判定 skip・次周に再試行）: %v", paneID, err)
+		return
+	}
+	if injClientAlive(info.ForegroundProcesses, selfExe, pc, sid) {
+		return
+	}
+	sh := injForegroundShell(info.ForegroundProcesses)
+	if sh == "" {
+		names := make([]string, 0, len(info.ForegroundProcesses))
+		for _, fp := range info.ForegroundProcesses {
+			names = append(names, fp.Name)
+		}
+		lg.Printf("[reconcile] pane=%s に attach client が居ないが前景=%v＝触らない（手動確認）", paneID, names)
+		return
+	}
+	argv := []string{selfExe, "attach", pc, sid}
+	if rerr := reviveInjectPane(api, paneID, argv); rerr != nil {
+		lg.Printf("[reconcile] REVIVE 失敗 %s/%s pane=%s（次の窓で再試行）: %v", pc, sid, paneID, rerr)
+		return
+	}
+	lg.Printf("[reconcile] REVIVE %s/%s pane=%s（attach client 不在・前景=%s → 再起動。次の確認は %s 後）",
+		pc, sid, paneID, sh, injLivenessEvery)
+}
+
 // injMarkerKey は (pc,sid) の一意結合キー（cur/desired 突合せ用）。
 func injMarkerKey(pc, sid string) string { return pc + "\x00" + sid }
 
@@ -505,6 +626,9 @@ func reconcileRemote(ctx context.Context, api *herdrapi.Client, st remoteSource,
 					lg.Printf("[reconcile] title 再表明失敗 %s（次周に再試行）: %v", ids[0], terr)
 				}
 			}
+			// pane が在る＝健全、ではない。attach client の生存を確かめ、
+			// 復元由来で死んでいれば同じ pane のまま復活させる（上の解説参照）。
+			ensureInjectClient(api, ids[0], selfExe, d.pc, d.sid, lg, time.Now())
 		}
 	}
 	// desired に無い注入 pane = リモートで消えたセッション → close + index Forget。
