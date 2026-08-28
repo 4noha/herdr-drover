@@ -274,6 +274,39 @@ mkdir -p ~/.claude/skills
 ln -s "$PWD/skills/mv-tab" ~/.claude/skills/mv-tab
 ```
 
+**もう 1 本の Skill: `herdr-drover`**（`skills/herdr-drover/SKILL.md`）。こちらは
+**どのプロジェクトのセッションからでも** herdr 群の診断と修復をするためのもの。
+「herdr のタブを修復して」「再起動したのでタブを直して」等で発動する:
+
+```sh
+ln -s "$PWD/skills/herdr-drover" ~/.claude/skills/herdr-drover
+```
+
+**フリートへの配布は `install.sh` が面倒を見ます**（再実行は冪等）:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/4noha/herdr-drover/main/install.sh | sh
+HD_SKILLS_ONLY=1 sh install.sh   # 本体は既にある PC＝Skill だけ入れる
+HD_SKILLS=0      sh install.sh   # Skill は要らない
+```
+
+- 配置先は `~/.claude/skills/<name>/SKILL.md`（`HD_SKILLDIR` で変更可）。
+- **既存を勝手に潰しません**: symlink（開発用の checkout 直結）と、herdr-drover が
+  置いたのではないディレクトリ（`.herdr-drover-installed` が無い）は**理由を出して skip**。
+- 取得元は「手元が herdr-drover の checkout ならそこから、でなければ
+  raw.githubusercontent から」。checkout 判定は **`go.mod` の module 行 exact 一致**で行う
+  （`skills/` があるだけの無関係な cwd から他人の SKILL.md を配らないため）。
+- ⚠ **Windows は install.sh の対象外**（`scripts/windows/*.ps1` 側は未対応）。当該機では
+  リポを pull して `Copy-Item skills\<name>\SKILL.md $HOME\.claude\skills\<name>\` 相当を手で。
+
+収録しているのは (a) `status` / `pane list` での状況把握（**agent 生存 pane と
+`agent_status:"unknown"` の殻の区別**）、(b) **再起動後のタブ修復手順**（復元で
+シムが新 Tab を立て旧 pane が observe ビューアに化ける＝Tab 倍増。trust プロンプト
+解除 → 双子の `agent_session` 一致を確認 → 旧 pane を close・focused は最後）、
+(c) `organize` / `restart-agent-session` / `restart-daemon` の使い分け（**前 2 つは
+再起動後のタブ修復では何もしない**）、(d) 禁則（裸の `pkill herdr`・`↗` 注入 pane・
+外部端末の `terminal session control` ビューアに触らない）。
+
 ### update-agent-cli（エージェント本体の更新 → セッション反映をワンコマンドで）
 
 ```sh
