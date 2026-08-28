@@ -416,3 +416,43 @@ title と agent_status を転記するだけで**プロセスを一切見てい�
 ### 併せて直したもの
 `herdr-drover help` の「未実装（後続フェーズ）: attach」は**誤り**（attach は
 実装済み・reconcile が注入 pane 内で起動している）。実際の説明に差し替えた。
+
+---
+
+## 補足【誤診断の記録】「daemon 再起動で ↗ pane が作り直される」はバグではない（2026-08-28）
+
+**報告した本人が同日に否定した。誤診断の経緯ごと残す**（同じログでまた誤読しないため）。
+
+当初「daemon 再起動で reconcile が `cur(injected)=0` になり注入 workspace ごと新 id で
+再生成される。injectindex の救済が効いていない疑い」と報告したが、**agent.log に理由が
+明記されていた**:
+
+```
+12:01:17 [reconcile] drover 版数が変わった（"v0.5.36" → "v0.5.36-2-gd205480"）
+                     ＝注入 pane を作り直す（attach は別プロセスで daemon 再起動では入れ替わらない）
+12:01:17 [reconcile] desired=0 cur(injected)=11 → CLOSE ×11 → 注入 pane を撤去した
+12:01:18 [reconcile] desired=11 cur(injected)=0 → CREATE ×11
+```
+
+`cmd/herdr-drover/attachrefresh.go` の**意図的な設計**（版数が変わった起動の 1 回だけ）。
+版数が同じ通常の daemon 再起動では何もしない。**今回作り直されたのは新版をデプロイしたから。**
+
+### ここから出た本物の欠陥（✅ 修正済み・2026-08-28）
+
+撤去ループ（`reconcile.go`）が desired に無い pane を close する際、**常に
+`（リモート消滅）`** と出していた。desired が空になる経路は 2 つあり意味が正反対:
+
+- (a) 実際にリモート session が消えた（通常の `st`）
+- (b) **撤去指示**＝`emptyRemoteSource`（`DROVER_INJECT_REMOTE=off` / 版数更新後の
+  attachrefresh）。このとき**リモートは健在**
+
+旧実装は (b) でも「リモート消滅」と出すため、**正常な作り直しを「↗窓 が壊れた」と
+誤診断させた**（実際に踏んだ）。sentinel 型の exact-match で理由を出し分けるよう修正:
+`CLOSE %s（撤去指示＝desired 空（リモートは健在））`。
+回帰テスト `TestCloseReasonDistinguishesTeardownFromRemoteLoss`
+（`reconcilelive_test.go`・**旧コードで FAIL することを確認済み**）。
+
+### 教訓
+**嘘の理由を出すログは、読む人に誤った真因を掴ませる。** BUG-6 の
+`desired=N cur(injected)=N`（壊れていても健全時と同じ文字列）と同じ性質。
+**「健全」「消滅」と主張するログは、何を根拠にそう言っているかを実装で確かめる。**

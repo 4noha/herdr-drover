@@ -11,6 +11,7 @@ package main
 // reconcile が **同じ pane のまま** client を復活させることを機械検証する。
 
 import (
+	"bytes"
 	"context"
 	"log"
 	"os"
@@ -218,5 +219,58 @@ func TestInjForegroundShell(t *testing.T) {
 		if got := injForegroundShell(c.fps); got != c.want {
 			t.Errorf("%s: injForegroundShell=%q want %q", c.name, got, c.want)
 		}
+	}
+}
+
+// TestCloseReasonDistinguishesTeardownFromRemoteLoss:
+// desired が空になる経路は「リモートが消えた」と「撤去指示（注入 off / 版数更新後の
+// attachrefresh）」の 2 つあり、意味が正反対。ログが両者を取り違えると、正常な
+// 作り直しを障害と誤診断する（2026-08-28 に実際に踏んだ）。旧実装は撤去指示でも
+// 「リモート消滅」と出していたので、このテストは旧コードで FAIL する。
+func TestCloseReasonDistinguishesTeardownFromRemoteLoss(t *testing.T) {
+	sock := startHerdrForTest(t)
+	api := herdrapi.New(sock)
+	stub := reconcileStub(t)
+	idx := newTestIndex(t)
+	ctx := context.Background()
+	const selfPC = "self-herdr"
+
+	newRemote := func() *fakeRemote {
+		return &fakeRemote{
+			pcs:      []string{selfPC, "remoteA"},
+			sessions: map[string][]map[string]any{"remoteA": {fakeSess("w9:pA", "projA")}},
+		}
+	}
+
+	// ① 撤去指示（emptyRemoteSource）: リモートは健在なのに撤去される経路。
+	var buf bytes.Buffer
+	lg := log.New(&buf, "", 0)
+	reconcileRemote(ctx, api, newRemote(), Cloud{PCName: selfPC}, stub, idx, lg)
+	waitCond(t, 15*time.Second, "注入 pane 出現", func() bool {
+		return len(injectedPanes(t, api)) == 1
+	})
+	buf.Reset()
+	reconcileRemote(ctx, api, emptyRemoteSource{}, Cloud{PCName: selfPC}, stub, idx, lg)
+	waitCond(t, 15*time.Second, "撤去される", func() bool {
+		return len(injectedPanes(t, api)) == 0
+	})
+	if out := buf.String(); !strings.Contains(out, "撤去指示") || strings.Contains(out, "リモート消滅") {
+		t.Fatalf("撤去指示の CLOSE 理由が誤っている:\n%s", out)
+	}
+
+	// ② 本当にリモートが消えた場合は従来どおり「リモート消滅」。
+	buf.Reset()
+	reconcileRemote(ctx, api, newRemote(), Cloud{PCName: selfPC}, stub, idx, lg)
+	waitCond(t, 15*time.Second, "再注入される", func() bool {
+		return len(injectedPanes(t, api)) == 1
+	})
+	buf.Reset()
+	gone := &fakeRemote{pcs: []string{selfPC, "remoteA"}, sessions: map[string][]map[string]any{"remoteA": {}}}
+	reconcileRemote(ctx, api, gone, Cloud{PCName: selfPC}, stub, idx, lg)
+	waitCond(t, 15*time.Second, "消滅で撤去される", func() bool {
+		return len(injectedPanes(t, api)) == 0
+	})
+	if out := buf.String(); !strings.Contains(out, "リモート消滅") {
+		t.Fatalf("リモート消滅の CLOSE 理由が出ていない:\n%s", out)
 	}
 }

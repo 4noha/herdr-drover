@@ -631,14 +631,26 @@ func reconcileRemote(ctx context.Context, api *herdrapi.Client, st remoteSource,
 			ensureInjectClient(api, ids[0], selfExe, d.pc, d.sid, lg, time.Now())
 		}
 	}
-	// desired に無い注入 pane = リモートで消えたセッション → close + index Forget。
+	// desired に無い注入 pane → close + index Forget。
+	//
+	// ⚠ 理由を取り違えない。desired が空になる経路は 2 つあり、意味が正反対:
+	//   (a) 実際にリモート session が消えた（通常の st）
+	//   (b) **撤去指示**＝`emptyRemoteSource` を渡された（DROVER_INJECT_REMOTE=off /
+	//       版数更新後の attachrefresh）。このとき**リモートは健在**。
+	// 旧実装は (b) でも「リモート消滅」と出していたため、版数更新に伴う正常な
+	// 作り直しを「↗窓 が壊れた」と誤診断させた（2026-08-28 に実際に踏んだ）。
+	// 判定は sentinel 型の exact-match（推測しない）。
+	closeReason := "リモート消滅"
+	if _, teardown := st.(emptyRemoteSource); teardown {
+		closeReason = "撤去指示＝desired 空（リモートは健在）"
+	}
 	for pid := range cur {
 		_ = api.PaneClose(pid)
 		if idx != nil {
 			_ = idx.Forget(pid)
 		}
 		delete(reported, pid) // agent 転記の release 追跡から除去（pane 消滅で agent も消える。nil map でも安全）
-		lg.Printf("[reconcile] CLOSE %s（リモート消滅）", pid)
+		lg.Printf("[reconcile] CLOSE %s（%s）", pid, closeReason)
 	}
 	// ⚠ token 無し pane の一括掃除はしない: 注入 workspace には WorkspaceCreate 由来の
 	// **構造 root pane（token 無し）**が常駐する（実 herdr 0.7.4 で実測）ため、「token 無し
