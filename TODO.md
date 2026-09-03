@@ -122,6 +122,28 @@ d24wt27c3j-herdr/w4:pV        0/3・最長 1m1.9s（健全）
   自動復旧しない。原因が分かるまで「無通信 N 分で自己再注入」を足すのは対症療法に
   なるので保留（原因に合った修正を入れる）。
 
+### 2026-08-01: opencode 対応（Spec 追加・会話 e2e 済）＋ attach.log のローテート修正
+
+- **opencode 1.18.10**（`brew install anomalyco/tap/opencode`・公式 tap）を導入して実測。
+  resume `--session <id>`（`-s`）／更新 `opencode upgrade`／`--model`（`-m`・値は
+  `provider/model` 形）。**会話 e2e まで通した**（restart で会話復元・トークン数一致）。
+- ⚠ **会話 ref がまた別形**: `ses_0453f4bacffeVovPPMlEdXPNTj`（`ses_` + base62 風）。
+  実測 3 系統目（UUID／単語スラッグ／これ）＝**書式ヒューリスティックを入れては
+  いけない**という設計判断がさらに裏付けられた。
+- ⚠ **`opencode upgrade` は導入経路を自分で検知する**（`Using method: brew`）＝
+  devin と違い brew 管理と食い違わないので自己更新を載せてよい。
+- 🔴 **実バグを 1 件発見・修正**: `restart-agent-session` の「launch argv が無い」skip
+  理由が **"claude" 固定**で、opencode の pane を skip したときに「claude を直接起動
+  していない」と**利用者に嘘を表示していた**。`update-agent-cli` の「更新口を持つのは
+  claude のみ」と同種（メッセージに種別名を焼く）。旧コードで FAIL する回帰テスト付き。
+- 🔴 **attach.log のローテート設計ミスを修正**: 「11 viewer が 1 分に数行なので 8MB は
+  月単位で足りる」という見積もりを完全に外し、**実際は 1 日 10MB**（1 サイクル 3 行 ×
+  17 viewer）。`.1` ごと 1 日で押し流され**機ごとの比較ができなくなっていた**。
+  対処はサイズ増ではなく**量の削減**（1 サイクル 1 行＋同じ結果は畳む＋15 分ごとに
+  生存確認 1 行）。テスト 5 本。
+- ⏳ **残**: 7/26 に見つけた `EOF` 0.9 秒／`failed to read frame`（1MB 超）の原因は未解明。
+  ローテート修正で数日ぶんのログが残るようになったので、次はそれを見る。
+
 ### 2026-07-26: copilot / devin 対応（Spec 追加）
 
 両 CLI をこのマシンへ導入して**実物を叩いてから** `internal/agentid/spec.go` に

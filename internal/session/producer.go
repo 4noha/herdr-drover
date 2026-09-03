@@ -90,6 +90,13 @@ type Producer struct {
 	// 変化＝Wi-Fi 切替等を都度反映。ローカル syscall のみで安価）。
 	localIPs func() []string
 
+	// imagePaste は「この PC が Web からの画像貼付を受け付けるか」（既定 false）。
+	// PC 単位の能力値で、local_ips と同じく各 session doc に載せる。Web はこれを
+	// 見て「送ったのに何も起きない」を事前に伝えられる（従来は常に成功表示だった）。
+	// cmd 側が DROVER_WEB_IMAGE_PASTE と role=slave の判定を済ませた値を渡す
+	// （session パッケージはポリシーを持たない＝localIPs と同じ規律）。
+	imagePaste bool
+
 	// seeded は prev を Firestore 実態（OwnSessionKeys）で初期化済みか。
 	// 初回 tick で seed し、失敗したら tick ごと skip して次回再試行する
 	// （seed 無しで進むと agent 停止中に終了した pane の doc が永久残留）。
@@ -125,6 +132,14 @@ func (p *Producer) WithOnSessions(fn func(sessions []map[string]any)) *Producer 
 // をした上で呼ぶかどうかを決める（session パッケージはポリシーを持たない）。
 func (p *Producer) WithLocalIPs(fn func() []string) *Producer {
 	p.localIPs = fn
+	return p
+}
+
+// WithImagePaste は「この PC が Web からの画像貼付を受け付けるか」を注入する
+// （返り値は self＝method chain 可）。cmd 側が DROVER_WEB_IMAGE_PASTE と
+// role=slave の判定を済ませてから渡す（session パッケージはポリシーを持たない）。
+func (p *Producer) WithImagePaste(v bool) *Producer {
+	p.imagePaste = v
 	return p
 }
 
@@ -181,7 +196,11 @@ func isActive(agentStatus string) bool {
 // 到達先確認用に各 tab へ IP を出したい」への対処）。nil/空なら session に
 // local_ips キー自体を載せない（opt-out・未設定 PC は追加フィールド無しの
 // 従来スキーマのまま＝後方互換）。
-func BuildSessions(panes []herdrapi.PaneInfo, agents []herdrapi.AgentInfo, isInjected func(paneID string) bool, localIPs []string) []map[string]any {
+// imagePaste は PC 単位の能力値（この PC が Web からの画像貼付を受け付けるか）。
+// local_ips と同じく PC 単位の値を各 session doc に載せる（Web の onSnapshot は
+// session doc を購読しているため。前例＝local_ips）。false のときは載せない
+// （後方互換＝旧 Web/旧 agent は追加キーを知らない）。
+func BuildSessions(panes []herdrapi.PaneInfo, agents []herdrapi.AgentInfo, isInjected func(paneID string) bool, localIPs []string, imagePaste bool) []map[string]any {
 	// pane_id → agent の対応（agent の name/status を優先採用するため）。
 	agentByPane := make(map[string]herdrapi.AgentInfo, len(agents))
 	for _, a := range agents {
@@ -258,6 +277,12 @@ func BuildSessions(panes []herdrapi.PaneInfo, agents []herdrapi.AgentInfo, isInj
 			}
 			sess["local_ips"] = ips
 		}
+		// image_paste は true の時だけ載せる（false は「載せない」で表現＝
+		// 追加キーを知らない旧 Web/旧 agent と後方互換。content_hash が
+		// 変わるのは有効化した初回 1 回だけ）。
+		if imagePaste {
+			sess["image_paste"] = true
+		}
 		out = append(out, sess)
 	}
 	// 決定的順序（テスト・ログ比較のため。Firestore 書込は doc 単位なので
@@ -312,7 +337,7 @@ func (p *Producer) Tick(ctx context.Context) error {
 	if p.localIPs != nil {
 		ips = p.localIPs()
 	}
-	ss := BuildSessions(panes, agents, p.isInjected, ips)
+	ss := BuildSessions(panes, agents, p.isInjected, ips, p.imagePaste)
 	cur := make(map[string]bool, len(ss))
 	for _, s := range ss {
 		cur[s["key"].(string)] = true

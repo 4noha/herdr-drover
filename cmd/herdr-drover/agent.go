@@ -256,6 +256,9 @@ func runOneCloud(ctx context.Context, cfg Config, cl Cloud, primary bool, hcli *
 	var wt *webTerm
 	if cl.RelayURL != "" {
 		wt = newWebTerm(cl.RelayURL, cfg.Idle, st, hcli, lg)
+		// 画像貼付（DROVER_WEB_IMAGE_PASTE・既定 off）。slave では config が
+		// 強制 false にしている＝ここは解決済みの値をそのまま渡すだけ。
+		wt.imagePaste = cfg.WebImagePaste
 		// slave は /session dial に bearer が要る（relay の SlaveGate が
 		// source⇄own-sid を認可）。master は seam nil＝header-less
 		// relayclient.Dial のまま＝byte 同一。
@@ -350,7 +353,11 @@ func runOneCloud(ctx context.Context, cfg Config, cl Cloud, primary bool, hcli *
 	// 各クラウドが自分の producer を持つ＝同じ herdr セッションを各クラウドへ push。
 	// 注入 pane 判定は injectindex を権威にする（v0.5.x〜）。idx.IsInjected は
 	// Pending / Live のどちらでも true を返し、token の race 窓と再起動消失を塞ぐ。
-	prod := session.NewProducer(hcli, st).WithIsInjected(idx.IsInjected)
+	prod := session.NewProducer(hcli, st).WithIsInjected(idx.IsInjected).
+		// この PC が画像貼付を受け付けるかを session へ載せる（Web が
+		// 「送ったのに何も起きない」を事前に伝えられるようにする）。
+		// slave 強制 false は config 側で解決済み。
+		WithImagePaste(cfg.WebImagePaste)
 	// DROVER_SHARE_LOCAL_IPS（既定 true・config.go 参照）: 自 PC の全ローカル IP を
 	// session に載せ、他 PC の注入 pane title で SSH 到達先確認等に使えるようにする。
 	// opt-out 時は WithLocalIPs 自体を呼ばない（producer は localIPs==nil のまま＝

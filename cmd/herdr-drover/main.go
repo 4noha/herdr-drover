@@ -312,6 +312,10 @@ func usage(w io.Writer) {
   DROVER_TICK                     producer 周期（Go duration 形式。既定 5s）
   DROVER_IDLE                     Web ターミナル quiescence 自切断の無通信時間（既定 30s）
 
-未実装（後続フェーズ）: attach
+  herdr-drover attach <pc> <sid>
+                          リモート pane 注入の viewer client（↗窓 の中身）。
+                          通常は reconcile が注入 pane 内で起動する内部コマンドだが、
+                          復元などで client が落ちた pane に手で打ち直すこともできる
+                          （reconcile も前景がシェルなら同じ argv で自動復活させる）
 `, version)
 }

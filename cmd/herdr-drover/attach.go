@@ -464,12 +464,7 @@ func cmdAttach(args []string, stdout, stderr io.Writer) error {
 			lg.Printf("ctx 終了＝正常終了（pane close / SIGTERM）")
 			return nil
 		}
-		cycle := time.Since(start)
-		next := attachBackoffReset(backoff, cycle, idleClosed)
-		// ⚠この 1 行が「張り付き」診断の主役: サイクルがどれだけ続いたか・idle 由来か・
-		// 次に何秒待つかが並ぶので、**再接続が回っているのか止まっているのか**が読める。
-		lg.Printf("cycle 終了 継続=%s idleClosed=%v backoff %s→%s",
-			cycle.Round(time.Millisecond), idleClosed, backoff, next)
+		next := attachBackoffReset(backoff, time.Since(start), idleClosed)
 		backoff = next
 		select {
 		case <-ctx.Done():
@@ -578,11 +573,13 @@ func attachOnce(ctx context.Context, st *state.Client, relayURL, injSid, remoteP
 	})
 	if err != nil {
 		fmt.Fprintf(out, "\x1b[2J\x1b[H↗ %s / %s: %v（再試行）\r\n", remotePC, injSid, err)
-		lg.Printf("dial 失敗（所要 %s）: %v", time.Since(dialStart).Round(time.Millisecond), err)
+		lg.flushCycle()
+		lg.Cycle("dial-fail", fmt.Sprintf("dial 失敗（所要 %s）: %v",
+			time.Since(dialStart).Round(time.Millisecond), err))
 		return false
 	}
 	defer conn.Close()
-	lg.Printf("dial 成功（所要 %s）", time.Since(dialStart).Round(time.Millisecond))
+	dialTook := time.Since(dialStart).Round(time.Millisecond)
 
 	// この接続を holder に載せ、常駐 stdin reader（cmdAttach）が入力を転送できる
 	// ようにする。切断で外す（未接続中の入力は破棄＝次接続から届く）。cycle ごとに
@@ -620,12 +617,14 @@ func attachOnce(ctx context.Context, st *state.Client, relayURL, injSid, remoteP
 	go func() { <-dctx.Done(); conn.Close() }()
 
 	pumpStart := time.Now()
-	idleClosed, got := pumpFrames(conn, out, DefaultIdle)
+	idleClosed, got, why := pumpFrames(conn, out, DefaultIdle)
 	// ⚠張り付き調査の核心行。received=0 が続くなら「dial は通るが source が bridge を
 	// 張っていない」（＝Wake/grant 側の問題）、received>0 なら「流れていた接続が落ちた」
-	// で原因が別れる。conn の生存時間も一緒に見る。
-	lg.Printf("pump 終了 接続=%s received=%dB idleClosed=%v",
-		time.Since(pumpStart).Round(time.Millisecond), got, idleClosed)
+	// で原因が別れる。**1 サイクル 1 行**に畳んで書く（量の見積もりを外して
+	// ローテートで比較材料を失った反省。attachlog.go の Cycle 参照）。
+	kind := cycleKind(idleClosed, why)
+	lg.Cycle(kind, fmt.Sprintf("dial %s → 接続=%s received=%dB idleClosed=%v ／ %s",
+		dialTook, time.Since(pumpStart).Round(time.Millisecond), got, idleClosed, why))
 	return idleClosed
 }
 
@@ -664,7 +663,11 @@ type deadlineConn interface {
 // 戻り値 got は**この接続で受け取った総バイト数**（診断用）。0 のまま切れたのは
 // 「dial は通ったのに source が bridge を張らなかった／フレームが一度も来なかった」で、
 // 「流れていた接続が落ちた」とは原因が別＝張り付き調査で最初に効く切り分けになる。
-func pumpFrames(conn deadlineConn, out io.Writer, idle time.Duration) (idleClosed bool, got int64) {
+// 戻り値 why は**どちらの端で終わったか**の 1 行（診断用）。conn の Read で
+// 終わったのか、pane PTY への Write で終わったのかは症状が同じ
+// （`idleClosed=false` かつ received>0）なのに原因がまったく別なので、
+// **区別できないと張り付き調査で詰む**（実際に詰んだ）。
+func pumpFrames(conn deadlineConn, out io.Writer, idle time.Duration) (idleClosed bool, got int64, why string) {
 	if idle > 0 {
 		_ = conn.SetReadDeadline(time.Now().Add(idle))
 	}
@@ -676,7 +679,7 @@ func pumpFrames(conn deadlineConn, out io.Writer, idle time.Duration) (idleClose
 		n, rerr := conn.Read(buf)
 		if n > 0 {
 			if _, werr := out.Write(buf[:n]); werr != nil {
-				return false, got
+				return false, got, fmt.Sprintf("pane への書込失敗（%d バイト目）: %v", got+int64(n), werr)
 			}
 			got += int64(n)
 			last = time.Now()
@@ -685,7 +688,8 @@ func pumpFrames(conn deadlineConn, out io.Writer, idle time.Duration) (idleClose
 			}
 		}
 		if rerr != nil {
-			return isQuiescentClose(idle, time.Since(last)), got
+			return isQuiescentClose(idle, time.Since(last)), got,
+				fmt.Sprintf("conn 読取終了: %v", rerr)
 		}
 	}
 }

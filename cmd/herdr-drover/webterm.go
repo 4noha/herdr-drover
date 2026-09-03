@@ -64,6 +64,12 @@ type webTerm struct {
 	// relayclient.Dial＝byte 同一）／slave は bearer 付き dialer を注入する。
 	dialSource func(ctx context.Context, sid string) (net.Conn, error)
 
+	// imagePaste は Web からの画像貼付を受け付けるか（DROVER_WEB_IMAGE_PASTE
+	// 由来・既定 false）。dialSource と同じく生成後に代入する knob。
+	// ⚠ slave では config 側で強制 false 済み（クリップボードが同一アカウントの
+	//   他人から読めるため。DESIGN_SLAVE の脅威モデル）。
+	imagePaste bool
+
 	mu     sync.Mutex
 	ctx    context.Context       // start() の親 ctx（respawn の再 spawn 用）
 	active map[string]*bridgeRun // 同 sid の二重ブリッジ防止＋respawn ハンドル
@@ -199,6 +205,8 @@ func (w *webTerm) handleWake(ctx context.Context, sid string) {
 	// quiescence（無通信自切断）は DROVER_IDLE で調整可（0 なら bridge 既定
 	// 30s＝cm 本番 IdleClose と同値）。e2e が短い idle で実切断を検証する。
 	b.Idle = w.idle
+	// 画像貼付（既定 off）。off の間は従来どおり IMAGE frame を破棄する。
+	b.ImagePaste = w.imagePaste
 	b.Logf = func(format string, args ...any) {
 		w.lg.Printf("webterm: bridge sid=%q: "+format, append([]any{sid}, args...)...)
 	}

@@ -63,8 +63,10 @@ scan エラー tick は skip＝前回状態維持（cm の空 STATUS flap 教訓
  → bridge: 初回 RESIZE magic 待ち → `herdr terminal session observe <pane_id>
     --cols C --rows R` spawn → frame envelope decode → ANSI bytes を WSS へ
 逆方向: cmwire parser が RESIZE→observe respawn（新 full frame）／SCROLL→v1 無視
- ／IMAGE(0xff 0xfd)→u32 長ぶん **parse-and-drop 必須**（漏れると画像バイトが
- 打鍵として pane に流れる）／その他→pane.send_input
+ ／IMAGE(0xff 0xfd)→u32 長ぶん **parse-and-consume 必須**（漏れると画像バイトが
+ 打鍵として pane に流れる）。payload は `DROVER_WEB_IMAGE_PASTE`（既定 off）が
+ false なら drop、true なら一時ファイル化→OS クリップボード→pane へ Ctrl+V(0x16)
+ ／その他→pane.send_input
 無通信 30s → BridgeSourceIdle 自切断（quiescence）→ M9 push で自動復帰
 ```
 

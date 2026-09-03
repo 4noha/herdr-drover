@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -50,6 +51,15 @@ type Config struct {
 	// inject-index＋reconcile が desired を維持して注入が続く）。注入を止める独立
 	// フラグとしてこれを新設した。優先順位 env > file(inject_remote_panes) > 既定。
 	InjectRemotePanes bool
+	// WebImagePaste は DROVER_WEB_IMAGE_PASTE（Web ターミナルから届いた画像を
+	// この PC の OS クリップボードへ載せて pane に Ctrl+V 注入するか）。
+	// 既定 false=opt-in（cm の WebImagePaste と同じ既定）。macOS 専用。
+	//
+	// ⚠ **slave（共用 PC）では強制 false**。クリップボードは同一アカウントの
+	//   他人も読める＝画像が第三者に露出する（DESIGN_SLAVE の脅威モデル）。
+	//   env/file で true にしても role=slave なら無効化し、その旨をログに出す
+	//   （silent に落とさない＝鉄則 5）。
+	WebImagePaste bool
 }
 
 // resolveConfig は Config を解決する。優先順位はキー単位で
@@ -74,9 +84,10 @@ func resolveConfig() (Config, error) {
 	// エラーとして返すが解決は続行する（沈黙で無視すると enroll 済のはずが
 	// 未設定で動く事故になる。契約: 判明分は埋めて返す）。
 	var fileErr error
-	var fcMirror *bool  // mirror_agents の file 値（env 未設定なら採用）
-	var fcShareIP *bool // share_local_ips の file 値（env 未設定なら採用）
-	var fcInject *bool  // inject_remote_panes の file 値（env 未設定なら採用）
+	var fcMirror *bool   // mirror_agents の file 値（env 未設定なら採用）
+	var fcShareIP *bool  // share_local_ips の file 値（env 未設定なら採用）
+	var fcInject *bool   // inject_remote_panes の file 値（env 未設定なら採用）
+	var fcImgPaste *bool // web_image_paste の file 値（env 未設定なら採用）
 	if path, perr := configFilePath(); perr == nil {
 		fc, ferr := readFileConfig(path)
 		if ferr != nil {
@@ -100,6 +111,7 @@ func resolveConfig() (Config, error) {
 		fcMirror = fc.MirrorAgents
 		fcShareIP = fc.ShareLocalIPs
 		fcInject = fc.InjectRemotePanes
+		fcImgPaste = fc.WebImagePaste
 	}
 	if cfg.PCID == "" {
 		host, err := os.Hostname()
@@ -180,6 +192,26 @@ func resolveConfig() (Config, error) {
 		}
 		cfg.InjectRemotePanes = b
 	}
+	// DROVER_WEB_IMAGE_PASTE: Web ターミナルから届いた画像をこの PC の OS
+	// クリップボードへ載せ pane に Ctrl+V を注入するか。既定 false=opt-in
+	// （cm の WebImagePaste と同じ既定）。優先順位 env > file(web_image_paste) > 既定。
+	if fcImgPaste != nil {
+		cfg.WebImagePaste = *fcImgPaste
+	}
+	if v := os.Getenv("DROVER_WEB_IMAGE_PASTE"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return cfg, fmt.Errorf("DROVER_WEB_IMAGE_PASTE が不正（true/false/1/0 等）: %q: %w", v, err)
+		}
+		cfg.WebImagePaste = b
+	}
+	// ⚠ slave（共用 PC）では強制 false。クリップボードは同一アカウントの他人も
+	// 読める＝画像が第三者に露出する（DESIGN_SLAVE の脅威モデル）。設定で有効に
+	// されていても無効化し、**必ずログに残す**（silent に落とさない＝鉄則 5）。
+	if cfg.Role == "slave" && cfg.WebImagePaste {
+		log.Printf("画像貼付を無効化: role=slave（共用 PC ではクリップボードを同一アカウントの他人が読めるため）")
+		cfg.WebImagePaste = false
+	}
 	return cfg, fileErr
 }
 
@@ -206,6 +238,8 @@ type fileConfig struct {
 	ShareLocalIPs *bool `json:"share_local_ips,omitempty"`
 	// InjectRemotePanes も同じくポインタ（未設定=nil で env>file>既定 true の合成）。
 	InjectRemotePanes *bool `json:"inject_remote_panes,omitempty"`
+	// WebImagePaste も同じくポインタ（未設定=nil で env>file>既定 false の合成）。
+	WebImagePaste *bool `json:"web_image_paste,omitempty"`
 }
 
 // readFileConfig は設定ファイルを読む。不在はゼロ値＋nil（enroll 前の

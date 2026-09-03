@@ -110,3 +110,53 @@ func TestResolveConfigInjectRemotePanes(t *testing.T) {
 		t.Fatal("env=true が file=false を上書きするはず")
 	}
 }
+
+// TestResolveConfigWebImagePaste は DROVER_WEB_IMAGE_PASTE / web_image_paste の
+// 解決を検証する。**既定 false=opt-in**（cm の WebImagePaste と同じ）で、
+// **role=slave では設定を無視して強制 false**（共用 PC のクリップボードは同一
+// アカウントの他人が読める＝DESIGN_SLAVE の脅威モデル）。
+func TestResolveConfigWebImagePaste(t *testing.T) {
+	home := t.TempDir()
+	setTestHome(t, home)
+	t.Setenv("HERDR_ROLE", "")
+
+	// 既定 OFF（env も file も無し）。
+	t.Setenv("DROVER_WEB_IMAGE_PASTE", "")
+	if cfg, err := resolveConfig(); err != nil {
+		t.Fatalf("resolveConfig: %v", err)
+	} else if cfg.WebImagePaste {
+		t.Fatal("既定は false のはず（opt-in）")
+	}
+
+	// env=true → ON。
+	t.Setenv("DROVER_WEB_IMAGE_PASTE", "true")
+	if cfg, _ := resolveConfig(); !cfg.WebImagePaste {
+		t.Fatal("DROVER_WEB_IMAGE_PASTE=true で ON のはず")
+	}
+
+	// 不正値はエラー（silent に既定へ落とさない）。
+	t.Setenv("DROVER_WEB_IMAGE_PASTE", "perhaps")
+	if _, err := resolveConfig(); err == nil {
+		t.Fatal("不正値がエラーになっていない")
+	}
+
+	// file(web_image_paste)=true・env 未設定 → ON。
+	t.Setenv("DROVER_WEB_IMAGE_PASTE", "")
+	writeConfigJSON(t, home, `{"web_image_paste": true}`)
+	if cfg, _ := resolveConfig(); !cfg.WebImagePaste {
+		t.Fatal("file の web_image_paste=true が効いていない")
+	}
+
+	// env が file に勝つ（env=false）。
+	t.Setenv("DROVER_WEB_IMAGE_PASTE", "false")
+	if cfg, _ := resolveConfig(); cfg.WebImagePaste {
+		t.Fatal("env が file に優先していない")
+	}
+
+	// ⚠ role=slave は設定より強い（env=true でも強制 false）。
+	t.Setenv("DROVER_WEB_IMAGE_PASTE", "true")
+	t.Setenv("HERDR_ROLE", "slave")
+	if cfg, _ := resolveConfig(); cfg.WebImagePaste {
+		t.Fatal("slave では強制 false のはず（共用 PC のクリップボードは他人も読める）")
+	}
+}

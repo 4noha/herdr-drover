@@ -210,11 +210,15 @@ func TestIsDirectInvocationCoversAllAgents(t *testing.T) {
 // フラグ名が同じでも**モデル名は互換でない**ので、種別を跨いで同じ値を
 // 渡してはいけない（呼び手が --agent を要求する）。
 func TestModelSpec(t *testing.T) {
-	for _, a := range []string{"claude", "codex", "cursor", "copilot", "devin"} {
+	for _, a := range []string{"claude", "codex", "cursor", "copilot", "devin", "opencode"} {
 		sp, ok := Model(a)
 		if !ok || sp.Flag != "--model" {
 			t.Errorf("%s: ModelSpec = %+v ok=%v", a, sp, ok)
 		}
+	}
+	// opencode は codex と同じく短縮形 -m を持つ（実測 1.18.10 `-m, --model`）。
+	if sp, _ := Model("opencode"); len(sp.Aliases) != 1 || sp.Aliases[0] != "-m" {
+		t.Errorf("opencode の Aliases = %v（-m のはず）", sp.Aliases)
 	}
 	// copilot / devin とも短縮形は無い（実測 copilot 1.0.75 / devin 3000.2.17）。
 	for _, a := range []string{"copilot", "devin"} {
@@ -281,6 +285,12 @@ func TestUpdaterSpecCoversVerifiedAgents(t *testing.T) {
 			t.Errorf("%s: VersionArgv = %v", a, sp.VersionArgv)
 		}
 	}
+	// opencode は `upgrade`（`update` ではない）。⚠サブコマンド名は agent ごとに違う
+	// ＝表の値をそのまま使うこと（"update" 決め打ちにしない）。導入経路を自分で
+	// 検知して brew 経由で更新するので、brew 管理と食い違わない（devin との違い）。
+	if sp, ok := Updater("opencode"); !ok || len(sp.UpdateArgv) != 1 || sp.UpdateArgv[0] != "upgrade" {
+		t.Errorf("opencode: UpdateArgv = %v（upgrade のはず）", sp.UpdateArgv)
+	}
 	// devin は **版は取れるが自己更新は載せない**（`devin update` は存在するが
 	// 非対話で完走しない＝実測 3000.2.17 で stdin を閉じると rc=130・出力 9B。
 	// さらに brew cask 管理なので自己更新は brew と食い違う）。UpdateArgv=nil は
@@ -305,7 +315,7 @@ func TestUpdaterSpecCoversVerifiedAgents(t *testing.T) {
 // 直っておらず利用者に嘘を表示していた）。
 func TestUpdaterAgents(t *testing.T) {
 	got := UpdaterAgents()
-	want := []string{"claude", "codex", "copilot", "cursor", "devin"}
+	want := []string{"claude", "codex", "copilot", "cursor", "devin", "opencode"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("UpdaterAgents() = %v, want %v（昇順・表と一致）", got, want)
 	}
@@ -326,8 +336,9 @@ func TestInstallSpecCoversVerifiedAgents(t *testing.T) {
 		{"claude", "claude"},
 		{"codex", "codex"},
 		{"cursor", "cursor-agent"},
-		{"copilot", "copilot"}, // npm -g @github/copilot（実測 /opt/homebrew/bin/copilot）
-		{"devin", "devin"},     // brew --cask devin-cli（実測 /opt/homebrew/bin/devin）
+		{"copilot", "copilot"},   // npm -g @github/copilot（実測 /opt/homebrew/bin/copilot）
+		{"devin", "devin"},       // brew --cask devin-cli（実測 /opt/homebrew/bin/devin）
+		{"opencode", "opencode"}, // brew anomalyco/tap/opencode（実測 /opt/homebrew/bin/opencode）
 	} {
 		sp, ok := Install(tc.agent)
 		if !ok {

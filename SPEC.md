@@ -451,18 +451,40 @@ organize / producer が共有）。権威は強い順に:
 | 自己更新 | `copilot update` ✅ 非対話で完走 | ❌ **非対話で完走しない**（rc=130）＝Spec に載せない |
 | `--model` | ✅（短縮形なし） | ✅（短縮形なし・env `DEVIN_MODEL`） |
 
-#### 「resume 後の hook 再発火」の一覧（2026-07-26 に cursor を計測して確定）
+#### 「resume 後の hook 再発火」の一覧（2026-08-01 に opencode を追加して確定）
 
-| claude | codex | cursor | copilot | devin |
-|---|---|---|---|---|
-| ✅ する | ❌ しない | ❌ しない | ❌ しない | ✅ する |
+| claude | codex | cursor | copilot | devin | opencode |
+|---|---|---|---|---|---|
+| ✅ する | ❌ しない | ❌ しない | ❌ しない | ✅ する | ❌ しない |
 
-⚠ **再発火しないのが多数派（5 種中 3 種）**。❌ の種別は 1 回目の restart で
+⚠ **再発火しないのが多数派（6 種中 4 種）**。❌ の種別は 1 回目の restart で
 `agent_session` が消えるため、**同じ pane を 2 回目に restart すると素起動になる**
 （会話が失われる）。herdr / 各エージェント側の性質で drover では埋められない。
 運用は **`--dry-run` で `--resume <ref>` が組み立てられるか確認してから実行**する。
 cursor の計測は「restart → 画面に元の発話が復元されている（＝resume は成功）／
 `agent_session` は `None` に落ちる」を実 pane で確認した。
+
+#### opencode（2026-08-01 追加・会話 e2e まで実機検証済み）
+
+| 事項 | opencode 1.18.10 |
+|---|---|
+| 導入 | `brew install anomalyco/tap/opencode`（公式 tap・要 ripgrep）。curl / `npm i -g opencode-ai` も公式 |
+| 実行ファイル | `opencode` |
+| 版の出力 | 素の `1.18.10`（製品名を含まない） |
+| resume argv | `--session <id>`（`-s` 短縮形あり） |
+| **会話 ref の形** | ⚠**`ses_` + base62 風**（実測 `ses_0453f4bacffeVovPPMlEdXPNTj`） |
+| restart 実機（会話復元） | ✅（トークン数まで一致） |
+| resume 後の hook 再発火 | ❌ **しない** |
+| 自己更新 | `opencode upgrade` ✅ 非対話で完走 |
+| `--model` | ✅（`-m` あり・値は **`provider/model` 形**） |
+
+⚠ **`opencode upgrade` は導入経路を自分で検知する**（実測: brew 導入なら
+`Using method: brew` と自己申告し、最新なら `upgrade skipped` で rc=0）。devin と違い
+**brew 管理と食い違わない**ので自己更新を Spec に載せてよい。
+
+⚠ ResumeSpec の Aliases に **`-c, --continue` を入れてはいけない**。`--continue` は
+「直前のセッション」で **id を取らない別物**＝alias に入れると値のある `--session` を
+落とし損ねる。
 
 ⚠ **devin の会話 ref は UUID ではない**（`resolute-lynx`）。`ValidSessionRef` が
 「非空・512B 以下・制御文字なし」しか見ない設計だからそのまま通った。
@@ -660,6 +682,7 @@ workspace.close  workspace.create  workspace.focus  workspace.list  workspace.re
 | `DROVER_MIRROR_AGENTS` | `false` | ↗窓 にリモートの agent_status を転記（**metadata 転記の gate であって注入の gate ではない**） |
 | `DROVER_INJECT_REMOTE` | `true` | 他 PC のセッションを ↗窓 pane として注入するか（file 名 `inject_remote_panes`）。`false` で**既存の注入 pane も撤去**し新規を作らない。producer（Web/スマホ閲覧）は止めない |
 | `DROVER_SHARE_LOCAL_IPS` | — | terminal_title へローカル IP を出す |
+| `DROVER_WEB_IMAGE_PASTE` | `false` | Web ターミナルから届いた画像を**この PC の OS クリップボードへ載せ pane に Ctrl+V(0x16) を注入**する（file 名 `web_image_paste`）。macOS 専用（osascript）。⚠ **`role=slave` では設定を無視して強制 false**＝共用 PC のクリップボードは同一アカウントの他人が読める。有効時は session doc に `image_paste: true` が載り、Web はこれを見て「この PC は無効」を事前表示する（false は**載せない**＝旧 Web と後方互換） |
 
 ### 6.2 ファイル
 
@@ -760,6 +783,14 @@ herdr＝drover daemon が exit/再起動しても入れ替わらない。** よ�
     「ローカル未導入のエージェントの既存セッションへ attach だけしたい」が失敗する。
 15. **旧命令名を allowlist から外さない**。まだ更新していない PC の Web/CLI から
     投げられなくなる（先行デプロイの意味が消える）。
+16. **「在ること」は「生きていること」ではない**。pane / token / metadata の一致は
+    存在の権威であって生存の権威ではない。pane を数えて健全と判断する経路は必ず
+    **プロセスの生存（`pane.process_info` の argv exact-match）**まで確認する。
+    同型の欠陥を 2 度踏んでいる: BUG-1（shim の resume backstop が zombie pane を
+    live とみなした）と BUG-6（reconcile が client の死んだ注入 pane を
+    `cur(injected)` に数え続け、再起動後の ↗窓 全滅を自己修復しなかった）。
+    ⚠ 生存確認は**間引く**（ndjson は 1 接続=1 リクエスト）。復活は pane を作り直さず
+    残ったシェルに同じ argv を打ち直す（pane_id / Tab / 配置を保つ）。
 
 ---
 

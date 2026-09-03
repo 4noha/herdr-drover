@@ -127,7 +127,7 @@ func TestPumpFramesForwardsData(t *testing.T) {
 	done := make(chan struct{})
 	var received int64
 	go func() {
-		_, received = pumpFrames(conn, &out, time.Second)
+		_, received, _ = pumpFrames(conn, &out, time.Second)
 		close(done)
 	}()
 
@@ -218,7 +218,7 @@ func TestPumpFramesDetectsIdleOnRealWebsocketConn(t *testing.T) {
 	var out discardWriter
 	const idle = 300 * time.Millisecond
 	start := time.Now()
-	got, received := pumpFrames(nc, &out, idle)
+	got, received, _ := pumpFrames(nc, &out, idle)
 	if !got {
 		t.Fatalf("実 websocket conn の無通信切断を idleClosed として報告しなかった"+
 			"（= backoff がリセットされ即再 Wake→observe 再 spawn の thrash が続く）。経過=%v",
@@ -304,7 +304,7 @@ func TestPumpFramesReportsIdleClose(t *testing.T) {
 		{"idle<=0（監視無効）は常に false", &errConn{err: io.EOF}, 0, false},
 	}
 	for _, c := range cases {
-		if got, _ := pumpFrames(c.conn, &out, c.idle); got != c.want {
+		if got, _, _ := pumpFrames(c.conn, &out, c.idle); got != c.want {
 			t.Errorf("%s: idleClosed=%v want %v", c.name, got, c.want)
 		}
 	}
