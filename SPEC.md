@@ -75,22 +75,7 @@ Firestore サーバは Cloud Run に 1 回デプロイして全 PC で共有す�
 | `ssh-forward` | `<pc> [label]` | owner の ssh-agent を slave へ relay 越しに一時転送 | [非依存] |
 | `attach` | `<pc> <sid>` | ↗窓 の viewer client（reconcile が注入 pane 内で起動する内部コマンド） | [非依存] |
 
-### 2.3b 共用 slave の認証（memvault control plane）
-
-| サブコマンド | 引数 | 説明 | 結合度 |
-|---|---|---|---|
-| `memvault status` | なし | memvault `/status` を pretty-print（kind ごとの残 TTL・slot 一覧） | [非依存] |
-| `memvault whoami` | なし | active operator と実効 slot（inherit 込み） | [非依存] |
-| `memvault claim` | `--operator NAME` `--force` `--inherit --token T` | 自分を active operator に | [非依存] |
-| `memvault release` | `--operator NAME` `--force` | active を降りる | [非依存] |
-| `memvault issue-inherit-token` | `--owner NAME` `--for OP` `--ttl 8h` | 自 slot を他人に貸す consent を発行 | [非依存] |
-| `memvault job register` | `--owner NAME` `--job-id ID` `--ttl 4h` | 長時間 job の寿命宣言（slot 延命） | [非依存] |
-| `memvault job end` | `--owner NAME` `--job-id ID` | job 登録の解除（**冪等**） | [非依存] |
-
-設計と AWS/GCP/GitHub の材料・消費経路は **[DESIGN_MEMVAULT.md](DESIGN_MEMVAULT.md)**
-が正。ここは drover 側のインターフェース契約のみを定める。
-
-#### シムの起動先の決定表（`shim <agent> [args...]`・2026-09-04 に復元行を追加／⚠tag 未作成）
+#### シムの起動先の決定表（`shim <agent> [args...]`・2026-09-04 に復元行を追加＝v0.5.37）
 
 再起動のレイアウト復元では、pane 内で `herdr-drover <agent> --resume <ref>`
 （シム）が走ることがある。**どの pane で走るか**は herdr が session.json に
@@ -116,6 +101,21 @@ Firestore サーバは Cloud Run に 1 回デプロイして全 PC で共有す�
 exec すると同じ会話 jsonl に 2 本目のプロセスを生む（cm で実害のあった型）。
 復元 pane の `agent_status` は前景プロセス基準で復元されるため `unknown`
 （BUG-1 の実測）＝復元シナリオだけを exact に拾える。
+
+### 2.3b 共用 slave の認証（memvault control plane）
+
+| サブコマンド | 引数 | 説明 | 結合度 |
+|---|---|---|---|
+| `memvault status` | なし | memvault `/status` を pretty-print（kind ごとの残 TTL・slot 一覧） | [非依存] |
+| `memvault whoami` | なし | active operator と実効 slot（inherit 込み） | [非依存] |
+| `memvault claim` | `--operator NAME` `--force` `--inherit --token T` | 自分を active operator に | [非依存] |
+| `memvault release` | `--operator NAME` `--force` | active を降りる | [非依存] |
+| `memvault issue-inherit-token` | `--owner NAME` `--for OP` `--ttl 8h` | 自 slot を他人に貸す consent を発行 | [非依存] |
+| `memvault job register` | `--owner NAME` `--job-id ID` `--ttl 4h` | 長時間 job の寿命宣言（slot 延命） | [非依存] |
+| `memvault job end` | `--owner NAME` `--job-id ID` | job 登録の解除（**冪等**） | [非依存] |
+
+設計と AWS/GCP/GitHub の材料・消費経路は **[DESIGN_MEMVAULT.md](DESIGN_MEMVAULT.md)**
+が正。ここは drover 側のインターフェース契約のみを定める。
 
 **exit code は §2 の一般規則を 1 つ拡張する**:
 
