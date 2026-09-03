@@ -38,29 +38,44 @@ v0.5.30 で**判定を経過時間ベースへ**変更し、**実 websocket 越�
 | | 症状 | 修正 | 状態 |
 |---|---|---|---|
 | BUG-6 | ↗窓 が全滅（pane は残るが中身が素シェル。reconcile は `desired=N cur=N` と健全を主張） | reconcile に client 生存確認＋同 pane REVIVE（`ensureInjectClient`） | **origin/main に既存（`d205480`）**。merge・ビルド・**この PC にデプロイ済**（`v0.5.36-12-gbb9730c`） |
-| BUG-7 | Tab が倍増（1 会話 = 2 pane。片方は observe ビューアの殻） | シムの復元行＝自 pane が会話の持ち主なら**同 pane で exec**（`selfPaneOwningResumeRef`） | **実装＋テスト済（この作業）・未デプロイ・未タグ** |
+| BUG-7 | Tab が倍増（1 会話 = 2 pane。片方は observe ビューアの殻） | シムの復元行＝自 pane が会話の持ち主なら**同 pane で exec**（`selfPaneOwningResumeRef`） | 実装＋テスト済（`d9504b2`）・**この PC に両バイナリともデプロイ済**（`v0.5.36-13-gd9504b2`）・**未タグ** |
 
 #### BUG-7 の要点（読み返す用）
 
-- herdr の復元は各 pane の launch argv（`herdr-drover <agent> --resume <ref>`）を
-  **再実行する**。シムの「引数あり＝常に新しい Tab」に落ちると本体が別 Tab に生まれ、
-  元の pane はビューアに化ける＝倍増。
+- 復元で pane 内に `herdr-drover <agent> --resume <ref>`（シム）が起きると、
+  「引数あり＝常に新しい Tab」に落ちて本体が別 Tab に生まれ、元の pane は
+  ビューアに化ける＝倍増。
+- **シムが走る pane は限定される**（2026-09-04 実測。契約テスト
+  `TestHerdrPersistsLaunchArgvNotForegroundProcess`）:
+  session.json に残るのは**生成時の launch argv だけ**なので、明示 argv
+  （実バイナリ）付き pane は herdr server が直接 spawn＝倍増しない。倍増するのは
+  **`command` を持たず `agent_session` だけ残る pane**（素シェルで `claude` と
+  打った側）で、herdr が自前 resume を**対話シェル経由**で起こし `alias claude`
+  ＝シムに当たる。⚠2 行目は headless では再現できず（復元で pane プロセスが
+  spawn されない）、**BUG-1 の process tree（親が zsh）と本機 22:22 の復元
+  （親が server）の差分からの推論**＝次の実機再起動で確定させる。
+- ⚠**本機の現 7 枚は明示 argv（実 claude）**なので、次の再起動では倍増しない
+  代わりに新分岐も通らない（発火は素シェル由来 pane と他 PC）。
 - **BUG-1（2026-07-26）は同じ復元シナリオの前半だけを直していた**（自 pane を
   attach 候補から除外＝空 pane 化の停止）。残っていたのは「本物を*どこに*立てるか」。
 - 判定材料は既に手元にあった: `HERDR_PANE_ID`（pane env の権威値）×
   `agent_session.value`（`pane.get`）。**live な自 pane は対象外**
   （exec すると同じ会話 jsonl に 2 本目を作る）。決定表は SPEC.md §2.3・不変条件 17。
 
-#### 🔴 残作業（この順で）
+#### ✅ 済（2026-09-04）
 
-1. **`~/.local/bin/herdr-drover` の版ズレを解消する**。`claude` シムが実行するのは
-   **こちら**で、現在 **v0.5.31**（`~/.herdr-drover/bin` は v0.5.36-12-gbb9730c）。
-   **BUG-7 はここを更新しないと効かない**。
-2. デプロイすると **attachrefresh が ↗ pane を 1 回作り直す**（版数が変わるため。
-   pane_id / workspace_id が変わる＝2026-09-03 に実際に `w1S/w1T/w1V` →
-   `w1X/w1Y/w1Z` になった）。作業前にユーザーへ伝えること。
-3. **BUG-7 は次の再起動から効く**（既存 pane は旧バイナリを掴んだまま）。
-4. tag / release は**対外操作＝ユーザー明示確認後**。現在の最新 tag は v0.5.36 で、
+1. **`~/.local/bin/herdr-drover` の版ズレ解消**（v0.5.31 → `v0.5.36-13-gd9504b2`）。
+   `claude` シムが実行するのはこちらなので、BUG-7 はここが要だった。
+2. デプロイに伴う **attachrefresh の ↗ pane 作り直し**は完了（29/29 再作成・
+   `desired=29 cur(injected)=29 pending=0`。workspace_id は `w1X/w1Y/w1Z` →
+   `w10/w21/w22` へ変化。ローカル 9 pane は無傷、focus は復帰済み）。
+
+#### 🔴 残作業
+
+1. **BUG-7 は次の再起動から効く**（既存 pane は旧バイナリを掴んだまま）。次の
+   再起動時に `ps -eo pid,ppid,command | grep 'herdr-drover claude'` で
+   **親が zsh か server か**を見て、上記「推論」を確定させる。
+2. tag / release は**対外操作＝ユーザー明示確認後**。現在の最新 tag は v0.5.36 で、
    BUG-6・BUG-7 はどちらも untagged＝他 PC は `update-all` で受け取れない。
 
 ### 2026-07-26: ↗窓 が「打鍵しても復活しない」問題 → **原因確定・v0.5.33 で修正**
