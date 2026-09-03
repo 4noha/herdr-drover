@@ -64,7 +64,7 @@ Firestore サーバは Cloud Run に 1 回デプロイして全 PC で共有す�
 
 | サブコマンド | 引数 | 説明 | 結合度 |
 |---|---|---|---|
-| `claude` | `[args...]` | claude シム。cwd 一致 attach／picker／新 Tab／非 TTY 透過 | **[claude 専用入口・要一般化]** |
+| `claude` | `[args...]` | claude シム。cwd 一致 attach／picker／新 Tab／非 TTY 透過／**復元起動は同 pane で exec**（下記） | **[claude 専用入口・要一般化]** |
 | `organize` | `--dry-run` `--capture` | claude セッションを含む Tab を wsmap ルール解決先 Workspace へ整理 | [要一般化]（同定のみ） |
 | `mv-tab` | `--self` `--src-tab` `--dst-ws` `--dst-ws-label` | Tab を別 Workspace へ丸ごと引っ越し | [非依存] |
 | `mv-tab-launch` | なし | plugin action の実体（新 Tab を開いて対話モードを走らせる） | [非依存] |
@@ -89,6 +89,25 @@ Firestore サーバは Cloud Run に 1 回デプロイして全 PC で共有す�
 
 設計と AWS/GCP/GitHub の材料・消費経路は **[DESIGN_MEMVAULT.md](DESIGN_MEMVAULT.md)**
 が正。ここは drover 側のインターフェース契約のみを定める。
+
+#### シムの起動先の決定表（`shim <agent> [args...]`・2026-09-04 に復元行を追加／⚠未リリース）
+
+herdr のレイアウト復元は各 pane の launch argv（`herdr-drover <agent> --resume
+<ref>`）を再実行するので、**再起動のたびに復元行が必ず走る**。
+
+| 状況 | 起動先 |
+|---|---|
+| 引数なし × cwd 一致 1 件 | その既存セッションへ接続（ビューア） |
+| 引数なし × cwd 一致 複数 | picker（非 TTY は先頭を報告して非 attach 終了） |
+| `--resume <ref>` × **他 pane** に同 ref の live agent | その pane へ接続（dup 防止） |
+| `--resume <ref>` × **自 pane**（`HERDR_PANE_ID`）が同 ref で **live でない** | **その pane で本体へ exec**（＝復元。Tab を増やさない） |
+| 上記以外（引数あり） | 常に新しい Tab（cm 規律「user の明示指定を尊重」） |
+| 引数あり × 非 TTY | herdr 非経由で素のバイナリへ透過 |
+
+⚠ **`live でない` の条件を外してはいけない**。自 pane に実 agent が走っているのに
+exec すると同じ会話 jsonl に 2 本目のプロセスを生む（cm で実害のあった型）。
+復元 pane の `agent_status` は前景プロセス基準で復元されるため `unknown`
+（BUG-1 の実測）＝復元シナリオだけを exact に拾える。
 
 **exit code は §2 の一般規則を 1 つ拡張する**:
 
@@ -791,6 +810,12 @@ herdr＝drover daemon が exit/再起動しても入れ替わらない。** よ�
     `cur(injected)` に数え続け、再起動後の ↗窓 全滅を自己修復しなかった）。
     ⚠ 生存確認は**間引く**（ndjson は 1 接続=1 リクエスト）。復活は pane を作り直さず
     残ったシェルに同じ argv を打ち直す（pane_id / Tab / 配置を保つ）。
+17. **レイアウト復元で pane / Tab を増やさない**（§2.3 の決定表・BUG-7）。herdr の
+    復元は各 pane の launch argv を再実行するので、シムが「新しい Tab を作る」経路へ
+    落ちると**再起動のたびに Tab が倍増**する（元の pane はビューアに化ける）。
+    自 pane がその会話の持ち主なら **同 pane で exec** する＝pane_id・Tab・配置が
+    保たれる。16 と同根（metadata は存在の権威）だが、こちらは**自分が誰かを
+    `HERDR_PANE_ID` で先に確定する**ことで解ける。
 
 ---
 

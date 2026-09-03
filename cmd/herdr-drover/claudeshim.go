@@ -12,7 +12,11 @@ package main
 //     実観測の根治）。着地先 workspace は ~/.herdr-drover/workspaces.json の
 //     ルール（internal/wsmap: exact > 最長 prefix > default）で解決し、
 //     ルール無しは現（focused）workspace
-//   - 引数あり（TTY）: 常に新規 Tab（cm 規律「user 明示指定は尊重」）
+//   - 引数あり（TTY）: 常に新規 Tab（cm 規律「user 明示指定は尊重」）。
+//     **唯一の例外が `--resume <ref>` の復元起動**: レイアウト復元で
+//     「その会話の持ち主 pane 自身」の launch argv として走った場合だけは
+//     新しい Tab を作らず**その pane で本体へ exec** する（下の
+//     selfPaneOwningResumeRef。Tab 倍増の根治）
 //   - 引数あり（非 TTY）: herdr を経由せず素の claude へプロセス置換
 //     ＝`echo prompt | claude -p …` の pipe stdin/stdout 契約を透過する
 //     （pane を作り捨てて pane_id だけ返すと自動化が silent に壊れる）
@@ -172,6 +176,28 @@ func cmdAgentShim(agent string, args []string, stdout, stderr io.Writer) error {
 		if p, ferr := findAgentPaneByResumeRef(api, agent, ref); ferr == nil && p != nil {
 			fmt.Fprintf(stdout, "会話 %s を実行中の既存セッションへ接続します（新規プロセスを作りません）\n", ref)
 			return attachOrReport(api, herdrapi.AgentInfo{PaneID: p.PaneID, TerminalID: p.TerminalID}, stdout)
+		}
+		// **復元起動（Tab 倍増の根治）**: live pane が居ないとき、その会話の
+		// 持ち主が **この pane 自身**なら新しい Tab を作らず**ここで本体へ
+		// exec** する。herdr のレイアウト復元は各 pane の launch argv
+		// （`herdr-drover <agent> --resume <ref>`）を再実行するので、この経路は
+		// マシン/herdr 再起動のたびに必ず走る。新規経路（下）へ落とすと本体は
+		// **別 Tab**に生まれ、元の pane は attachOrReport の observe ビューアに
+		// 化ける＝**Tab が倍増**する（ユーザーが「タブが壊れた」と呼ぶ状態。
+		// 毎回 手で双子を突き合わせて閉じる運用になっていた）。
+		// BUG-1 はこの同じ復元シナリオの前半（自 pane を observe して空 pane 化）
+		// だけを直したので、倍増はその**残り**として残っていた。
+		if p, ferr := selfPaneOwningResumeRef(api, agent, ref); ferr == nil && p != nil {
+			bin, berr := lookupAgentBin(agent)
+			if berr != nil {
+				return berr
+			}
+			fmt.Fprintf(stdout, "この pane（%s）が会話 %s の持ち主です＝新しい Tab を作らず、この pane で %s 本体を起動します\n", p.PaneID, ref, agent)
+			// 新規セッション開始と同じ扱い＝hook を保証してから exec する。
+			ensureAgentIntegrationOnce(agent, stderr)
+			// exec なので pane・pane_id・Tab・配置がそのまま保たれ、前景プロセス名が
+			// 本体になる＝herdr の検出（前景基準）と agent_session が正しく付く。
+			return execAttach(bin, append([]string{bin}, args...), os.Environ())
 		}
 		// 一致なし＝その会話はまだ herdr で起動していない → 下の新規経路で
 		// --resume 付き起動（claude が jsonl から会話を復元する）。
@@ -745,6 +771,50 @@ func findAgentPaneByResumeRef(api *herdrapi.Client, agent, ref string) (*herdrap
 		return p, nil
 	}
 	return nil, nil
+}
+
+// selfPaneOwningResumeRef は「シムが走っているこの pane 自身が ref の会話の
+// 持ち主で、かつ live agent が居ない」＝**レイアウト復元でこの pane の launch
+// argv として起動された**状態のときだけ、その pane を返す（違えば nil,nil）。
+//
+// findAgentPaneByResumeRef の**対称形**（同じ 2 つの権威を逆向きに使う）:
+//
+//	同 ref の pane が 他 pane × live      → そこへ attach（dup 防止・従来どおり）
+//	同 ref の pane が 自 pane × live でない → **この pane で exec**（復元＝倍増の根治）
+//	それ以外                                → 新しい Tab（従来どおり）
+//
+// ⚠**live なら対象外**にすること（ここが exact であるための条件）。自 pane に
+// 実 agent が走っているのに exec すると、同じ会話 jsonl に 2 本目のプロセスを
+// 生む（cm で実害のあった型）。復元 pane の agent_status は前景プロセス基準で
+// 復元されるため "unknown"（BUG-1 の実測）＝復元シナリオだけを exact に拾える。
+//
+// ⚠判定は herdr の検出値（agent_session）と herdr が pane env に入れる
+// HERDR_PANE_ID の exact-match のみ。前景プロセスの名前や argv の形からは
+// 推測しない（鉄則③）。注入 pane は agentid.Resolve が token で先に弾く。
+func selfPaneOwningResumeRef(api *herdrapi.Client, agent, ref string) (*herdrapi.PaneInfo, error) {
+	paneID := os.Getenv("HERDR_PANE_ID") // 空＝herdr pane 外からの起動＝復元ではない
+	if paneID == "" || ref == "" {
+		return nil, nil
+	}
+	p, err := api.PaneGet(paneID)
+	if err != nil {
+		// HERDR_PANE_ID が古い（pane が既に無い）等。復元と断定できない＝
+		// 従来経路へ落とすが、理由を握り潰さない（silent skip 禁止）。
+		return nil, err
+	}
+	if p == nil {
+		return nil, nil
+	}
+	if p.AgentSession.Value != ref || !agentid.SupportsKind(agent, p.AgentSession.Kind) {
+		return nil, nil
+	}
+	if kind, conflict := agentid.Resolve(agentid.OfPane(*p, "")); conflict != "" || kind != agent {
+		return nil, nil
+	}
+	if p.AgentStatus != "" && p.AgentStatus != "unknown" {
+		return nil, nil // live agent が居る＝復元ではない（2 本目を作らない）
+	}
+	return p, nil
 }
 
 // attachOrReport は TTY なら自動 min ローカルビューア（runViewer→runLocalView）
