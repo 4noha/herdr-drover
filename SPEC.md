@@ -75,10 +75,18 @@ Firestore サーバは Cloud Run に 1 回デプロイして全 PC で共有す�
 | `ssh-forward` | `<pc> [label]` | owner の ssh-agent を slave へ relay 越しに一時転送 | [非依存] |
 | `attach` | `<pc> <sid>` | ↗窓 の viewer client（reconcile が注入 pane 内で起動する内部コマンド） | [非依存] |
 
-#### シムの起動先の決定表（`shim <agent> [args...]`・2026-09-04 に復元行を追加／⚠未リリース）
+#### シムの起動先の決定表（`shim <agent> [args...]`・2026-09-04 に復元行を追加／⚠tag 未作成）
 
-herdr のレイアウト復元は各 pane の launch argv（`herdr-drover <agent> --resume
-<ref>`）を再実行するので、**再起動のたびに復元行が必ず走る**。
+再起動のレイアウト復元では、pane 内で `herdr-drover <agent> --resume <ref>`
+（シム）が走ることがある。**どの pane で走るか**は herdr が session.json に
+何を残したかで決まる（実測 2026-09-04・契約テスト
+`TestHerdrPersistsLaunchArgvNotForegroundProcess`）:
+
+- 明示 launch argv（実バイナリ絶対パス）を持つ pane＝`applyClaudeTab` が作った側 →
+  herdr server が**そのバイナリを直接 spawn**（シムは走らない）
+- `command` を持たず `agent_session` だけ残る pane＝素シェルで `claude` と打った側 →
+  herdr が自前の resume を**対話シェル経由**で起こす＝`alias claude` がシムに当たる
+  （＝復元行が走るのはこちら。BUGS.md BUG-7 §真因の表）
 
 | 状況 | 起動先 |
 |---|---|

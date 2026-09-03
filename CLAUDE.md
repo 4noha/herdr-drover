@@ -72,6 +72,10 @@ cwd 自動 attach／新 Tab 起動を提供する。Python 版 claude-master(cm)
   --takeover`）。ControlTerminal＝attach と同じ **pane resize＋lock**。
   `observe` はロック非取得・観測側サイズへ仮想描画（観測 < grid は上寄せクリップ）。
 - pane grid 桁は API 非公開（`pane.get` の `scroll.viewport_rows`=行のみ）。
+- **復元（session.json）に残るのは pane 生成時の launch argv だけ**＝あとから前景に
+  来た子プロセスは記録されない。既定シェル pane は `cwd` と `agent_session` のみ
+  （＝素シェルで打った `claude` は復元 argv にならず、herdr が自前 resume を
+  **対話シェル経由**で起こす＝`alias claude` が効く）。BUGS.md BUG-7 の発生条件。
 - `tab.move` は同一 WS の reorder 専用＝WS 間移動は `pane.move` が唯一。
 - workspace label は重複可＝識別子にしない（workspace_id を使う）。
 

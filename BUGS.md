@@ -8,6 +8,9 @@
 > 2026-09-03〜04 に対処）。**プロセス起動時にしか反映されない**ため、既存 pane は
 > 旧バイナリを掴んだまま＝**効くのは次の再起動から**。BUG-7 は `claude` シムが実行する
 > `~/.local/bin/herdr-drover` の版で決まる（`~/.herdr-drover/bin` だけ更新しても効かない）。
+> **本機は両方デプロイ済（`v0.5.36-13-gd9504b2`）／tag は未作成＝他 PC は未配布**。
+> なお BUG-7 の修正が**発火するのは復元でシムが走る pane だけ**で、明示 argv
+> （実バイナリ）で作られた pane は元々倍増しない（BUG-7 §真因の表）。
 >
 > ✅ **BUG-1 / BUG-2 / BUG-3 は 2026-07-26 に修正済み**（実 herdr テストで担保・
 > gofmt/build/vet/test 緑）。各節冒頭に「解決」欄を追記した。BUG-3 は本書が推定して
@@ -426,7 +429,9 @@ title と agent_status を転記するだけで**プロセスを一切見てい�
 
 ## BUG-7【P1】再起動のたびに Tab が倍増する（復元起動が新しい Tab を作る）（2026-09-04）
 
-### ✅ 解決（2026-09-04・⚠**未リリース／未デプロイ**）
+### ✅ 解決（2026-09-04・`d9504b2`／⚠**未リリース＝tag なし・他 PC 未配布**）
+本機（`mac-studio-herdr`）は両バイナリを `v0.5.36-13-gd9504b2` へデプロイ済
+（`~/.local/bin` と `~/.herdr-drover/bin` の両方）。
 シムの resume backstop に **復元行**を足した（`cmd/herdr-drover/claudeshim.go`）。
 `HERDR_PANE_ID` が指す**自 pane 自身**が `--resume <ref>` の会話の持ち主で、かつ
 **live agent が居ない**なら、新しい Tab を作らず**その pane で本体へ exec** する
@@ -447,10 +452,37 @@ agent が居る。ユーザーはこれを「タブが壊れた」と呼び、**
    `ps` で旧 pane 側に `herdr terminal session observe <新 pane>` が居る（＝ビューア）。
 
 ### 真因（確定）
-herdr のレイアウト復元は各 pane の launch argv
-（`herdr-drover <agent> --resume <ref>`）を**再実行する**。シムの契約は
+復元で `herdr-drover <agent> --resume <ref>`（シム）が pane 内で走る。シムの契約は
 「引数あり＝**常に新しい Tab**」なので、復元で走ったシムは本体を**別 Tab**に立て、
 自分が居る元の pane は `attachOrReport` の observe ビューアに化ける。
+
+#### シムが復元で走る条件（2026-09-04 に実測して確定）
+
+herdr の復元経路は **2 つあり、pane が launch argv を持つかで分かれる**
+（回帰テスト `TestHerdrPersistsLaunchArgvNotForegroundProcess` で契約を固定）:
+
+| pane の作られ方 | session.json に残るもの | 再起動で起きること |
+|---|---|---|
+| 明示 argv 付き（シムの `applyClaudeTab`＝**実バイナリ**絶対パス） | `command`＋cwd＋agent_session | **herdr server が直接 spawn**。実 claude が `--resume` で同 pane に戻る＝**倍増しない** |
+| 既定シェル pane（ユーザーが素シェルで `claude` と打った側） | cwd＋**agent_session だけ**（`command` は無い） | launch argv が無いので再実行できず、**herdr が `agent_session` から自前で resume を起こす**。それは**対話シェル経由**なので `alias claude`（＝drover シム）に当たる → シムが新 Tab を作る＝**倍増の入口** |
+
+実測の根拠:
+- `layout.export` / `session.json` の `command` は **pane 生成時の launch argv だけ**。
+  あとから前景に来た子プロセスは記録されない（＝素シェルで打った
+  `claude`＝シムは復元 argv にならない）。既定シェル pane は `cwd` と
+  `agent_session` のみが永続化される（実採取 JSON で確認）。
+- 本機 2026-09-03 22:22:22 の herdr server 再起動では、4 秒後に 7 本の
+  `~/.local/bin/claude --resume <uuid>` が **server の直子**として一斉起動し、
+  **倍増しなかった**（`ps -eo pid,ppid,lstart` で確認）＝上表 1 行目の経路。
+- 一方 BUG-1（2026-07-26）が記録した process tree は
+  `zsh（herdr server 配下）└─ herdr-drover claude --resume <uuid> └─ observe` で、
+  シムは**シェルの子**だった。launch argv 経路なら server の直子になる（上記実測）
+  ので、これは**シェル経由の resume**＝上表 2 行目。倍増していた pane はこちら。
+
+⚠ **未確認の 1 点**: headless（TUI クライアント未 attach）では復元で pane
+プロセスが一切 spawn されないため、上表 2 行目をテスト harness で再現できていない
+（隔離 herdr を stop→再起動しても marker は走らず前景は空のまま）。2 行目の断定は
+上記 2 つの process tree の差分からの推論であり、**次の実機再起動で確定させる**。
 
 **BUG-1（2026-07-26）はこの同じ復元シナリオの前半だけを直していた**。あのとき
 足したのは「自 pane を attach 候補から除外する（＝自己 observe デッドロックで
@@ -488,11 +520,25 @@ herdr のレイアウト復元は各 pane の launch argv
 - `TestSelfPaneOwningResumeRefIsExact` — `HERDR_PANE_ID` 無し／ref 不一致／
   種別違い（claude の ref を codex として）／**live な自 pane** はいずれも対象外。
 
+`cmd/herdr-drover/herdr_restorearg_test.go` は前提側（herdr が何を復元するか）の
+契約を固定する: `TestHerdrPersistsLaunchArgvNotForegroundProcess`（launch argv は
+前景が別物でも記録される／既定シェル pane は `command` を持たない）。herdr 側が
+変わればここが落ちて、上表の発生条件を再調査できる。
+
 ### 運用上の注意
 ⚠ この修正は**シムのプロセス起動時にしか反映されない**。既に走っている pane が
 掴んでいるのは旧バイナリなので、**次の再起動から**効く。また `claude` シムが実行
 するのは `~/.local/bin/herdr-drover` の版であって `~/.herdr-drover/bin` ではない
 （デプロイ時は両方を揃えること）。
+
+⚠ **本機の現状（2026-09-04 実測）では発火しない**。2026-09-03 の手作業修復で
+作り直された 7 枚はいずれも明示 argv（`~/.local/bin/claude --resume <uuid>`）を
+持つため、次の再起動でも herdr server が実 claude を直接 spawn する＝倍増しない
+代わりに新分岐も通らない。発火するのは**素シェルで `claude` と打って作った
+pane**（`command` 無し × `agent_session` あり）を含む再起動と、そういう pane が
+残っている他 PC。次の再起動時に `ps -eo pid,ppid,command` で
+`herdr-drover claude --resume` の親が zsh かどうかを見れば、上表 2 行目の推論も
+同時に確定する。
 
 ---
 
