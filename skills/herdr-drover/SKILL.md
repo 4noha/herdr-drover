@@ -30,9 +30,29 @@ herdr workspace list    # ws ごとの tab 数
 
 ## 再起動後のタブ修復（実測済みの手順）
 
-**症状**: 再起動でレイアウト復元が走ると、herdr が各 pane の `herdr-drover <agent> --resume <ref>`
-シムを起こす → シムは仕様どおり**新しい Tab** に本物の agent を立て、**元の pane は observe
+**症状**: 再起動でレイアウト復元が走ると、pane 内で `herdr-drover <agent> --resume <ref>`
+シムが起きる → シムは仕様どおり**新しい Tab** に本物の agent を立て、**元の pane は observe
 ビューアに化ける** → Tab が倍増する。ユーザーはこれを「タブが壊れた」と呼ぶ。
+
+> ⚠ **この倍増は BUG-7 として根治実装済み**（2026-09-04 `d9504b2`。**v0.5.37 で
+> release 済**＝他 PC は `self-update` / `update-all` で受け取る。mac-studio は
+> 先行して同内容をデプロイ済）。新版は「自 pane がその会話の持ち主なら
+> **同 pane で exec**」するので Tab が増えない。効くのは
+> **`~/.local/bin/herdr-drover`（シムが実行するのはこちら）が新版で、かつその版が
+> 起動したセッション**から。倍増を見つけたら、まず
+> `~/.local/bin/herdr-drover version` を確認して**どちらの世界なのかをユーザーに
+> 報告する**（黙って畳まない）。
+>
+> ⚠ **倍増するのは一部の pane だけ**（2026-09-04 実測）。herdr が session.json に
+> 残すのは pane 生成時の launch argv だけなので:
+> - **明示 argv（`~/.local/bin/claude --resume <uuid>` 等）を持つ pane** →
+>   herdr server が実バイナリを直接 spawn（親が server）＝**倍増しない**
+> - **`command` を持たず `agent_session` だけある pane**（素シェルで `claude` と
+>   打った側）→ herdr が自前 resume を**対話シェル経由**で起こす＝`alias claude`
+>   がシムに当たり倍増（親が zsh）
+>
+> だから修復後は倍増が止まって見えることがある。`ps -eo pid,ppid,command` で
+> **シムの親が zsh か server か**を見れば、どちらの pane なのかが分かる。
 
 **⚠ `organize` と `restart-agent-session` は修復手段ではない**。配置は正しく agent も既に
 走っているので、どちらも何もしない（`organize --dry-run` は全件 KEEP と出る）。
