@@ -818,9 +818,11 @@ herdr＝drover daemon が exit/再起動しても入れ替わらない。** よ�
     `cur(injected)` に数え続け、再起動後の ↗窓 全滅を自己修復しなかった）。
     ⚠ 生存確認は**間引く**（ndjson は 1 接続=1 リクエスト）。復活は pane を作り直さず
     残ったシェルに同じ argv を打ち直す（pane_id / Tab / 配置を保つ）。
-17. **レイアウト復元で pane / Tab を増やさない**（§2.3 の決定表・BUG-7）。herdr の
-    復元は各 pane の launch argv を再実行するので、シムが「新しい Tab を作る」経路へ
-    落ちると**再起動のたびに Tab が倍増**する（元の pane はビューアに化ける）。
+17. **レイアウト復元で pane / Tab を増やさない**（§2.3 の決定表・BUG-7）。復元で
+    pane 内にシムが起きたとき「新しい Tab を作る」経路へ落ちると**再起動のたびに
+    Tab が倍増**する（元の pane はビューアに化ける）。シムが起きるのは
+    **`command` を持たず `agent_session` だけ残る pane**（herdr が自前 resume を
+    対話シェル経由で起こし `alias claude` に当たる）＝§2.3 の実測。
     自 pane がその会話の持ち主なら **同 pane で exec** する＝pane_id・Tab・配置が
     保たれる。16 と同根（metadata は存在の権威）だが、こちらは**自分が誰かを
     `HERDR_PANE_ID` で先に確定する**ことで解ける。
