@@ -4,6 +4,11 @@
 > どちらも Web 側の修正を含み、**relay の image を差し替えるまで利用者には届かない**。
 > BUG-5 の drover 側（画像貼付本体）は release＋fleet 配信が要る。
 >
+> ⚠ **BUG-6 / BUG-7 は「再起動後に ↗窓 と Tab が壊れる」の 2 本柱**（どちらも
+> 2026-09-03〜04 に対処）。**プロセス起動時にしか反映されない**ため、既存 pane は
+> 旧バイナリを掴んだまま＝**効くのは次の再起動から**。BUG-7 は `claude` シムが実行する
+> `~/.local/bin/herdr-drover` の版で決まる（`~/.herdr-drover/bin` だけ更新しても効かない）。
+>
 > ✅ **BUG-1 / BUG-2 / BUG-3 は 2026-07-26 に修正済み**（実 herdr テストで担保・
 > gofmt/build/vet/test 緑）。各節冒頭に「解決」欄を追記した。BUG-3 は本書が推定して
 > いた真因（source 側 tick / mirror producer が再張り）が**誤り**で、実経路は
@@ -416,6 +421,78 @@ title と agent_status を転記するだけで**プロセスを一切見てい�
 ### 併せて直したもの
 `herdr-drover help` の「未実装（後続フェーズ）: attach」は**誤り**（attach は
 実装済み・reconcile が注入 pane 内で起動している）。実際の説明に差し替えた。
+
+---
+
+## BUG-7【P1】再起動のたびに Tab が倍増する（復元起動が新しい Tab を作る）（2026-09-04）
+
+### ✅ 解決（2026-09-04・⚠**未リリース／未デプロイ**）
+シムの resume backstop に **復元行**を足した（`cmd/herdr-drover/claudeshim.go`）。
+`HERDR_PANE_ID` が指す**自 pane 自身**が `--resume <ref>` の会話の持ち主で、かつ
+**live agent が居ない**なら、新しい Tab を作らず**その pane で本体へ exec** する
+（`selfPaneOwningResumeRef`）。exec なので pane_id・Tab・配置・前景プロセスが
+そのまま本体に置き換わる＝倍増もビューア化も起きない。決定表は SPEC.md §2.3。
+
+### 症状
+マシン/herdr を再起動するたび **Tab が倍増する**。1 会話につき pane が 2 枚になり、
+片方は `agent_status: "unknown"` の殻（実体は observe ビューア）、もう片方に本物の
+agent が居る。ユーザーはこれを「タブが壊れた」と呼び、**毎回 手で双子を突き合わせて
+閉じる運用**になっていた（skill `herdr-drover` の「再起動後のタブ修復」手順そのもの。
+2026-09-03 の実機修復では 7 組を手作業で畳んだ）。
+
+### 再現
+1. claude セッションを何本か起動（各 pane に `agent_session.value` が付く）。
+2. マシンまたは herdr を再起動する（レイアウト復元）。
+3. `herdr pane list` → 同じ `agent_session.value` を持つ pane が 2 枚ずつ現れる。
+   `ps` で旧 pane 側に `herdr terminal session observe <新 pane>` が居る（＝ビューア）。
+
+### 真因（確定）
+herdr のレイアウト復元は各 pane の launch argv
+（`herdr-drover <agent> --resume <ref>`）を**再実行する**。シムの契約は
+「引数あり＝**常に新しい Tab**」なので、復元で走ったシムは本体を**別 Tab**に立て、
+自分が居る元の pane は `attachOrReport` の observe ビューアに化ける。
+
+**BUG-1（2026-07-26）はこの同じ復元シナリオの前半だけを直していた**。あのとき
+足したのは「自 pane を attach 候補から除外する（＝自己 observe デッドロックで
+空 pane になるのを止める）」＋「zombie を live とみなさない」で、その結果
+「本物が起動する」までは正しくなった。**残っていたのは「本物を*どこに*立てるか*」**
+＝自 pane がその会話の持ち主だと分かっているのに、わざわざ新しい Tab に立てる点。
+
+材料は両方とも既に手元にあった（**推測は不要だった**）:
+- `HERDR_PANE_ID` は herdr が各 pane env に入れる権威値（BUG-1 の修正と
+  `attach.go` の自己 identity 再表明が既に使っている）。
+- `agent_session.value` は `pane.get` が返す会話 ref。
+
+### 修正で踏まないようにしたこと
+- **live な自 pane は対象外**。自 pane に実 agent が走っているのに exec すると
+  同じ会話 jsonl に 2 本目のプロセスを生む（cm で実害のあった型）。復元 pane の
+  `agent_status` は前景プロセス基準で復元されるため `unknown`（BUG-1 の実測）＝
+  復元シナリオだけを exact に拾える。
+- **ヒューリスティックにしない**。「前景が復元シムだから復元だろう」ではなく
+  `HERDR_PANE_ID` × `agent_session.value` の exact-match のみ（鉄則③）。
+  ↗窓 注入 pane は `agentid.Resolve` が token で先に弾く。
+- **非 TTY×引数ありは従来どおり**素通し（`echo prompt | claude -p …` の透過）。
+  人が pane 内で手で `claude --resume <他の会話>` と打つ場合は ref が自 pane と
+  一致しないので、既存の「常に新しい Tab」がそのまま効く。
+- **silent に経路を変えない**。exec の前に「この pane（<id>）が会話 <ref> の
+  持ち主です＝新しい Tab を作らず…」を stdout に出す。
+
+### テスト（`cmd/herdr-drover/claudeshim_restore_test.go`）
+実 herdr（隔離ソケット）＋ HOME 隔離＋ stub claude で、復元 pane
+（`agent_session` あり・`agent_status=unknown`）の上でシムを走らせる:
+- `TestShimRestoreExecsInPlaceWithoutNewTab` — exec seam に
+  `[<実バイナリ> --resume <ref>]` が渡る／**Tab 総数が増えない**／pane が残る／
+  ビューア（`runViewer`）が呼ばれない。**分岐を無効化すると FAIL することを確認済み**
+  （`calls=0＝新しい Tab 経路に落ちた（viewer 化 1 回）` ＋ stdout に
+  `claude セッションを新規起動しました`）。
+- `TestSelfPaneOwningResumeRefIsExact` — `HERDR_PANE_ID` 無し／ref 不一致／
+  種別違い（claude の ref を codex として）／**live な自 pane** はいずれも対象外。
+
+### 運用上の注意
+⚠ この修正は**シムのプロセス起動時にしか反映されない**。既に走っている pane が
+掴んでいるのは旧バイナリなので、**次の再起動から**効く。また `claude` シムが実行
+するのは `~/.local/bin/herdr-drover` の版であって `~/.herdr-drover/bin` ではない
+（デプロイ時は両方を揃えること）。
 
 ---
 

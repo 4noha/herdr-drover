@@ -30,6 +30,39 @@ v0.5.30 で**判定を経過時間ベースへ**変更し、**実 websocket 越�
 > できない* の記述は**すべて解消済み**（PR #1 merge・`e9bab96` で release に windows 資産。
 > Windows 機の self-update 成功を 7/25 15:52 の Ack で実確認）。
 
+### 2026-09-04: 再起動で壊れる 2 件を根治（BUG-6 = ↗窓 全滅 / BUG-7 = Tab 倍増）
+
+「再起動したから直して」を毎回手作業で修復していた症状の**両方**に手を入れた。
+症状は 2 つだが**別バグ**で、直る条件も配信経路も違う。詳細は [BUGS.md](BUGS.md)。
+
+| | 症状 | 修正 | 状態 |
+|---|---|---|---|
+| BUG-6 | ↗窓 が全滅（pane は残るが中身が素シェル。reconcile は `desired=N cur=N` と健全を主張） | reconcile に client 生存確認＋同 pane REVIVE（`ensureInjectClient`） | **origin/main に既存（`d205480`）**。merge・ビルド・**この PC にデプロイ済**（`v0.5.36-12-gbb9730c`） |
+| BUG-7 | Tab が倍増（1 会話 = 2 pane。片方は observe ビューアの殻） | シムの復元行＝自 pane が会話の持ち主なら**同 pane で exec**（`selfPaneOwningResumeRef`） | **実装＋テスト済（この作業）・未デプロイ・未タグ** |
+
+#### BUG-7 の要点（読み返す用）
+
+- herdr の復元は各 pane の launch argv（`herdr-drover <agent> --resume <ref>`）を
+  **再実行する**。シムの「引数あり＝常に新しい Tab」に落ちると本体が別 Tab に生まれ、
+  元の pane はビューアに化ける＝倍増。
+- **BUG-1（2026-07-26）は同じ復元シナリオの前半だけを直していた**（自 pane を
+  attach 候補から除外＝空 pane 化の停止）。残っていたのは「本物を*どこに*立てるか」。
+- 判定材料は既に手元にあった: `HERDR_PANE_ID`（pane env の権威値）×
+  `agent_session.value`（`pane.get`）。**live な自 pane は対象外**
+  （exec すると同じ会話 jsonl に 2 本目を作る）。決定表は SPEC.md §2.3・不変条件 17。
+
+#### 🔴 残作業（この順で）
+
+1. **`~/.local/bin/herdr-drover` の版ズレを解消する**。`claude` シムが実行するのは
+   **こちら**で、現在 **v0.5.31**（`~/.herdr-drover/bin` は v0.5.36-12-gbb9730c）。
+   **BUG-7 はここを更新しないと効かない**。
+2. デプロイすると **attachrefresh が ↗ pane を 1 回作り直す**（版数が変わるため。
+   pane_id / workspace_id が変わる＝2026-09-03 に実際に `w1S/w1T/w1V` →
+   `w1X/w1Y/w1Z` になった）。作業前にユーザーへ伝えること。
+3. **BUG-7 は次の再起動から効く**（既存 pane は旧バイナリを掴んだまま）。
+4. tag / release は**対外操作＝ユーザー明示確認後**。現在の最新 tag は v0.5.36 で、
+   BUG-6・BUG-7 はどちらも untagged＝他 PC は `update-all` で受け取れない。
+
 ### 2026-07-26: ↗窓 が「打鍵しても復活しない」問題 → **原因確定・v0.5.33 で修正**
 
 #### 🔴 私の当初の見立ては誤りだった（ユーザー指摘で訂正）
