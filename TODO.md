@@ -38,7 +38,7 @@ v0.5.30 で**判定を経過時間ベースへ**変更し、**実 websocket 越�
 | | 症状 | 修正 | 状態 |
 |---|---|---|---|
 | BUG-6 | ↗窓 が全滅（pane は残るが中身が素シェル。reconcile は `desired=N cur=N` と健全を主張） | reconcile に client 生存確認＋同 pane REVIVE（`ensureInjectClient`） | **origin/main に既存（`d205480`）**。merge・ビルド・**この PC にデプロイ済**（`v0.5.36-12-gbb9730c`） |
-| BUG-7 | Tab が倍増（1 会話 = 2 pane。片方は observe ビューアの殻） | シムの復元行＝自 pane が会話の持ち主なら**同 pane で exec**（`selfPaneOwningResumeRef`） | 実装＋テスト済（`d9504b2`）・**この PC に両バイナリともデプロイ済**（`v0.5.36-13-gd9504b2`）・**未タグ** |
+| BUG-7 | Tab が倍増（1 会話 = 2 pane。片方は observe ビューアの殻） | シムの復元行＝自 pane が会話の持ち主なら**同 pane で exec**（`selfPaneOwningResumeRef`） | **v0.5.37 で release**。この PC は先行して両バイナリへデプロイ済（同内容の `v0.5.36-13-gd9504b2`） |
 
 #### BUG-7 の要点（読み返す用）
 
@@ -64,19 +64,25 @@ v0.5.30 で**判定を経過時間ベースへ**変更し、**実 websocket 越�
 
 #### ✅ 済（2026-09-04）
 
-1. **`~/.local/bin/herdr-drover` の版ズレ解消**（v0.5.31 → `v0.5.36-13-gd9504b2`）。
+1. **`~/.local/bin/herdr-drover` の版ズレ解消**（v0.5.31 → `v0.5.36-13-gd9504b2`＝v0.5.37 と同内容）。
    `claude` シムが実行するのはこちらなので、BUG-7 はここが要だった。
 2. デプロイに伴う **attachrefresh の ↗ pane 作り直し**は完了（29/29 再作成・
    `desired=29 cur(injected)=29 pending=0`。workspace_id は `w1X/w1Y/w1Z` →
    `w10/w21/w22` へ変化。ローカル 9 pane は無傷、focus は復帰済み）。
+3. **v0.5.37 を release**（BUG-6＋BUG-7 を fleet へ）。main へは BUG-7 の 3 コミットを
+   cherry-pick した（memvault は branch に残す＝release に混ぜない）。
 
 #### 🔴 残作業
 
 1. **BUG-7 は次の再起動から効く**（既存 pane は旧バイナリを掴んだまま）。次の
    再起動時に `ps -eo pid,ppid,command | grep 'herdr-drover claude'` で
    **親が zsh か server か**を見て、上記「推論」を確定させる。
-2. tag / release は**対外操作＝ユーザー明示確認後**。現在の最新 tag は v0.5.36 で、
-   BUG-6・BUG-7 はどちらも untagged＝他 PC は `update-all` で受け取れない。
+2. **本機の版数表示は `v0.5.36-13-gd9504b2` のまま**（v0.5.37 とコード差分なし＝
+   docs のみ）。揃えるための再デプロイは **↗ 29 枚の作り直しを 1 回また起こす**ので、
+   必要になったとき（次のコード変更のデプロイ）にまとめる。
+3. `feat/memvault-integration` へ main を merge して同期する（BUG-7 の 3 コミットは
+   cherry-pick 済＝内容重複。⚠SPEC.md の「シムの起動先の決定表」が branch では
+   §2.3b memvault の**中に**挟まっている＝merge のときに §2.3 直後へ戻すこと）。
 
 ### 2026-07-26: ↗窓 が「打鍵しても復活しない」問題 → **原因確定・v0.5.33 で修正**
 

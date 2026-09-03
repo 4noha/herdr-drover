@@ -75,7 +75,7 @@ Firestore サーバは Cloud Run に 1 回デプロイして全 PC で共有す�
 | `ssh-forward` | `<pc> [label]` | owner の ssh-agent を slave へ relay 越しに一時転送 | [非依存] |
 | `attach` | `<pc> <sid>` | ↗窓 の viewer client（reconcile が注入 pane 内で起動する内部コマンド） | [非依存] |
 
-#### シムの起動先の決定表（`shim <agent> [args...]`・2026-09-04 に復元行を追加／⚠tag 未作成）
+#### シムの起動先の決定表（`shim <agent> [args...]`・2026-09-04 に復元行を追加＝v0.5.37）
 
 再起動のレイアウト復元では、pane 内で `herdr-drover <agent> --resume <ref>`
 （シム）が走ることがある。**どの pane で走るか**は herdr が session.json に

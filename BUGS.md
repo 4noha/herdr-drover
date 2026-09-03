@@ -8,7 +8,8 @@
 > 2026-09-03〜04 に対処）。**プロセス起動時にしか反映されない**ため、既存 pane は
 > 旧バイナリを掴んだまま＝**効くのは次の再起動から**。BUG-7 は `claude` シムが実行する
 > `~/.local/bin/herdr-drover` の版で決まる（`~/.herdr-drover/bin` だけ更新しても効かない）。
-> **本機は両方デプロイ済（`v0.5.36-13-gd9504b2`）／tag は未作成＝他 PC は未配布**。
+> **v0.5.37 で fleet 配信**（BUG-6 = `d205480` も同 tag に含む）。本機は先行して
+> 同内容のバイナリをデプロイ済。
 > なお BUG-7 の修正が**発火するのは復元でシムが走る pane だけ**で、明示 argv
 > （実バイナリ）で作られた pane は元々倍増しない（BUG-7 §真因の表）。
 >
@@ -430,8 +431,9 @@ title と agent_status を転記するだけで**プロセスを一切見てい�
 ## BUG-7【P1】再起動のたびに Tab が倍増する（復元起動が新しい Tab を作る）（2026-09-04）
 
 ### ✅ 解決（2026-09-04・`d9504b2`／⚠**未リリース＝tag なし・他 PC 未配布**）
-本機（`mac-studio-herdr`）は両バイナリを `v0.5.36-13-gd9504b2` へデプロイ済
-（`~/.local/bin` と `~/.herdr-drover/bin` の両方）。
+**v0.5.37** で release（他 PC は `update-all` / `self-update` で受け取る）。本機は
+先行して同内容（`v0.5.36-13-gd9504b2`＝コード差分なし）を両パスへデプロイ済
+（`~/.local/bin` と `~/.herdr-drover/bin`）。
 シムの resume backstop に **復元行**を足した（`cmd/herdr-drover/claudeshim.go`）。
 `HERDR_PANE_ID` が指す**自 pane 自身**が `--resume <ref>` の会話の持ち主で、かつ
 **live agent が居ない**なら、新しい Tab を作らず**その pane で本体へ exec** する
