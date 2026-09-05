@@ -223,12 +223,89 @@ func cmdAgentShim(agent string, args []string, stdout, stderr io.Writer) error {
 	// （実測 2026-07-25: 注入 11 枚すべて attach プロセス・agent_session は None）。
 	// 観測駆動にすると**そのPCに無いエージェントの設定を書いてしまう**。
 	ensureAgentIntegrationOnce(agent, stderr)
+
+	// **既に herdr の pane の中で走っているなら、新しい Tab を作らずこの pane で
+	// 実バイナリへ exec 置換する**（v0.5.37）。
+	//
+	// 「新規は常に新しい Tab」は *herdr の外*（WezTerm 等）から起動したときの仕様で、
+	// 起動元の端末に pane が無いから作る。**起動元が既に pane なら作る理由が無く、
+	// 作ると 1 枚余る**（元の pane は observe ビューアに化けて Tab に同居し続ける）:
+	//   - `herdr agent start … -- herdr-drover claude …`（新プロジェクト起こし）
+	//   - マシン再起動のレイアウト復元（復元 pane で `--resume` シムが走る。
+	//     2026-08-24 に 11 Tab → 22 Tab を実測）
+	//
+	// 判定は **HERDR_PANE_ID env の有無 exact**（herdr が pane に注入する一次事実。
+	// 中身は使わない＝pane_id の形に依存しない）。ヒューリスティックにしない。
+	//
+	// ⚠ pane に命名はしない。この pane は herdr（or agent start）が作ったもので、
+	// 名前は既に持っている＝不変条件「未命名 pane に勝手に命名しない」に従う。
+	if selfPane := os.Getenv("HERDR_PANE_ID"); selfPane != "" {
+		// ⚠ env の存在だけで「pane の中に居る」と決めない。**その pane が
+		// この herdr server に実在するか**まで確かめる（不変条件 16「在ること
+		// ≠ 生きていること」の同型）。別サーバ由来の値が環境に残っている
+		// ケースが実在する（隔離テストへ開発者シェルの HERDR_PANE_ID が
+		// 漏れて `pane_not_found` になった＝2026-09-06 実測）。
+		self, perr := api.PaneGet(selfPane)
+		if perr != nil {
+			fmt.Fprintf(stderr, "HERDR_PANE_ID=%q はこの herdr に無い＝pane 内起動と見なしません（新しい Tab で起動します）: %v\n", selfPane, perr)
+		} else {
+			// ⚠ 着地ルール（wsmap）を殺さないこと。新 Tab を作らない代わりに、
+			// ルールが**別 workspace**を指すなら **この pane ごとそこへ引っ越して**
+			// から exec する。pane は増えず、ルールどおりの場所に着地する。
+			// 失敗しても pane は失わない（loud に報告してその場で起動する）。
+			if err := relocatePaneForRules(api, self, cwd, stdout); err != nil {
+				fmt.Fprintf(stdout, "着地ルールの適用に失敗（この pane のまま起動します）: %v\n", err)
+			}
+			fmt.Fprintf(stdout, "%s をこの pane で起動します（herdr pane 内＝新しい Tab は作りません）\n", agent)
+			return execAttach(bin, append([]string{bin}, args...), os.Environ())
+		}
+	}
+
 	ag, err := startClaudeAgent(api, agent, append([]string{bin}, args...), cwd)
 	if err != nil {
 		return fmt.Errorf("agent.start: %w", err)
 	}
 	fmt.Fprintf(stdout, "%s セッションを新規起動しました\n", agent)
 	return attachOrReport(api, *ag, stdout)
+}
+
+// relocatePaneForRules は wsmap の着地ルールが**自 pane の workspace 以外**を
+// 指すとき、その pane を解決先 workspace の**新しい Tab**へ引っ越す。
+// in-place exec（新 Tab を作らない経路）でもルールを効かせるための一手。
+//
+// ルール無し／既に解決先に居る場合は何もしない（no-op）。cross-workspace の
+// Tab 移動プリミティブは `pane.move {destination:{new_tab, workspace_id}}` が
+// 唯一（tab.move は同一 WS の reorder 専用＝herdr 0.7.4 実測）。
+// 引っ越しても pane で走るプロセスは無停止で継続する（mv-tab で実測済み）。
+func relocatePaneForRules(api *herdrapi.Client, self *herdrapi.PaneInfo, cwd string, stdout io.Writer) error {
+	rules, err := wsmap.Load()
+	if err != nil {
+		return err
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("home 解決: %w", err)
+	}
+	label := rules.Resolve(cwd, home)
+	if label == "" {
+		return nil // ルール無し＝今の場所のまま
+	}
+	wsID, err := wsmap.ResolveWorkspaceID(api, label)
+	if err != nil {
+		return err
+	}
+	if self.WorkspaceID == wsID {
+		return nil // 既に解決先に居る（復元 pane はほぼこれ）
+	}
+	if _, err := api.Call("pane.move", map[string]any{
+		"pane_id":     self.PaneID,
+		"destination": map[string]any{"type": "new_tab", "workspace_id": wsID},
+		"focus":       false,
+	}); err != nil {
+		return fmt.Errorf("pane.move %s→%s: %w", self.PaneID, wsID, err)
+	}
+	fmt.Fprintf(stdout, "着地ルール %q によりこの pane を workspace %s へ移しました\n", label, wsID)
+	return nil
 }
 
 // maxClaudeAgents は自動採番の上限（1 サーバに同時に持つ claude agent 数の
