@@ -1,6 +1,7 @@
 # 既知バグ / 引き継ぎ（2026-07-26 記録）
 
-> ⚠ **BUG-4 / BUG-5 は実装済みだが Cloud Run 未デプロイ**（2026-08-16 時点）。
+> ⚠ **BUG-5 の drover 側は release＋fleet 配信が要る**（2026-08-16 時点）。
+> **BUG-4 は 2026-08-19 の revision 00053 で本番反映済み**（2026-09-04 に実測確認・下記 BUG-4 節）。
 > どちらも Web 側の修正を含み、**relay の image を差し替えるまで利用者には届かない**。
 > BUG-5 の drover 側（画像貼付本体）は release＋fleet 配信が要る。
 >
@@ -234,13 +235,24 @@ busy に見える一因。
 
 ## BUG-4【P1】Web ターミナルが出力の途中で止まったまま復帰しない（2026-08-08 記録）
 
-### 🚧 実装済み・**未デプロイ**（2026-08-08）
+### ✅ 実装済み・**デプロイ済み**（実装 2026-08-08 / 本番反映を 2026-09-04 に実測確認）
+
+⚠ 本節は長らく「未デプロイ」と書かれていたが**古い記述だった**。本番が配っている
+`/static/term.js` に `cmWatchGate` が 3 箇所あり、ローカル `web/static/term.js` と一致する
+（revision `claude-master-relay-00053-jdj`＝2026-08-19 デプロイに含まれていた）。確認コマンド:
+
+```sh
+curl -s https://claude-master-relay-nkzxa3hxma-an.a.run.app/static/term.js | grep -c cmWatchGate   # → 3
+```
+
+**⇒ Web ターミナルの stickiness を今も見るなら、原因は BUG-4 ではない**（別要因を探すこと）。
 方針 (a)+(c) を `drover-cloud/web/static/term.js` に実装。判定は純粋関数
 `cmWatchGate`（既存 `cmReconnectGate` と同じ流儀）に切り出し、実 node で真理値表を
 固定する `web/termjs_gate_test.go` を追加（**旧 term.js で FAIL・新で PASS を確認**）。
 gofmt/build/vet/`go test ./...` 全緑。
-⚠ **Cloud Run 未デプロイ＝本番にはまだ効いていない**。反映には relay の image 差し替えが要る
-（`deploy/deploy.sh` は初回構築専用＝env 全置換で事故る。SPEC.md のデプロイ節参照）。
+⚠ ~~Cloud Run 未デプロイ~~ **→ 2026-08-19 の revision 00053 で反映済み**（2026-09-04 実測）。
+なお relay の image 差し替え手順は `deploy/deploy.sh` を使わないこと（初回構築専用＝env 全置換で
+事故る。SPEC.md のデプロイ節参照）。
 ⚠ 判定表は単体で担保したが、**実際に切れた線が張り直るかは実 relay 越しの確認が必要**。
 
 ### 症状
