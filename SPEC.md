@@ -709,8 +709,18 @@ herdr＝drover daemon が exit/再起動しても入れ替わらない。** よ�
    集約済み（v0.5.23。shim / restart・update / organize が共有）。producer だけは
    別経路なので独自に除外する＝**新しい pane 列挙経路を足すときは
    `resolveAgentKind` を通すこと**。
-3. **注入 pane の cwd は偽値**（§5.1）。ルール書込経路（capture / learn）で
-   拾わないこと。
+3. **注入 pane の cwd は実パスではない**（§5.1）。ルール書込経路（capture /
+   learn）で拾わないこと。リモートの実パスはローカルに存在せず渡せないため、
+   `injPaneCwd()` が **`~/.herdr-drover`（中立なローカル実在パス）** を明示的に
+   渡す。実パスの出所は **title の `↗pc:実パス`** が持つ。
+   ⚠ 2026-09-06 まで cwd を渡しておらず、herdr が同一 workspace の既存 pane の
+   cwd を継承して**注入 pane が無関係なプロジェクトを名乗っていた**（cwd で
+   pane を選ぶと他 PC の窓を巻き込む実害の一歩手前まで行った）。
+   ⚠ **セッションの出自・所属を判断する経路（セッション間で命令を投げる相手の
+   選定など）は `pane.cwd` を読んではいけない**。リモート側の実 cwd は
+   **`drover_inj_cwd` token**（`herdrapi.InjTokenCwd`）に exact で載っている。
+   title の `↗pc:実パス` を parse しない（表示文字列の解析＝ヒューリスティック）。
+   token が無い＝**不明**として扱い、`pane.cwd` へ fallback しない。
 4. **自己再起動は必ず最後**（§2.5）。exit がハンドラを終わらせるため。
 5. **Ack はプロセスが死ぬ前**（§3）。
 6. **pane を消したまま終わらせない**（§2.4 の二段構え）。

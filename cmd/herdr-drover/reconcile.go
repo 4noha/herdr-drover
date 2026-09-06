@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -39,6 +40,7 @@ const (
 	injSource = "drover-inj"         // pane.report_metadata の source
 	injTokPC  = herdrapi.InjTokenPC  // identity token キー（producer と共有＝herdrapi）
 	injTokSID = herdrapi.InjTokenSID // exact-match・非ヒューリスティック
+	injTokCwd = herdrapi.InjTokenCwd // リモート側の実 cwd（出自判断はこれを読む）
 	// injWorkspace は「注入 workspace の**新規作成時の初期 label**」。判定には
 	// 一切使わない（v0.5.x で workspace 所属判定は完全廃止・token+index が権威）。
 	// ユーザーは herdr UI で自由に rename 可能（drover は workspace_id を持ち回るので追随不要）。
@@ -189,13 +191,39 @@ func injTabName(dir string) string {
 	return "↗" + dir
 }
 
+// injPaneCwd は注入 pane に渡す cwd。**中立なローカル実在パス**を明示的に渡す。
+//
+// リモート PC の実パス（例 /Users/noaki-takuya/works/…）は**このローカル PC に
+// 存在しない**ので渡せない（存在しないパスだと pane の起動に失敗し得る）。
+// かといって渡さないと、herdr が **同一 workspace の既存 pane の cwd を便宜的に
+// 継承**し、注入 pane が**無関係なプロジェクトのディレクトリを名乗る**
+// （2026-09-06 実測: Obsidian workspace の ↗窓 2 枚が `tools/hr01-tools` を
+// 名乗り、cwd で pane を選んでいたら他 PC の窓を巻き込むところだった）。
+//
+// ⚠ 以前このコードは「layout.apply には cwd 指定が無い」という前提で cwd を
+// 渡していなかったが、**それは誤り**。herdr 0.7.4 の schema の `LayoutNode` には
+// `cwd` がある（`herdr api schema --json` で実測・2026-09-06 訂正）。
+//
+// 実パスの出所は従来どおり **title の `↗pc:実パス`** が持つ（cwd フィールドの
+// 意味を汚さない方針は維持）。~/.herdr-drover は drover がある機なら必ず在る。
+func injPaneCwd() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "" // 解決できないなら従来どおり herdr に任せる（継承）
+	}
+	return filepath.Join(home, ".herdr-drover")
+}
+
 // injPaneTitle は注入 pane の terminal_title（herdr の pane.report_metadata
-// title）。実装上の理由（layout.apply には注入 pane 用の cwd 指定が無く、
-// リモート PC の実パスはこのローカル PC のファイルシステムに存在しない
-// ため cwd フィールド自体には渡せない＝渡すと存在しないパスで attach
-// プロセスの起動に失敗し得る）で `pane.cwd`/`foreground_cwd` は同一
-// workspace 内の既存 pane の値を herdr が便宜的に継承し、全 inject pane が
-// 同じ値を示す（実運用フィードバックで報告された誤認要因）。cwd を偽装
+// title）。リモート PC の実パスはこのローカル PC のファイルシステムに存在
+// しないため cwd フィールドには渡せない（渡すと存在しないパスで attach
+// プロセスの起動に失敗し得る）。
+//
+// ⚠ 旧コメントは「layout.apply に cwd 指定が無い」と書いていたが**誤り**で、
+// 実際は `LayoutNode.cwd` が在る（2026-09-06 訂正）。cwd を渡さなかった結果、
+// herdr が同一 workspace の既存 pane の値を継承し、注入 pane が**無関係な
+// プロジェクトのディレクトリを名乗っていた**（実運用フィードバックで報告された
+// 誤認要因）。今は injPaneCwd() が中立パスを明示的に渡す。cwd を偽装
 // する代わりに、**title へ「↗pc:実パス」を明示**して pane 選定時に画面を
 // 見れば出所と実際の作業ディレクトリが一目で分かるようにする（cwd
 // フィールドの意味を汚さない・鉄則③のヒューリスティック分類回避と同じ
@@ -415,7 +443,7 @@ func reconcileRemote(ctx context.Context, api *herdrapi.Client, st remoteSource,
 		p := &panes[i]
 		pc, sid := p.Tokens[injTokPC], p.Tokens[injTokSID]
 		if pc != "" && sid != "" {
-			cur[p.PaneID] = injMeta{pc: pc, sid: sid, title: p.Title}
+			cur[p.PaneID] = injMeta{pc: pc, sid: sid, title: p.Title, cwd: p.Tokens[injTokCwd]}
 			// index 側にも取り込む（AdoptToken は既に一致していれば no-op＝persist 節約）。
 			if idx != nil {
 				_ = idx.AdoptToken(p.PaneID, pc, sid)
@@ -520,10 +548,12 @@ func reconcileRemote(ctx context.Context, api *herdrapi.Client, st remoteSource,
 	for mk, d := range desired {
 		var ids []string
 		var ids0Title string // ids[0] の現在 title（cur から delete する前に保存）
+		var ids0Cwd string   // 同じく現在の drover_inj_cwd token
 		for pid, m := range cur {
 			if injMarkerKey(m.pc, m.sid) == mk {
 				if len(ids) == 0 {
 					ids0Title = m.title
+					ids0Cwd = m.cwd
 				}
 				ids = append(ids, pid)
 				delete(cur, pid)
@@ -578,7 +608,7 @@ func reconcileRemote(ctx context.Context, api *herdrapi.Client, st remoteSource,
 			}
 			if merr := api.PaneReportMetadata(pid, injSource, herdrapi.ReportMetadata{
 				Title:  injPaneTitle(d.pc, d.cwd, d.ips),
-				Tokens: map[string]string{injTokPC: d.pc, injTokSID: d.sid},
+				Tokens: map[string]string{injTokPC: d.pc, injTokSID: d.sid, injTokCwd: d.cwd},
 			}); merr != nil {
 				// token 付与失敗＝orphan 化するので pane を close＋index からも Abandon。
 				lg.Printf("[reconcile] metadata 付与失敗 %s → 即 close（orphan 回避）: %v", pid, merr)
@@ -619,9 +649,10 @@ func reconcileRemote(ctx context.Context, api *herdrapi.Client, st remoteSource,
 			// 上の (b) self-heal コメント参照）。desired 側の cwd がここで手に入るので、
 			// 期待 title と現在値が食い違う周だけ再表明する（毎周不要な write を避ける・
 			// 実運用フィードバック「インジェクト時に title が落ちる」への対処）。
-			if want := injPaneTitle(d.pc, d.cwd, d.ips); ids0Title != want {
+			if want := injPaneTitle(d.pc, d.cwd, d.ips); ids0Title != want || ids0Cwd != d.cwd {
 				if terr := api.PaneReportMetadata(ids[0], injSource, herdrapi.ReportMetadata{
-					Title: want,
+					Title:  want,
+					Tokens: map[string]string{injTokCwd: d.cwd},
 				}); terr != nil {
 					lg.Printf("[reconcile] title 再表明失敗 %s（次周に再試行）: %v", ids[0], terr)
 				}
@@ -880,6 +911,7 @@ func applyInjectPane(api *herdrapi.Client, wsID, tabLabel string, argv []string,
 	type layoutPane struct {
 		Type    string            `json:"type"`
 		Command []string          `json:"command"`
+		Cwd     string            `json:"cwd,omitempty"`
 		Env     map[string]string `json:"env,omitempty"`
 	}
 	raw, err := api.Call("layout.apply", struct {
@@ -887,7 +919,7 @@ func applyInjectPane(api *herdrapi.Client, wsID, tabLabel string, argv []string,
 		TabLabel    string     `json:"tab_label"`
 		Focus       bool       `json:"focus"`
 		Root        layoutPane `json:"root"`
-	}{wsID, tabLabel, false, layoutPane{Type: "pane", Command: argv, Env: env}})
+	}{wsID, tabLabel, false, layoutPane{Type: "pane", Command: argv, Cwd: injPaneCwd(), Env: env}})
 	if err != nil {
 		return "", fmt.Errorf("layout.apply: %w", err)
 	}

@@ -82,9 +82,19 @@ type PaneInfo struct {
 //     Pending 予約するので producer は index Snapshot 経由でこの pane_id を除外
 //   - herdr サーバ再起動で token 消失 → agent 起動時 self-heal（reconcile.go
 //     selfHealOnStartup）が pane.list × index で照合し token を再表明
+//
+// InjTokenCwd は**リモート側の実 cwd**（2026-09-06 追加）。注入 pane の
+// `pane.cwd` はローカルに存在しない実パスを渡せないため中立パスであり、
+// **セッションの出自・所属の判断に使ってはいけない**（cwd で pane を選ぶと
+// 他 PC の窓を巻き込む）。セッション間で命令を投げる相手を選ぶような経路は
+// この token を exact-match で読む。title の `↗pc:実パス` を parse しない
+// （表示文字列の解析はヒューリスティック＝鉄則③に反する）。
+// ⚠ 値が無い＝**不明**として扱うこと。`pane.cwd` へ fallback しない
+// （herdr 再起動直後など、title 再表明までの周は付いていないことがある）。
 const (
 	InjTokenPC  = "drover_inj_pc"
 	InjTokenSID = "drover_inj_sid"
+	InjTokenCwd = "drover_inj_cwd"
 )
 
 // InjWorkspaceLabel は注入 pane を集める **新規注入 workspace の初期 label**

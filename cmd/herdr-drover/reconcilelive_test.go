@@ -274,3 +274,83 @@ func TestCloseReasonDistinguishesTeardownFromRemoteLoss(t *testing.T) {
 		t.Fatalf("リモート消滅の CLOSE 理由が出ていない:\n%s", out)
 	}
 }
+
+// TestInjectPaneCwdIsNeutralNotInherited:
+// 注入 pane の cwd は **明示した中立パス**であること。渡さないと herdr が同一
+// workspace の既存 pane の cwd を継承し、注入 pane が無関係なプロジェクトの
+// ディレクトリを名乗る（2026-09-06 に実運用で誤認要因になった）。
+// 旧コード（cwd を渡さない）ではこのテストが FAIL する。
+func TestInjectPaneCwdIsNeutralNotInherited(t *testing.T) {
+	sock := startHerdrForTest(t)
+	api := herdrapi.New(sock)
+	stub := reconcileStub(t)
+	idx := newTestIndex(t)
+	lg := log.New(os.Stderr, "[t] ", 0)
+	ctx := context.Background()
+
+	// HOME を隔離して injPaneCwd() の期待値を固定する（実 HOME 不可侵）。
+	home := t.TempDir()
+	setTestHome(t, home)
+	wantCwd, err := filepath.EvalSymlinks(filepath.Join(home, ".herdr-drover"))
+	if err != nil {
+		// まだ無ければ作ってから解決（herdr は物理パスで登録する）。
+		if mkerr := os.MkdirAll(filepath.Join(home, ".herdr-drover"), 0o700); mkerr != nil {
+			t.Fatalf("mkdir: %v", mkerr)
+		}
+		if wantCwd, err = filepath.EvalSymlinks(filepath.Join(home, ".herdr-drover")); err != nil {
+			t.Fatalf("EvalSymlinks: %v", err)
+		}
+	}
+
+	// 継承元になりうる既存 pane を持つ workspace を作る（root pane の cwd は
+	// この herdr server の cwd＝テストプロセスの cwd）。
+	fr := newLiveFakeRemote()
+	reconcileRemote(ctx, api, fr, Cloud{PCName: "selfPC"}, stub, idx, lg)
+	paneID := onlyInjectedPane(t, api)
+
+	p, gerr := api.PaneGet(paneID)
+	if gerr != nil {
+		t.Fatalf("pane.get: %v", gerr)
+	}
+	if p.Cwd != wantCwd {
+		t.Fatalf("注入 pane の cwd が中立パスでない: got %q want %q（継承していないか）", p.Cwd, wantCwd)
+	}
+}
+
+// TestInjectPaneExposesRemoteCwdToken:
+// **セッションの出自（どのリモートのどのディレクトリか）を機械可読で出す**。
+// 注入 pane の pane.cwd は中立パスなので出自判断には使えず、title の
+// `↗pc:実パス` を parse させるのは表示文字列の解析＝ヒューリスティック。
+// そこで drover_inj_cwd token に実 cwd を exact で載せる。
+// 旧コード（token 無し）ではこのテストが FAIL する。
+func TestInjectPaneExposesRemoteCwdToken(t *testing.T) {
+	sock := startHerdrForTest(t)
+	api := herdrapi.New(sock)
+	stub := reconcileStub(t)
+	idx := newTestIndex(t)
+	lg := log.New(os.Stderr, "[t] ", 0)
+	ctx := context.Background()
+	setTestHome(t, t.TempDir())
+
+	const remoteCwd = "/Users/noaki-takuya/works/tools/hr01-tools"
+	fr := &fakeRemote{
+		pcs: []string{"self-herdr", "remoteA"},
+		sessions: map[string][]map[string]any{
+			"remoteA": {fakeSessWithCwd("w9:pA", "hr01-tools", remoteCwd)},
+		},
+	}
+	reconcileRemote(ctx, api, fr, Cloud{PCName: "self-herdr"}, stub, idx, lg)
+	paneID := onlyInjectedPane(t, api)
+
+	p, err := api.PaneGet(paneID)
+	if err != nil {
+		t.Fatalf("pane.get: %v", err)
+	}
+	if got := p.Tokens[injTokCwd]; got != remoteCwd {
+		t.Fatalf("drover_inj_cwd token=%q want %q（出自が機械可読でない）", got, remoteCwd)
+	}
+	// pane.cwd の方は中立パスのまま＝出自には使えないことも同時に固定する。
+	if p.Cwd == remoteCwd {
+		t.Fatalf("pane.cwd がリモート実パスになっている（ローカルに存在しないパスは渡さない方針）: %q", p.Cwd)
+	}
+}

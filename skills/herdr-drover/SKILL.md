@@ -27,6 +27,7 @@ herdr workspace list    # ws ごとの tab 数
 | `agent` 無し ＋ `agent_status: "unknown"` | agent がいない pane（復元直後の殻・素シェル・ビューア） |
 | `agent_session.value` | 会話 ref。**同じ値を持つ pane が 2 枚あれば重複** |
 | `tokens.drover_inj_pc` あり / label が `↗` 始まり | **リモート注入 pane。絶対に触らない** |
+| `tokens.drover_inj_cwd` | 注入 pane の**リモート側の実 cwd**。⚠ 注入 pane の `cwd` フィールドは中立パス（`~/.herdr-drover`）で**出自の判断に使えない**。他セッションへ命令を投げる相手を選ぶときは**必ずこの token を読む**（title の `↗pc:実パス` を parse しない。token が無ければ「不明」として扱い `cwd` へ fallback しない） |
 
 ## 再起動後のタブ修復（実測済みの手順）
 
