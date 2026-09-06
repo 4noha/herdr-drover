@@ -50,6 +50,30 @@ const respawnStopWait = 10 * time.Second
 type bridgeRun struct {
 	cancel context.CancelFunc
 	done   chan struct{}
+	// b は稼働中の bridge（生成後に代入）。**nil は「生成途中＝不明」**。
+	// 空振り判定（yieldToNewWake）に使う。mu 保護。
+	b *bridge.Bridge
+}
+
+// yieldToNewWake は「稼働中の bridge を止めて新しい wake に譲るか」。
+//
+// 旧実装の dedup は「その sid の bridge が**在るか**」だけで wake を捨てていた。
+// ところが**在ることは繋がっていることを意味しない**（BUG-1 / BUG-6 と同じ型）:
+// ブラウザが ws を張った直後に 1 バイトも送らずに切れると、source は誰も居ない
+// 相手を待ち続け、その間の入り直しが全部捨てられる（2026-09-06 実測: この
+// 「空振りが入り直しを捨てた」列がログに 110 回。ユーザーには「Web コンソールが
+// 3 回に 1 回しか出ない」に見える）。
+//
+// ⚠ **繋がっている bridge は絶対に止めない**（見ている画面を切ることになる）。
+// ⚠ **生成途中（b==nil）も止めない**。不明なものを壊さない＝従来どおり無視する。
+func yieldToNewWake(h *bridgeRun) bool {
+	if h == nil {
+		return true // そもそも稼働していない
+	}
+	if h.b == nil {
+		return false // 生成途中＝不明。触らない
+	}
+	return !h.b.ReceivedAny() // 空振り（相手から 1 バイトも来ていない）なら譲る
 }
 
 // webTerm は Web ターミナル経路の agent 側状態（WatchWake＋sid 毎 bridge）。
@@ -142,13 +166,36 @@ func (w *webTerm) handleWake(ctx context.Context, sid string) {
 	defer bcancel()
 	done := make(chan struct{})
 	w.mu.Lock()
-	if w.active[sid] != nil {
+	if h := w.active[sid]; h != nil {
+		if !yieldToNewWake(h) {
+			w.mu.Unlock()
+			bcancel()
+			w.lg.Printf("webterm: 多重 wake 無視 sid=%q（bridge 稼働中）", sid)
+			return
+		}
+		// 空振り bridge が居座っている＝この wake を捨てると画面が出ない。
+		// 旧 bridge を止めてから張り直す（respawn と同じ規律: done を待って
+		// から再登録＝同 sid に 2 本を作らない）。
 		w.mu.Unlock()
-		bcancel()
-		w.lg.Printf("webterm: 多重 wake 無視 sid=%q（bridge 稼働中）", sid)
-		return
+		w.lg.Printf("webterm: 空振り bridge を停止して張り直す sid=%q（相手から 1 バイトも来ていない）", sid)
+		h.cancel()
+		select {
+		case <-h.done:
+		case <-time.After(respawnStopWait):
+			bcancel()
+			w.lg.Printf("webterm: 空振り bridge が %s 以内に止まらない sid=%q（今回の wake は見送り）", respawnStopWait, sid)
+			return
+		}
+		w.mu.Lock()
+		if w.active[sid] != nil { // 待っている間に誰かが張り直していたら譲る
+			w.mu.Unlock()
+			bcancel()
+			w.lg.Printf("webterm: 多重 wake 無視 sid=%q（停止待ちの間に別の bridge が張られた）", sid)
+			return
+		}
 	}
-	w.active[sid] = &bridgeRun{cancel: bcancel, done: done}
+	run := &bridgeRun{cancel: bcancel, done: done}
+	w.active[sid] = run
 	w.mu.Unlock()
 	defer func() {
 		w.mu.Lock()
@@ -202,6 +249,11 @@ func (w *webTerm) handleWake(ctx context.Context, sid string) {
 	//   - ctx cancel（SIGTERM）で必ず戻り observe サブプロセスを残さない
 	w.lg.Printf("webterm: bridge 開始 sid=%q", sid)
 	b := bridge.New(paneID, conn, w.hcli)
+	// 空振り判定（yieldToNewWake）から見えるようにする。ここで初めて
+	// 「不明（nil）」から「判定可能」へ変わる。
+	w.mu.Lock()
+	run.b = b
+	w.mu.Unlock()
 	// quiescence（無通信自切断）は DROVER_IDLE で調整可（0 なら bridge 既定
 	// 30s＝cm 本番 IdleClose と同値）。e2e が短い idle で実切断を検証する。
 	b.Idle = w.idle

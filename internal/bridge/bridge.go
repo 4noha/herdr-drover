@@ -60,6 +60,18 @@ const (
 	// 自分から閉じ、次の wake まで解放する＝near-$0 設計の要。
 	DefaultIdle = 30 * time.Second
 
+	// DefaultFirstByteIdle は「**まだ 1 バイトも受け取っていない** bridge」を
+	// 畳むまでの待ち（v0.5.39）。相手（viewer）が来ていない接続は DefaultIdle
+	// をフルに待つ意味が無く、待っている間その sid は塞がれる。
+	//
+	// 実害（2026-09-06 実測・110 回記録）: ブラウザが ws を張った直後に 1 バイトも
+	// 送らずに切れることがある（0.04〜7.7s）。それでも relay は PC を起こすので、
+	// source は**誰も居ない相手を 30〜45 秒待ち続ける**。その間、同じ sid への
+	// 入り直しは webterm の dedup に捨てられる（`多重 wake 無視`）＝ユーザーには
+	// 「Web コンソールが 3 回に 1 回しか出ない」に見える。
+	// ⚠ near-$0 を壊さないこと: idle 切断は**やめない**。空振りを短く畳むだけ。
+	DefaultFirstByteIdle = 5 * time.Second
+
 	// writeTimeout は conn への frame 書込の上限（cm renderClientLocked の
 	// 2s write deadline と同値・同クラスの対処）。viewer が読まない（TCP
 	// backpressure）と writer が Conn.Write で無期限ブロックし、RESIZE 時の
@@ -102,6 +114,9 @@ type Bridge struct {
 	HerdrBin string
 	// MaxRows/MaxCols は observe サイズ clamp の knob（0 なら既定値）。
 	MaxRows, MaxCols int
+	// FirstByteIdle は「初回データ未着」の待ち（0 なら DefaultFirstByteIdle、
+	// 負なら無効＝Idle と同じ扱い）。テストから短縮する。
+	FirstByteIdle time.Duration
 	// Idle は quiescence 自切断（両方向とも Idle の間 1 バイトも流れなければ
 	// conn を閉じて Run が nil で戻る）。0 なら DefaultIdle(30s)、負なら
 	// 無効（テスト用）。cm relay.idlePump の「どちら向きでもバイトが流れる
@@ -121,6 +136,9 @@ type Bridge struct {
 
 	// last は最終通信時刻（UnixNano）。conn の read/write 両方向で bump。
 	last atomic.Int64
+	// gotFirst は conn から**実データを 1 バイトでも受け取ったか**。初期の
+	// last.Store（起動時刻の種）では立てない＝「相手が本当に来たか」を表す。
+	gotFirst atomic.Bool
 	// idleClosed は quiescence 自切断を自分で行った印（conn close 起因の
 	// read エラーを「正常切断」へ写像するため）。
 	idleClosed atomic.Bool
@@ -218,17 +236,35 @@ func (b *Bridge) Run(ctx context.Context) error {
 	if idle == 0 {
 		idle = DefaultIdle
 	}
+	// 初回データ未着の待ち（空振り接続を長く抱えないための短い閾値）。
+	firstIdle := b.FirstByteIdle
+	if firstIdle == 0 {
+		firstIdle = DefaultFirstByteIdle
+	}
+	if firstIdle < 0 || firstIdle > idle {
+		firstIdle = idle // 無効化 or 逆転指定＝従来どおり Idle だけで判定
+	}
 	watchStop := make(chan struct{})
 	defer close(watchStop)
 	if idle > 0 {
 		go func() {
-			t := time.NewTicker(idle / 2)
+			tick := firstIdle
+			if tick > idle {
+				tick = idle
+			}
+			t := time.NewTicker(tick / 2)
 			defer t.Stop()
 			for {
 				select {
 				case <-t.C:
-					if time.Since(time.Unix(0, b.last.Load())) >= idle {
-						b.logf("quiescence: %s 無通信＝データ線を自切断", idle)
+					// ⚠ 閾値は「相手から 1 バイトでも来たか」で切り替える。
+					// 来ていない間は firstIdle（短い）＝空振りを長く抱えない。
+					limit, why := idle, "無通信"
+					if !b.gotFirst.Load() {
+						limit, why = firstIdle, "初回データ未着（相手が来ていない）"
+					}
+					if time.Since(time.Unix(0, b.last.Load())) >= limit {
+						b.logf("quiescence: %s %s＝データ線を自切断", limit, why)
 						b.idleClosed.Store(true)
 						b.closeConn()
 						return
@@ -366,7 +402,15 @@ func (b *Bridge) closeConn() {
 }
 
 // bump は quiescence 時計を今へ進める（conn の read/write 両方向から呼ぶ）。
-func (b *Bridge) bump() { b.last.Store(time.Now().UnixNano()) }
+func (b *Bridge) bump() {
+	b.last.Store(time.Now().UnixNano())
+	b.gotFirst.Store(true)
+}
+
+// ReceivedAny は「この bridge が相手から実データを受け取ったか」。webterm の
+// dedup が「稼働中の bridge が空振りかどうか」を判断するのに使う（pane や
+// bridge が**在る**ことは、相手と**繋がっている**ことを意味しない）。
+func (b *Bridge) ReceivedAny() bool { return b.gotFirst.Load() }
 
 func (b *Bridge) setProc(p *observeProc) {
 	b.mu.Lock()

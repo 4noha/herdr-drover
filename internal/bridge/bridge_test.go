@@ -531,3 +531,78 @@ func TestSendInputRouting(t *testing.T) {
 		return bytes.Equal(got, want), fmt.Errorf("got=%x want=%x", got, want)
 	})
 }
+
+// TestBridgeClosesFastWhenNoFirstByte は「相手が来ていない bridge（空振り）」を
+// **Idle をフルに待たずに**畳むことの検証。
+//
+// 実害（2026-09-06 実測・ログに 110 回）: ブラウザが ws を張った直後に 1 バイトも
+// 送らずに切れると、relay は PC を起こすので source は誰も居ない相手を 30〜45 秒
+// 待ち続ける。その間 webterm の dedup が同 sid への入り直しを捨てるため、ユーザーには
+// 「Web コンソールが 3 回に 1 回しか出ない」に見える。
+// 旧コード（閾値が常に Idle）ではこのテストがタイムアウトで FAIL する。
+func TestBridgeClosesFastWhenNoFirstByte(t *testing.T) {
+	_, hc := startHerdr(t)
+	ws, err := hc.WorkspaceCreate()
+	if err != nil {
+		t.Fatalf("workspace.create: %v", err)
+	}
+	// viewer 側は**何も送らない**（張った直後に沈黙＝空振り接続の再現）。
+	viewerConn, bridgeConn := net.Pipe()
+	defer viewerConn.Close()
+
+	b := New(ws.RootPane.PaneID, bridgeConn, hc)
+	b.Idle = 60 * time.Second         // 通常の quiescence は長いまま（ここまで待ったら失敗）
+	b.FirstByteIdle = 2 * time.Second // 初回未着はこれで畳む
+	b.Logf = t.Logf
+	if b.ReceivedAny() {
+		t.Fatal("開始前から ReceivedAny=true（初期 last.Store で立ててはいけない）")
+	}
+
+	runDone := make(chan error, 1)
+	start := time.Now()
+	go func() { runDone <- b.Run(context.Background()) }()
+
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatalf("空振りの自切断は nil で戻るべき: %v", err)
+		}
+		if el := time.Since(start); el > 15*time.Second {
+			t.Fatalf("初回データ未着なのに %v 待った（Idle まで居座っている）", el)
+		}
+		if b.ReceivedAny() {
+			t.Fatal("1 バイトも受けていないのに ReceivedAny=true")
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("初回データ未着の bridge が畳まれない（Idle まで居座っている＝空振りが sid を塞ぐ）")
+	}
+}
+
+// TestBridgeReceivedAnyFlipsOnData は ReceivedAny が「実データ到来」でのみ立つこと。
+// webterm の dedup がこの値で「空振りか」を判断するので、初期の last.Store（起動
+// 時刻の種）で立ってしまうと空振り判定が常に false になり修正が無効化される。
+func TestBridgeReceivedAnyFlipsOnData(t *testing.T) {
+	_, hc := startHerdr(t)
+	ws, err := hc.WorkspaceCreate()
+	if err != nil {
+		t.Fatalf("workspace.create: %v", err)
+	}
+	viewerConn, bridgeConn := net.Pipe()
+	sink := newConnSink(viewerConn)
+	_ = sink
+
+	b := New(ws.RootPane.PaneID, bridgeConn, hc)
+	b.Idle = 30 * time.Second
+	b.FirstByteIdle = 25 * time.Second // このテストでは早期切断を効かせない
+	b.Logf = t.Logf
+	runDone := make(chan error, 1)
+	go func() { runDone <- b.Run(context.Background()) }()
+	t.Cleanup(func() { viewerConn.Close(); <-runDone })
+
+	if _, err := viewerConn.Write(resizeMagic(24, 80)); err != nil {
+		t.Fatalf("write RESIZE: %v", err)
+	}
+	waitFor(t, 15*time.Second, "ReceivedAny が立つ", func() (bool, error) {
+		return b.ReceivedAny(), nil
+	})
+}
