@@ -332,6 +332,19 @@ func runOneCloud(ctx context.Context, cfg Config, cl Cloud, primary bool, hcli *
 			defer cancel()
 			return updateClaudeAndRestart(uctx, hcli, restartOptions{SID: sid, Agent: agent}, lg.Writer())
 		},
+		// 画面 I/O（Phase 2・drover-cloud-mcp-design.md）。send-input/interrupt は
+		// master/slave どちらでも AckCommand の detail だけで完結するので無条件で
+		// 配線できる。read-pane は結果本文が大きく mcp_results へ保存が要るため、
+		// 保存先（PutCommandResult）を持つ master でのみ機能する＝slave では
+		// putResult が明示エラーを返す（known gap。TODO.md 参照）。
+		DoReadPane: newDoReadPane(hcli, func(ctx context.Context, id, text string, truncated bool, ttl time.Duration) error {
+			if scConcrete == nil {
+				return fmt.Errorf("read-pane の結果保存は slave 未対応（Phase 3 で検討）")
+			}
+			return scConcrete.PutCommandResult(ctx, id, text, truncated, ttl)
+		}),
+		DoSendInput: newDoSendInput(hcli),
+		DoInterrupt: newDoInterrupt(hcli),
 	}
 	if wt != nil {
 		cr.DoProxy = func(_ context.Context, sid string) error {
@@ -343,6 +356,21 @@ func runOneCloud(ctx context.Context, cfg Config, cl Cloud, primary bool, hcli *
 			lg.Printf("%scommand watcher 終了: %v", tag, err)
 		}
 	}()
+
+	// last_seen 定期書き込み（online 判定の土台。§9 決定事項5）。master のみ
+	// （slave は未対応・known gap）。既存 tick とは独立のタイマーだが、
+	// dormant（失効中）の間は書かない＝tickFn と同じ規律（TouchLastSeen の
+	// Set+MergeAll は doc が無ければ新規作成してしまうため、ここで無条件に
+	// 呼ぶと「owner が端末削除した PC が再び pcs/{pc} に蘇る」削除合戦を
+	// 起こす。TestE2ERevokedAgentDormant で実際に検出・修正した）。
+	if scConcrete != nil {
+		go runLastSeenHeartbeat(ctx, lastSeenInterval, func(ctx context.Context) error {
+			if scConcrete.IsSelfRevoked(ctx) {
+				return nil
+			}
+			return scConcrete.TouchLastSeen(ctx, cl.PCName)
+		}, lg)
+	}
 
 	// producer 契約（internal/session と統合）: 1 tick = pane.list/agent.list →
 	// session map（key=pane_id・short_dir=cwd 末尾・window_name=agent/label・

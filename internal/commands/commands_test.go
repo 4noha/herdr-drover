@@ -364,6 +364,9 @@ func TestCommandRunnerUnwiredAcksError(t *testing.T) {
 		"restart-agent-session": "restart-agent-session 未配線",
 		"update-agent-cli":      "update-agent-cli 未配線",
 		"update-all":            "update-all 未配線",
+		"read-pane":             "read-pane 未配線",
+		"send-input":            "send-input 未配線",
+		"interrupt":             "interrupt 未配線",
 	} {
 		id, err := st.PushCommand(ctx, pc, cmd, "w1:p1", "", "owner@example.com")
 		if err != nil {
@@ -494,5 +497,124 @@ func TestNewCommandNameCarriesAgent(t *testing.T) {
 	defer mu.Unlock()
 	if gotAgent != "codex" {
 		t.Errorf("agent = %q, want codex", gotAgent)
+	}
+}
+
+// 画面 I/O 命令（Phase 2）: read-pane は expires_at 不要（非破壊）、
+// send-input/interrupt は expires_at 必須（スリープ復帰後の遅延実行事故を
+// 防ぐ・commands.go checkExpiry）。args が exact にそのまま seam へ渡ること、
+// 期限切れ/未指定では seam 自体が発火しないこと（監査にも exact な理由が
+// 残ること）を検証する。
+func TestCommandRunnerScreenIOCommands(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pc := "cmd-drover-screenio"
+	st := newState(t, pc)
+
+	var reads, sends, interrupts atomic.Int32
+	var lastReadArgs, lastSendArgs atomic.Value
+
+	cr := &CommandRunner{
+		St:      st,
+		Revoked: func(context.Context) bool { return false },
+		DoReadPane: func(_ context.Context, id, sid string, args map[string]string) (string, error) {
+			reads.Add(1)
+			lastReadArgs.Store(args)
+			if sid == "w9:p9" {
+				return "", fmt.Errorf("pane が見つからない")
+			}
+			return fmt.Sprintf("画面取得完了（id=%s, 42 bytes）", id), nil
+		},
+		DoSendInput: func(_ context.Context, sid string, args map[string]string) (string, error) {
+			sends.Add(1)
+			lastSendArgs.Store(args)
+			if sid == "w9:p9" {
+				return "", fmt.Errorf("working 中のため拒否")
+			}
+			return "入力完了", nil
+		},
+		DoInterrupt: func(_ context.Context, sid string) (string, error) {
+			interrupts.Add(1)
+			if sid == "w9:p9" {
+				return "", fmt.Errorf("pane が見つからない")
+			}
+			return "中断完了", nil
+		},
+	}
+	go func() { _ = cr.Run(ctx) }()
+	time.Sleep(1500 * time.Millisecond)
+
+	future := time.Now().Add(5 * time.Minute).UTC().Format(time.RFC3339Nano)
+	past := time.Now().Add(-1 * time.Minute).UTC().Format(time.RFC3339Nano)
+
+	push := func(cmd, sid string, args map[string]string) string {
+		id, err := st.PushCommandArgs(ctx, pc, cmd, sid, "", "owner@example.com", "mcp", args)
+		if err != nil {
+			t.Fatalf("PushCommandArgs(%s): %v", cmd, err)
+		}
+		return id
+	}
+
+	// read-pane: expires_at 不要（非破壊）。args が exact に渡り、成功時は
+	// 要約が detail に載る。
+	c := waitCmdStatus(t, st, pc, push("read-pane", "w1:p1", map[string]string{"source": "visible", "lines": "50"}), 8*time.Second)
+	if c.Status != "done" || reads.Load() != 1 || !strings.Contains(c.Detail, "bytes") {
+		t.Fatalf("read-pane: %+v reads=%d", c, reads.Load())
+	}
+	if got, _ := lastReadArgs.Load().(map[string]string); got["source"] != "visible" || got["lines"] != "50" {
+		t.Fatalf("read-pane に渡った args が想定外: %+v", got)
+	}
+
+	// read-pane: seam エラー → status=error（pending 滞留させない）
+	c = waitCmdStatus(t, st, pc, push("read-pane", "w9:p9", nil), 8*time.Second)
+	if c.Status != "error" || !strings.Contains(c.Detail, "見つからない") {
+		t.Fatalf("read-pane(エラー sid): %+v", c)
+	}
+
+	// send-input: expires_at 無し → seam 自体を呼ばず error（期限切れ事故防止の
+	// ゲートが nil seam チェックの後・DoSendInput 呼び出しの前にあることの検証）。
+	c = waitCmdStatus(t, st, pc, push("send-input", "w1:p1", map[string]string{"text": "hello"}), 8*time.Second)
+	if c.Status != "error" || !strings.Contains(c.Detail, "expires_at が必須") {
+		t.Fatalf("send-input(expires_at 無し): %+v", c)
+	}
+	if sends.Load() != 0 {
+		t.Fatalf("expires_at 無しで seam が発火: %d", sends.Load())
+	}
+
+	// send-input: 期限切れ → error、seam は呼ばれない
+	c = waitCmdStatus(t, st, pc, push("send-input", "w1:p1", map[string]string{"text": "hello", "expires_at": past}), 8*time.Second)
+	if c.Status != "error" || !strings.Contains(c.Detail, "expired") {
+		t.Fatalf("send-input(期限切れ): %+v", c)
+	}
+	if sends.Load() != 0 {
+		t.Fatalf("期限切れで seam が発火: %d", sends.Load())
+	}
+
+	// send-input: 有効期限内 → seam 発火・args が exact に渡る・done
+	c = waitCmdStatus(t, st, pc, push("send-input", "w1:p1", map[string]string{"text": "hello", "expires_at": future}), 8*time.Second)
+	if c.Status != "done" || sends.Load() != 1 || c.Detail != "入力完了" {
+		t.Fatalf("send-input(有効): %+v sends=%d", c, sends.Load())
+	}
+	if got, _ := lastSendArgs.Load().(map[string]string); got["text"] != "hello" {
+		t.Fatalf("send-input に渡った args が想定外: %+v", got)
+	}
+
+	// interrupt: 同じ expires_at ゲートを共有する（コピペミスの回帰検知）。
+	c = waitCmdStatus(t, st, pc, push("interrupt", "w1:p1", nil), 8*time.Second)
+	if c.Status != "error" || !strings.Contains(c.Detail, "expires_at が必須") {
+		t.Fatalf("interrupt(expires_at 無し): %+v", c)
+	}
+	if interrupts.Load() != 0 {
+		t.Fatalf("expires_at 無しで interrupt seam が発火: %d", interrupts.Load())
+	}
+	c = waitCmdStatus(t, st, pc, push("interrupt", "w1:p1", map[string]string{"expires_at": future}), 8*time.Second)
+	if c.Status != "done" || interrupts.Load() != 1 {
+		t.Fatalf("interrupt(有効): %+v interrupts=%d", c, interrupts.Load())
+	}
+
+	// interrupt: seam エラー → status=error
+	c = waitCmdStatus(t, st, pc, push("interrupt", "w9:p9", map[string]string{"expires_at": future}), 8*time.Second)
+	if c.Status != "error" || !strings.Contains(c.Detail, "見つからない") {
+		t.Fatalf("interrupt(エラー sid): %+v", c)
 	}
 }

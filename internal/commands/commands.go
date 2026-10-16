@@ -35,6 +35,7 @@ package commands
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/4noha/drover-cloud/state"
 )
@@ -76,6 +77,36 @@ type CommandRunner struct {
 	// restart=true なら呼び手（handle）が Ack 後に DoExit する＝launchd が新
 	// バイナリで再起動。err 時は restart=false（原因調査のため生かす）。
 	DoUpdateAll func(ctx context.Context) (summary string, restart bool, err error)
+	// DoReadPane は画面テキスト取得（pane.read）＋結果の mcp_results 保存までを
+	// 一体で行う（保存先の選び方は呼び手の責務。slave 等で保存できない場合は
+	// err を返す。agent 自身は死なないので Ack は実行後＝戻り値 summary が
+	// detail に載る。drover-cloud-mcp-design.md Phase 2）。
+	DoReadPane func(ctx context.Context, id, sid string, args map[string]string) (summary string, err error)
+	// DoSendInput はテキスト/キー入力（pane.send_text/send_keys）。
+	// agent_status ゲート・text/keys 排他の判定は実装側（cmd/herdr-drover）の
+	// 責務＝ここは args をそのまま渡すだけ（画面 I/O の意味を知らない）。
+	DoSendInput func(ctx context.Context, sid string, args map[string]string) (summary string, err error)
+	// DoInterrupt は Ctrl-C 相当（pane.send_keys C-c）。
+	DoInterrupt func(ctx context.Context, sid string) (summary string, err error)
+}
+
+// checkExpiry は Args["expires_at"]（RFC3339Nano）を検証する。send-input /
+// interrupt は**必須**（スリープ中に滞留した命令が復帰後に突然発火する事故を
+// 防ぐ。drover-cloud-mcp-design.md §3.3）。この2命令は Phase 2 で新設された
+// ばかりで既存呼び手が無いため、後方互換の考慮なく必須化できる。
+func checkExpiry(args map[string]string) error {
+	exp := args["expires_at"]
+	if exp == "" {
+		return fmt.Errorf("expires_at が必須（スリープ復帰後の遅延実行事故を防ぐため）")
+	}
+	t, err := time.Parse(time.RFC3339Nano, exp)
+	if err != nil {
+		return fmt.Errorf("expires_at の形式が不正: %q", exp)
+	}
+	if time.Now().After(t) {
+		return fmt.Errorf("expired: 期限切れ（%s）", exp)
+	}
+	return nil
 }
 
 // Run は命令制御線（WatchCommands）を回す。claim 済命令のみ handle
@@ -195,6 +226,50 @@ func (cr *CommandRunner) handle(ctx context.Context, cm state.Command) {
 			return
 		}
 		_ = cr.St.AckCommand(ctx, cm.ID, "done", summary+legacyNote)
+
+	case "read-pane":
+		if cr.DoReadPane == nil {
+			_ = cr.St.AckCommand(ctx, cm.ID, "error", "read-pane 未配線")
+			return
+		}
+		summary, err := cr.DoReadPane(ctx, cm.ID, cm.SID, cm.Args)
+		if err != nil {
+			_ = cr.St.AckCommand(ctx, cm.ID, "error", "画面取得失敗: "+err.Error())
+			return
+		}
+		_ = cr.St.AckCommand(ctx, cm.ID, "done", summary)
+
+	case "send-input":
+		if cr.DoSendInput == nil {
+			_ = cr.St.AckCommand(ctx, cm.ID, "error", "send-input 未配線")
+			return
+		}
+		if err := checkExpiry(cm.Args); err != nil {
+			_ = cr.St.AckCommand(ctx, cm.ID, "error", err.Error())
+			return
+		}
+		summary, err := cr.DoSendInput(ctx, cm.SID, cm.Args)
+		if err != nil {
+			_ = cr.St.AckCommand(ctx, cm.ID, "error", "入力失敗: "+err.Error())
+			return
+		}
+		_ = cr.St.AckCommand(ctx, cm.ID, "done", summary)
+
+	case "interrupt":
+		if cr.DoInterrupt == nil {
+			_ = cr.St.AckCommand(ctx, cm.ID, "error", "interrupt 未配線")
+			return
+		}
+		if err := checkExpiry(cm.Args); err != nil {
+			_ = cr.St.AckCommand(ctx, cm.ID, "error", err.Error())
+			return
+		}
+		summary, err := cr.DoInterrupt(ctx, cm.SID)
+		if err != nil {
+			_ = cr.St.AckCommand(ctx, cm.ID, "error", "中断失敗: "+err.Error())
+			return
+		}
+		_ = cr.St.AckCommand(ctx, cm.ID, "done", summary)
 
 	default:
 		// PushCommand 側 allowlist を通らない値がここへ来るのは
