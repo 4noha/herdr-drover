@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/4noha/herdr-drover/internal/herdrapi"
 )
@@ -47,6 +48,21 @@ func tailLines(text string, n int) (string, bool) {
 	return strings.Join(lines[len(lines)-n:], "\n"), true
 }
 
+// tailBytesUTF8Safe は末尾 maxBytes bytes 以内に収める（herdr-drover-mcp-
+// design.md §5.1「上限64KB」）。単純な byte slice だと UTF-8 のマルチバイト
+// 文字（日本語等）の途中で切れて文字が壊れうるため、有効なルーン境界まで
+// 前進させる（最大3バイト。unicode/utf8.RuneStart）。
+func tailBytesUTF8Safe(text string, maxBytes int) (string, bool) {
+	if len(text) <= maxBytes {
+		return text, false
+	}
+	cut := len(text) - maxBytes
+	for cut < len(text) && !utf8.RuneStart(text[cut]) {
+		cut++
+	}
+	return text[cut:], true
+}
+
 // newDoReadPane は CommandRunner.DoReadPane の実装を返す。
 func newDoReadPane(hcli *herdrapi.Client, put readPaneResultWriter) func(context.Context, string, string, map[string]string) (string, error) {
 	return func(ctx context.Context, id, sid string, args map[string]string) (string, error) {
@@ -71,8 +87,8 @@ func newDoReadPane(hcli *herdrapi.Client, put readPaneResultWriter) func(context
 			text, lineTrunc = tailLines(text, n)
 			truncated = truncated || lineTrunc
 		}
-		if len(text) > screenResultMax {
-			text = text[len(text)-screenResultMax:]
+		if bt, cut := tailBytesUTF8Safe(text, screenResultMax); cut {
+			text = bt
 			truncated = true
 		}
 		if put == nil {
