@@ -30,6 +30,32 @@ v0.5.30 で**判定を経過時間ベースへ**変更し、**実 websocket 越�
 > できない* の記述は**すべて解消済み**（PR #1 merge・`e9bab96` で release に windows 資産。
 > Windows 機の self-update 成功を 7/25 15:52 の Ack で実確認）。
 
+### 2026-10-16: MCP Phase 2（画面取得/入力/中断・last_seen）実装・未デプロイ
+
+`drover-cloud-mcp-design.md` Phase 2。ブランチ `feat/mcp-phase2`（本リポジトリ）＋
+drover-cloud `feat/mcp-phase1`（タグ未発行）。コード実装・実herdr/実Firestore
+エミュレータでのテストは完了。**本番デプロイ・各PCへのリリースはユーザー確認待ち**
+（herdr-drover の自己更新は全PCへ配信される破壊的操作のため）。
+
+- `internal/commands/commands.go`: `DoReadPane`/`DoSendInput`/`DoInterrupt` seam
+  追加。`send-input`/`interrupt` は `expires_at` 必須（`checkExpiry`）。
+- `cmd/herdr-drover/screenio.go`（新）: 実体。herdr `pane.read`/`send_text`/
+  `send_keys` を直叩き。`read-pane` の結果は master のみ `mcp_results` へ保存
+  （`PutCommandResult`）。
+- `cmd/herdr-drover/lastseen.go`（新）: `pcs/{pc}.last_seen` を3分毎に書く
+  （dormant 中は書かない。入れ忘れた初版は `TestE2ERevokedAgentDormant` を
+  実際に落とした＝回帰検知済み）。
+- 実herdr e2eテスト（`test/screenio_e2e_test.go`）で "C-c" が実際に Ctrl-C と
+  して通ることを実証（reconcile.go の既存実測は "enter" のみだった）。
+
+**known gap（slave 未対応。意図的に今回は見送った）**:
+- `read-pane` の結果保存は slave で未対応（`/slave/command-result` 相当の
+  新規エンドポイントが drover-cloud `web`/`relay` 側に必要・本作業では未実装）。
+  slave PC へ `read-pane` が届くと daemon は明示エラーで Ack する（silent には
+  落ちない）。実運用上は `MCP_SLAVE_ACCESS`（既定 off）がこの経路自体を塞ぐ。
+- `last_seen` は slave では一度も書かれない＝slave PC は `list_machines` で常に
+  `online=false` になる（master のみ対応）。
+
 ### 2026-09-04: 再起動で壊れる 2 件を根治（BUG-6 = ↗窓 全滅 / BUG-7 = Tab 倍増）
 
 「再起動したから直して」を毎回手作業で修復していた症状の**両方**に手を入れた。
