@@ -86,7 +86,7 @@ func claudeAgents(t *testing.T, api *herdrapi.Client, cwd string) []herdrapi.Age
 	if err != nil {
 		t.Fatalf("agent.list: %v", err)
 	}
-	return claudeCandidates(agents, cwd)
+	return claudeCandidates(agents, cwd, "")
 }
 
 // waitClaudeAgents は cwd 一致 claude agent が n 件になるまで待つ
@@ -519,12 +519,44 @@ func TestClaudeCandidatesExactMatch(t *testing.T) {
 		{Name: "claude-x", Cwd: "/w/a", PaneID: "w1:p7"},   // encode 形でない＝候補外
 		{Name: "claudette", Cwd: "/w/a", PaneID: "w1:p8"},  // 前方一致は拾わない
 	}
-	got := claudeCandidates(agents, "/w/a")
+	got := claudeCandidates(agents, "/w/a", "")
 	if len(got) != 2 || got[0].PaneID != "w1:p1" || got[1].PaneID != "w1:p6" {
 		t.Fatalf("exact-match 候補が想定外: %+v", got)
 	}
-	if got := claudeCandidates(nil, "/w/a"); len(got) != 0 {
+	if got := claudeCandidates(nil, "/w/a", ""); len(got) != 0 {
 		t.Fatalf("空 list で候補が出た: %+v", got)
+	}
+}
+
+// TestCandidatesExcludeSelfPane は「シムが走っているその pane 自身」を cwd 一致
+// attach の候補にしないことを固定する（BUG-1 と同型＝cwd 経路に残っていた分）。
+//
+// 実障害（2026-09-18 実測・slave-2）: 復元 pane の対話シェルで alias claude が
+// 走ると、シムは cwd 一致で **自分の pane** を候補に選び
+// `herdr terminal session observe <自 pane>` を張る＝本体が起動せず、ユーザーには
+// 「claude と打ったのに何も始まらない」空 pane に見える。BUG-1 の修正は
+// --resume 経路（findAgentPaneByResumeRef）にだけ自 pane 除外を入れたので、
+// **引数なしの cwd 一致経路**は素通しのままだった。
+//
+// 旧コード（selfPane 引数なし）では自 pane が候補に残る＝本テストは FAIL する。
+func TestCandidatesExcludeSelfPane(t *testing.T) {
+	const self = "w9:p9"
+	agents := []herdrapi.AgentInfo{
+		{Name: "claude", Cwd: "/w/a", PaneID: self},      // シム自身が走っている pane
+		{Name: "claude-2", Cwd: "/w/a", PaneID: "w9:pA"}, // 別 pane の live セッション
+		{Name: "claude-3", Cwd: "/w/b", PaneID: "w9:pB"}, // 別 cwd
+	}
+	got := agentCandidates(agents, "claude", "/w/a", self)
+	if len(got) != 1 || got[0].PaneID != "w9:pA" {
+		t.Fatalf("自 pane を候補から除外していない（自己 observe＝空 pane 化の原因）: %+v", got)
+	}
+	// 自 pane しか居ないときは候補ゼロ＝新規起動へ落ちる（observe を張らない）。
+	if got := agentCandidates(agents[:1], "claude", "/w/a", self); len(got) != 0 {
+		t.Fatalf("自 pane だけなのに候補が出た: %+v", got)
+	}
+	// herdr pane 外からの起動（HERDR_PANE_ID 無し）は除外なし＝従来どおり。
+	if got := agentCandidates(agents, "claude", "/w/a", ""); len(got) != 2 {
+		t.Fatalf("selfPane 無しで候補が減った（pane 外からの attach を壊す）: %+v", got)
 	}
 }
 
@@ -637,7 +669,7 @@ func TestShimResolvesBinaryLazily(t *testing.T) {
 	if paneCwd == "" {
 		t.Fatalf("pane %s が agent.list に出ない", pane)
 	}
-	got := agentCandidates(agents, "codex", paneCwd)
+	got := agentCandidates(agents, "codex", paneCwd, "")
 	if len(got) != 1 || got[0].PaneID != pane {
 		t.Fatalf("未導入エージェントの既存セッションが attach 候補に出ない: %+v", got)
 	}
@@ -707,11 +739,11 @@ func TestShimDoesNotCrossAgentKinds(t *testing.T) {
 
 	// (a) cwd 一致でも別種別なら候補に出ない。
 	for _, other := range []string{"codex", "gemini", "cursor"} {
-		if got := agentCandidates(agents, other, paneCwd); len(got) != 0 {
+		if got := agentCandidates(agents, other, paneCwd, ""); len(got) != 0 {
 			t.Errorf("%s シムが claude セッションを候補にした: %+v", other, got)
 		}
 	}
-	if got := agentCandidates(agents, "claude", paneCwd); len(got) != 1 {
+	if got := agentCandidates(agents, "claude", paneCwd, ""); len(got) != 1 {
 		t.Errorf("claude 自身の候補が出ない: %+v", got)
 	}
 

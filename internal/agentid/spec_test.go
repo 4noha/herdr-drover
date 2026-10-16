@@ -1,7 +1,10 @@
 package agentid
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -352,4 +355,80 @@ func TestInstallSpecCoversVerifiedAgents(t *testing.T) {
 	if _, ok := Install("gemini"); ok {
 		t.Error("未確認の agent に InstallSpec を書いてはいけない（実バイナリ名を推測しない）")
 	}
+}
+
+// TranscriptMissing は「無いと断定できる」ときだけ true。判定不能を true に
+// してはいけない（＝resume を落として会話を捨てる）ので、保守側の条件を全部
+// 固定する。HOME は t.Setenv で隔離する（実ユーザーの ~/.claude を読まない）。
+func TestTranscriptMissingIsConclusiveOnly(t *testing.T) {
+	const ref = "d0d0d0d0-2222-4333-8444-555555555555"
+	const other = "99999999-2222-4333-8444-555555555555"
+
+	write := func(t *testing.T, home, projectDir, name string) {
+		t.Helper()
+		dir := filepath.Join(home, ".claude", "projects", projectDir)
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("{}\n"), 0o600); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+
+	t.Run("保管ルートが無い＝判定しない", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		if missing, why := TranscriptMissing("claude", ref); missing {
+			t.Fatalf("ルート不在で復元不可と断定した: %s", why)
+		}
+	})
+	t.Run("ルートは在るが transcript ゼロ＝判定しない", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		if err := os.MkdirAll(filepath.Join(home, ".claude", "projects"), 0o700); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if missing, why := TranscriptMissing("claude", ref); missing {
+			t.Fatalf("空ルートで復元不可と断定した（別の場所に保管している可能性を潰した）: %s", why)
+		}
+	})
+	t.Run("他の会話は在るが ref は無い＝断定できる", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		write(t, home, "-w-other", other+".jsonl")
+		missing, why := TranscriptMissing("claude", ref)
+		if !missing {
+			t.Fatalf("復元不可を断定できていない: %s", why)
+		}
+		if !strings.Contains(why, ref) {
+			t.Errorf("根拠に会話 ref が入っていない（ログで追えない）: %s", why)
+		}
+	})
+	t.Run("ref が在る＝判定しない（project dir 名に依存しない）", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		write(t, home, "-some-unrelated-cwd", ref+".jsonl")
+		if missing, why := TranscriptMissing("claude", ref); missing {
+			t.Fatalf("在る transcript を無いと判定した（会話を捨てる）: %s", why)
+		}
+	})
+	t.Run("保管場所が未実測の agent は判定しない", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		write(t, home, "-w-other", other+".jsonl")
+		for _, agent := range []string{"codex", "cursor", "opencode", "gemini"} {
+			if missing, why := TranscriptMissing(agent, ref); missing {
+				t.Errorf("%s の保管場所を推測して断定した: %s", agent, why)
+			}
+		}
+	})
+	t.Run("ファイル名にできない ref は判定しない", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		write(t, home, "-w-other", other+".jsonl")
+		for _, bad := range []string{"", "../etc/passwd", "sub/dir", ".", ".."} {
+			if missing, why := TranscriptMissing("claude", bad); missing {
+				t.Errorf("ref %q で断定した: %s", bad, why)
+			}
+		}
+	})
 }

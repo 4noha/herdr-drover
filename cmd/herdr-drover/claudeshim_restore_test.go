@@ -16,6 +16,8 @@ package main
 // （claudeshim_test.go と同じ規律＝合成の別経路を作らない）。
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -136,6 +138,120 @@ func TestShimRestoreExecsInPlaceWithoutNewTab(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("復元 pane %s が消えた（pane_id は保たれなければならない）", restored)
+	}
+}
+
+// writeClaudeTranscript は claude の会話 transcript を実レイアウトで置く:
+// `~/.claude/projects/<cwd を符号化した dir>/<会話 uuid>.jsonl`（実測 2026-09-18・
+// 2026-07-25 のインシデント記録と同じ場所）。判定は uuid の exact-match なので
+// dir 名（cwd 符号化規則）と中身は任意でよい。
+func writeClaudeTranscript(t *testing.T, home, projectDir, ref string) string {
+	t.Helper()
+	dir := filepath.Join(home, ".claude", "projects", projectDir)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+	path := filepath.Join(dir, ref+".jsonl")
+	if err := os.WriteFile(path, []byte("{\"type\":\"summary\"}\n"), 0o600); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+	return path
+}
+
+// TestShimRestoreFallsBackWhenTranscriptMissing は「復元起動の会話が既に失われて
+// いるとき、黙って素シェルへ戻らない」ことを固定する。
+//
+// 実障害（2026-09-18 実測・slave-2）: 復元 pane で走ったシムが
+// `claude --resume <古い ref>` を exec → claude は `No conversation found` で即
+// 終了 → pane はシェルのプロンプトだけに戻り、**何が起きたか誰も報告しない**
+// （画面にも残らない＝ユーザーには「claude が立たない」ように見える）。
+// restart-agent-session 側には同じ事故（2026-07-25）に対する二段構えの
+// フォールバックが在るのに、復元経路は exec で戻れないため前段しか無かった。
+//
+// 期待仕様: exec する**前**に会話の実体（transcript）が無いと断定できたら
+// resume 指定を落として新規会話で起こし、その事実を loud に報告する。
+//
+// 旧コードでは argv に --resume が残り報告も出ない＝本テストは FAIL する。
+func TestShimRestoreFallsBackWhenTranscriptMissing(t *testing.T) {
+	const ref = "d0d0d0d0-2222-4333-8444-555555555555"
+
+	sock := startHerdrForTest(t)
+	t.Setenv("HERDR_SOCKET_PATH", sock)
+	home := t.TempDir()
+	setTestHome(t, home)
+	// この PC は ~/.claude/projects を実際に使っている（別の会話の transcript が
+	// 在る）が ref の分は無い＝「復元不可」を断定できる唯一の状態。
+	writeClaudeTranscript(t, home, "-w-other", "99999999-2222-4333-8444-555555555555")
+	stub := installStubClaude(t)
+	chdirPhysical(t)
+	api := herdrapi.New(sock)
+
+	restored := reportRestoredPane(t, api, ref)
+	t.Setenv("HERDR_PANE_ID", restored)
+
+	var gotArgv []string
+	calls := 0
+	swapSeams(t, true, func(_ string, argv []string, _ []string) error {
+		calls++
+		gotArgv = argv
+		return nil
+	})
+	viewerCalls := 0
+	swapViewer(t, func(_ *herdrapi.Client, _ string) error {
+		viewerCalls++
+		return nil
+	})
+
+	code, out, errb := runCapture(t, "claude", "--resume", ref)
+	if code != 0 {
+		t.Fatalf("exit=%d\nstdout=%s\nstderr=%s", code, out, errb)
+	}
+	if calls != 1 || viewerCalls != 0 {
+		t.Fatalf("この pane での exec が 1 回でない（exec=%d viewer=%d）\nstdout=%s", calls, viewerCalls, out)
+	}
+	// resume 指定を落として新規会話で起こす（pane・Tab はそのまま）。
+	if want := []string{stub}; !reflect.DeepEqual(gotArgv, want) {
+		t.Fatalf("復元不可なのに resume 付きで起動した: argv=%v（want %v）＝本体が即終了して素シェルに戻る", gotArgv, want)
+	}
+	if !strings.Contains(out, "復元不可") || !strings.Contains(out, ref) {
+		t.Errorf("会話が失われたことを報告していない（silent な経路変更の禁止）:\n%s", out)
+	}
+}
+
+// TestShimRestoreKeepsResumeWhenTranscriptExists は上の判定が**過剰発火しない**
+// ことを固定する（transcript が在る＝本来の復元は resume 付きのまま）。
+func TestShimRestoreKeepsResumeWhenTranscriptExists(t *testing.T) {
+	const ref = "d1d1d1d1-2222-4333-8444-555555555555"
+
+	sock := startHerdrForTest(t)
+	t.Setenv("HERDR_SOCKET_PATH", sock)
+	home := t.TempDir()
+	setTestHome(t, home)
+	writeClaudeTranscript(t, home, "-w-a", ref)
+	writeClaudeTranscript(t, home, "-w-other", "99999999-2222-4333-8444-555555555555")
+	stub := installStubClaude(t)
+	chdirPhysical(t)
+	api := herdrapi.New(sock)
+
+	restored := reportRestoredPane(t, api, ref)
+	t.Setenv("HERDR_PANE_ID", restored)
+
+	var gotArgv []string
+	swapSeams(t, true, func(_ string, argv []string, _ []string) error {
+		gotArgv = argv
+		return nil
+	})
+	swapViewer(t, func(_ *herdrapi.Client, _ string) error { return nil })
+
+	code, out, errb := runCapture(t, "claude", "--resume", ref)
+	if code != 0 {
+		t.Fatalf("exit=%d\nstdout=%s\nstderr=%s", code, out, errb)
+	}
+	if want := []string{stub, "--resume", ref}; !reflect.DeepEqual(gotArgv, want) {
+		t.Fatalf("transcript が在るのに resume を落とした: argv=%v（want %v）＝会話を捨てている", gotArgv, want)
+	}
+	if strings.Contains(out, "復元不可") {
+		t.Errorf("復元できる会話を復元不可と報告した:\n%s", out)
 	}
 }
 

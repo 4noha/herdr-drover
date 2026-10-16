@@ -24,6 +24,8 @@ package agentid
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -100,6 +102,70 @@ var resumeSpecs = map[string]ResumeSpec{
 
 // Resume は agent の ResumeSpec を返す。未知／非対応は Supported=false。
 func Resume(agent string) ResumeSpec { return resumeSpecs[agent] }
+
+// TranscriptSpec は「会話 ref の実体（transcript）がローカルに在るか」を機械
+// 確認する口。herdr の agent_session は**再起動を跨いで古い ref を保持する**が、
+// その ref の transcript は消えていることがある（実測 2026-07-25／2026-09-18）＝
+// resume を試す前に実体の有無が分かると、即終了して素シェルに戻る事故を防げる。
+type TranscriptSpec struct {
+	// Dir は $HOME 相対の保管ルート。
+	Dir string
+	// Ext は transcript のファイル名拡張子。**ファイル名（拡張子を除く）が会話
+	// ref そのもの**＝ref の exact-match で照合できる（鉄則③: 中身を推測で
+	// 分類しない）。
+	Ext string
+}
+
+// transcriptSpecs — **実測できた agent だけ**載せる（推測で書かない）。ここに
+// 無い agent は「判定不能」として扱い、呼び手の動作を変えない。
+var transcriptSpecs = map[string]TranscriptSpec{
+	// claude: ~/.claude/projects/<cwd を符号化した dir>/<会話 uuid>.jsonl
+	// （2026-07-25 のインシデントで確定・2026-09-18 に再確認）。dir 名は cwd の
+	// 符号化だが**符号化規則には依存しない**（`*/` で全 project dir を総なめして
+	// uuid だけを exact に照合する）＝cwd が変わった会話も取り落とさない。
+	"claude": {Dir: ".claude/projects", Ext: ".jsonl"},
+}
+
+// TranscriptMissing は「ref の会話 transcript がローカルに無い」と**断定できる**
+// ときだけ (true, 根拠) を返す。断定できないときは必ず false（＝呼び手は従来
+// どおり resume を試す）で、why には判定しなかった理由が入る。why は呼び手が
+// 必ずログ／表示する（鉄則⑤: silent な skip・丸めの禁止）。
+//
+// 断定に要る条件（3 つ揃ったときのみ）:
+//  1. その agent の保管場所が**実測済み**（transcriptSpecs に在る）
+//  2. 保管ルートが存在し、**他の会話の transcript が 1 件以上在る**＝この PC は
+//     確かにここへ保管している（空／不在なら別の場所に保管している可能性を
+//     排除できない＝判定しない。誤って resume を落とすと会話を捨てる）
+//  3. その中に ref のファイルが無い
+func TranscriptMissing(agent, ref string) (bool, string) {
+	sp, ok := transcriptSpecs[agent]
+	if !ok {
+		return false, fmt.Sprintf("%s の transcript 保管場所は未実測＝判定しない", agent)
+	}
+	if !ValidSessionRef(ref) || strings.ContainsAny(ref, `/\`) || ref == "." || ref == ".." {
+		// path 区切りを含む ref（pi/omp の kind=path 等）はファイル名として
+		// 照合できない＝判定しない。
+		return false, "会話 ref がファイル名として照合できない形＝判定しない"
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return false, fmt.Sprintf("home を解決できない（%v）＝判定しない", err)
+	}
+	root := filepath.Join(home, sp.Dir)
+	if st, serr := os.Stat(root); serr != nil || !st.IsDir() {
+		return false, fmt.Sprintf("保管ルート %s が無い＝判定しない", root)
+	}
+	if hits, gerr := filepath.Glob(filepath.Join(root, "*", ref+sp.Ext)); gerr == nil && len(hits) > 0 {
+		return false, fmt.Sprintf("transcript が在る（%s）", hits[0])
+	}
+	all, gerr := filepath.Glob(filepath.Join(root, "*", "*"+sp.Ext))
+	if gerr != nil || len(all) == 0 {
+		return false, fmt.Sprintf("保管ルート %s に transcript が 1 件も無い"+
+			"（別の場所に保管している可能性＝判定しない）", root)
+	}
+	return true, fmt.Sprintf("%s/*/%s%s が無い（同じ場所に他の会話は %d 件在る）",
+		root, ref, sp.Ext, len(all))
+}
 
 // UpdaterSpec は「本体の更新」の差分。
 type UpdaterSpec struct {

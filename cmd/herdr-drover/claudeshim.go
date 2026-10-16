@@ -140,7 +140,7 @@ func cmdAgentShim(agent string, args []string, stdout, stderr io.Writer) error {
 		if err != nil {
 			return fmt.Errorf("agent.list: %w", err)
 		}
-		cands := agentCandidates(agents, agent, cwd)
+		cands := agentCandidates(agents, agent, cwd, os.Getenv("HERDR_PANE_ID"))
 		switch {
 		case len(cands) == 1:
 			fmt.Fprintf(stdout, "cwd 一致の既存 %s セッションへ接続します\n", agent)
@@ -193,11 +193,27 @@ func cmdAgentShim(agent string, args []string, stdout, stderr io.Writer) error {
 				return berr
 			}
 			fmt.Fprintf(stdout, "この pane（%s）が会話 %s の持ち主です＝新しい Tab を作らず、この pane で %s 本体を起動します\n", p.PaneID, ref, agent)
+			argv := append([]string{bin}, args...)
+			// **二段構えの前段をここで前倒しする**。restart-agent-session は
+			// 「resume で起こす → 即終了したら resume 無しで作り直す」の 2 段
+			// （2026-07-25 のインシデント対応）だが、この経路は exec＝置換なので
+			// 起動後には戻れない。よって会話の実体が無いと**断定できる**ときだけ
+			// 先に resume を落とす。
+			//
+			// 落とさないと何が起きるか（実測 2026-09-18・slave-2）: claude が
+			// `No conversation found` で即終了し、pane は呼び出し元シェルの
+			// プロンプトへ戻るだけ。pane は残るが**誰も何も報告しない**ので、
+			// ユーザーには「claude と打ったのに立ち上がらない」ようにしか見えない。
+			if missing, why := agentid.TranscriptMissing(agent, ref); missing {
+				argv = agentid.StripResume(agent, argv)
+				fmt.Fprintf(stdout, "resume 復元不可のため新規会話で起動します"+
+					"（会話 %q の実体が不在: %s）\n", ref, why)
+			}
 			// 新規セッション開始と同じ扱い＝hook を保証してから exec する。
 			ensureAgentIntegrationOnce(agent, stderr)
 			// exec なので pane・pane_id・Tab・配置がそのまま保たれ、前景プロセス名が
 			// 本体になる＝herdr の検出（前景基準）と agent_session が正しく付く。
-			return execAttach(bin, append([]string{bin}, args...), os.Environ())
+			return execAttach(bin, argv, os.Environ())
 		}
 		// 一致なし＝その会話はまだ herdr で起動していない → 下の新規経路で
 		// --resume 付き起動（claude が jsonl から会話を復元する）。
@@ -608,12 +624,19 @@ func lookupAgentBin(agent string) (string, error) {
 // 数えるので、経路によって「この cwd の claude 数」が食い違っていた。
 //
 // 注入 pane の除外も agentid.Resolve が最優先で行う。
-func claudeCandidates(agents []herdrapi.AgentInfo, cwd string) []herdrapi.AgentInfo {
-	return agentCandidates(agents, "claude", cwd)
+func claudeCandidates(agents []herdrapi.AgentInfo, cwd, selfPane string) []herdrapi.AgentInfo {
+	return agentCandidates(agents, "claude", cwd, selfPane)
 }
 
 // agentCandidates は cwd 一致・指定種別のセッションを返す。
-func agentCandidates(agents []herdrapi.AgentInfo, agent, cwd string) []herdrapi.AgentInfo {
+//
+// selfPane は「シムがその中で走っている pane」（呼び手が HERDR_PANE_ID を渡す。
+// 空＝herdr pane 外からの起動＝除外なし）。**自 pane は候補にしない**: 候補に
+// すると attachOrReport が自分自身へ observe を張り、本体が起動しないまま
+// 空 pane になる（実測 2026-09-18・slave-2。BUG-1 と同型で、あちらは --resume
+// 経路だけを直したためこの cwd 一致経路が残っていた）。判定は herdr が各 pane
+// env に入れる権威値の exact-match のみ（鉄則③）。
+func agentCandidates(agents []herdrapi.AgentInfo, agent, cwd, selfPane string) []herdrapi.AgentInfo {
 	var out []herdrapi.AgentInfo
 	for _, a := range agents {
 		if a.Cwd != cwd {
@@ -621,6 +644,9 @@ func agentCandidates(agents []herdrapi.AgentInfo, agent, cwd string) []herdrapi.
 		}
 		if kind, conflict := agentid.Resolve(agentid.OfAgent(a)); conflict != "" || kind != agent {
 			continue
+		}
+		if selfPane != "" && a.PaneID == selfPane {
+			continue // 自 pane＝自己 observe で空 pane 化する（上のコメント参照）
 		}
 		out = append(out, a)
 	}
