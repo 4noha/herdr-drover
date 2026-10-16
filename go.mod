@@ -2,6 +2,10 @@ module github.com/4noha/herdr-drover
 
 go 1.25.0
 
+// Webhook通知機能 開発中: webhook パッケージ（feat/webhook-notify、まだタグ
+// 未発行）をローカル解決する。CLAUDE.md の既定手順（タグ発行後に外す）。
+replace github.com/4noha/drover-cloud => ../drover-cloud
+
 require (
 	github.com/coder/websocket v1.8.14
 	golang.org/x/sys v0.43.0

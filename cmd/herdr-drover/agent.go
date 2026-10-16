@@ -394,14 +394,19 @@ func runOneCloud(ctx context.Context, cfg Config, cl Cloud, primary bool, hcli *
 		prod = prod.WithLocalIPs(localIPs)
 	}
 
-	// タスク完了 push 通知（Web Push・任意機能）。scConcrete が非 nil＝master
-	// のみ配線（slave は SA レスで Firestore の pushtokens/FCM 認証に触れない
-	// ＝runRemoteInject と同じ primary/master 限定の考え方）。push 鍵/SA 鍵が
-	// 無ければ taskNotifier 自体が内部で no-op になる（後方互換）。
+	// タスク完了 push 通知（Web Push・任意機能）＋セッション状態 Webhook 通知
+	// （drover-cloud-mcp-design.md とは別件・owner が /api/webhook で設定。
+	// 既定 OFF）。どちらも scConcrete が非 nil＝master のみ配線（slave は
+	// SA レスで Firestore に直接触れない＝runRemoteInject と同じ primary/
+	// master 限定の考え方。slave 分の Webhook は drover-cloud の
+	// web.slavePush が代理送信する）。WithOnSessions は1つしか持てないため
+	// 同じコールバックの中で両方の check を呼ぶ。
 	if scConcrete != nil {
 		tn := newTaskNotifier(ctx, cl, lg)
+		wn := newWebhookNotifier(cl.PCName, lg)
 		prod = prod.WithOnSessions(func(sessions []map[string]any) {
 			tn.check(ctx, scConcrete, sessions)
+			wn.check(ctx, scConcrete, sessions)
 		})
 	}
 
