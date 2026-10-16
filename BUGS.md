@@ -1,5 +1,11 @@
 # 既知バグ / 引き継ぎ（2026-07-26 記録）
 
+> ⚠ **BUG-8 / BUG-9 / BUG-10 は実装済み・未 release / 未デプロイ**（2026-09-18 時点）。
+> 3 本とも**共用 slave 2 台（`ai-search-workspace`）の実障害**から起こしたもので、
+> 発見機（slave）は**まだ旧バイナリ**が走っている＝**配信するまで直らない**。
+> BUG-9 は `claude` シムの版で決まるので `~/.local/bin/herdr-drover` も要る。
+> slave への配信は**複数マシンへの操作＝ユーザーの明示確認が必要**。
+>
 > ⚠ **BUG-4 / BUG-5 は実装済みだが Cloud Run 未デプロイ**（2026-08-16 時点）。
 > どちらも Web 側の修正を含み、**relay の image を差し替えるまで利用者には届かない**。
 > BUG-5 の drover 側（画像貼付本体）は release＋fleet 配信が要る。
@@ -581,3 +587,199 @@ pane**（`command` 無し × `agent_session` あり）を含む再起動と、�
 **嘘の理由を出すログは、読む人に誤った真因を掴ませる。** BUG-6 の
 `desired=N cur(injected)=N`（壊れていても健全時と同じ文字列）と同じ性質。
 **「健全」「消滅」と主張するログは、何を根拠にそう言っているかを実装で確かめる。**
+
+---
+
+## BUG-8【P0】同じ pane を 2 台から見ると observe を無限 respawn する（RESIZE thrash）（2026-09-18）
+
+### ✅ 解決（2026-09-18・`internal/bridge/bridge.go`／**未 release**）
+RESIZE ごとの無条件 respawn をやめ、**実効サイズが変わらないなら observe を維持する**
+内側ループ（`wait:`）を入れた。実効サイズは `effectiveSize` が決める:
+
+- 届いた RESIZE を **票**（`sizeVote{size, at}`）として TTL（`DefaultSizeVoteTTL`
+  = 30s = `DefaultIdle` と同値）内で保持する。viewer は quiescence 自切断のたびに
+  再接続して RESIZE を送り直す＝**生きている viewer の票は Idle 周期で必ず更新**される。
+- **別サイズを挟んで同じサイズが再来**したら複数 viewer の競合と判定する。単独
+  viewer のウィンドウ操作は一方向（同じサイズへ戻らない）ので巻き込まれない。
+- 競合中は TTL 内の全票の **min**（rows/cols それぞれ独立）へ収束させる。min なら
+  全 viewer が折り返しなしで描ける（大きい側は右下に余白）。max だと小さい側が崩れる。
+- 票は TTL で失効＝片方が去れば残った側の実寸へ自然に戻る（`RESIZE 競合解消` を出す）。
+
+丸め（要求と実サイズの乖離）は必ず 1 行出す（鉄則⑤）。ただし同じ収束サイズの
+連続ログは抑止する（`effLogged`）＝ここが thrash の再生産源になっては本末転倒。
+
+### 症状
+共用 slave の pane を Web から見ると、**画面が数十行ぶん上下に踊り続けて読めない**。
+同時に slave の CPU が張り付き、`agent.log` が数十 MB/日 で伸びる。
+
+### 真因（確定）
+relay のデータ線は **sid ごとに 1 本**（`webterm.go` の `active` map が重複 wake を
+無視する）。したがって**同じ pane を 2 台の owner PC から見ると、両者の RESIZE が
+同じ `resizeCh` に混ざって届く**。旧実装は RESIZE を受けるたび無条件に observe を
+stop→spawn していたため、mac-studio（200x76）と d24wt27c3j（Nx74）の要求が永久に
+往復し、respawn ごとに full frame を送り直していた。
+
+### 実測エビデンス（2026-09-18）
+| 機 | observe spawn 回数（agent.log 内） | agent.log |
+|---|---|---|
+| slave-2 | **498,576 回** | 99.8MB |
+| slave-1 | **432,456 回** | 88.5MB |
+
+（`agent.log` が全期間 1 ファイルで残っていたのは BUG-10＝ローテート不在のため。
+この 2 本は同じ日に同じログから見つかった。）
+
+### テスト（`internal/bridge/bridge_test.go`）
+- `TestBridgeMultiViewerSizeOscillation` — 実 herdr の pane に対し 2 サイズを交互に
+  送り続け、min へ収束したあと **observe の PID が変わらない**ことを見る（PID 不変が
+  respawn していない唯一の証拠）。**旧挙動（`SizeVoteTTL` に負値＝競合検出無効）で
+  FAIL することを確認済み**: `収束後に respawn した（round=10）: pid 35320 → 35424`。
+- `TestBridgeSingleViewerResizeStillFollows` — 単独 viewer の一方向リサイズは
+  従来どおり実寸へ追従する（競合判定に巻き込まれない）。
+
+---
+
+## BUG-9【P1】pane 内で `claude` と打つと空 pane になる／古い ref の resume が素シェルに戻る（2026-09-18）
+
+### ✅ 解決（2026-09-18・`cmd/herdr-drover/claudeshim.go` + `internal/agentid/spec.go`／**未 release**）
+2 つとも「シムが自分の pane を取り違える／会話の実体を確かめない」型:
+
+1. **自 pane を cwd 一致候補から除外**した（`agentCandidates` に `selfPane` 引数＝
+   `HERDR_PANE_ID` の exact-match）。**BUG-1 と同型**だが、あのとき直したのは
+   `--resume` 経路だけで、**引数なし（素の `claude`）の cwd 一致経路が残っていた**。
+2. **exec の前に transcript の実体を確かめ、無いと断定できるときだけ resume を
+   落とす**（`agentid.TranscriptMissing` → `StripResume`）。`restart-agent-session`
+   は「resume で起こす→即終了したら resume 無しで作り直す」の 2 段（2026-07-25）
+   だが、BUG-7 で入れた自 pane exec は**置換なので起動後に戻れない**＝前段を
+   前倒しするしかない。落としたことは必ず stdout に出す（鉄則⑤）。
+
+判定は**断定できるときだけ** true にする（3 条件: 保管場所が実測済み ×
+保管ルートに他の会話が 1 件以上在る × ref のファイルが無い）。空／不在のときに
+resume を落とすと**生きている会話を捨てる**ので、判定不能は必ず「従来どおり resume」。
+
+### 症状
+- (a) 素シェルの pane で `claude` と打つと、**pane が空のまま何も起きない**
+  （本体が起動しない）。
+- (b) 復元 pane で `claude` が走ると `No conversation found` が一瞬出て、pane は
+  **呼び出し元シェルのプロンプトへ戻る**。pane は残るので「壊れた」ようには
+  見えず、**誰も何も報告しない**＝ユーザーには「claude と打ったのに立ち上がらない」
+  としか見えない。
+
+### 真因（確定）
+- (a) 引数なしのシムは cwd 一致の既存セッションへ attach する仕様。**その候補に
+  自分自身が入っていた**ため、`attachOrReport` が自 pane へ observe を張る
+  （自分を自分で覗く）＝本体は起動せず空 pane。
+- (b) herdr の `agent_session` は**再起動を跨いで古い ref を保持する**が、その
+  transcript（`~/.claude/projects/*/<uuid>.jsonl`）は消えていることがある。
+  BUG-7 の自 pane exec は argv をそのまま渡すので `claude --resume <消えた ref>`
+  になり、claude が即終了する。exec 済み＝シムはもう居ないので誰も後始末しない。
+
+### 実測エビデンス（2026-09-18・slave-2）
+両方とも実機の pane で再現し、`pane read` で画面を確認した（(a) は空 pane ＋
+`ps` に `terminal session observe <自 pane>`、(b) は `No conversation found` の直後に
+シェルプロンプト）。
+
+### テスト
+- `cmd/herdr-drover/claudeshim_test.go: TestCandidatesExcludeSelfPane` — `HERDR_PANE_ID`
+  と一致する pane は候補に入らない／空なら除外なし（herdr pane 外からの起動）。
+- `cmd/herdr-drover/claudeshim_restore_test.go: TestShimRestoreFallsBackWhenTranscriptMissing`
+  — transcript 不在なら exec argv から `--resume <ref>` が落ち、理由が stdout に出る。
+- 同 `TestShimRestoreKeepsResumeWhenTranscriptExists` — 実体が在るときは絶対に
+  落とさない（会話を捨てない側の担保）。
+- `internal/agentid/spec_test.go: TestTranscriptMissingIsConclusiveOnly` — 未実測
+  agent／保管ルート不在／ルートが空／照合できない ref 形はすべて false（判定しない）。
+
+---
+
+## BUG-10【P2】ログにローテートが無い（`agent.log` 126MB）／`attach.log` は open 時しか判定しない（2026-09-18）
+
+### ✅ 解決（2026-09-18・`cmd/herdr-drover/logrotate.go` 新設／**未 release**）
+共有 O_APPEND ログの 1 世代ローテートを 1 か所に実装し（`rotateAppendLog`）、
+`agent.log`（daemon が周期監視＝`runAgentLogRotator`・上限 16MiB・1 分ごと）と
+`attach.log`（`Printf` が書いたバイト数で間引いて判定・上限 8MiB のまま）の両方から
+使う。**rename ではなく copy＋truncate**（inode を保つ）で、退避したことは必ず
+切り詰め直後の 1 行目に書く。
+
+### 症状
+障害調査の一次情報が**読めない**。今回の BUG-8 調査でも 99.8MB の `agent.log` から
+期間比較をするのに苦労した（`tail` はできても「いつから thrash しているか」が
+引きにくい）。`attach.log` 側は**世代が壊れる**＝「機ごとの比較」ができない。
+
+### 真因（確定）
+- `agent.log` は launchd の `StandardOutPath` / `StandardErrorPath`（`install.go` の
+  plist）＝**launchd がファイルを開いて daemon の fd 1/2 に渡す**もので、drover 側に
+  ローテートが**一切無かった**。daemon は数か月落ちないので永久に伸びる。
+- `attach.log` にはローテートが在ったが、**判定が `newAttachLogger`（open 時）
+  だけ**だった。↗窓 viewer は長寿命なので**実行中は永久に判定されない**。
+
+### 実測エビデンス（2026-09-18）
+| ファイル | 実測 | 期間 |
+|---|---|---|
+| mac-studio `agent.log` | **126,497,212 バイト** | 2026/07/18 の初回起動から 2 か月ぶん全部 |
+| slave-2 / slave-1 `agent.log` | 99.8MB / 88.5MB | 11 日（BUG-8 の thrash ぶん） |
+| `attach.log.1` | **31MB**（上限 8MiB の約 4 倍） | 走行中に判定されず伸びた |
+
+fd が **O_APPEND** であること（＝切り詰めても穴あきにならない）は実測で確認:
+```
+$ lsof +fg -p <daemon pid>
+herdr-dro 32859 ... 1u REG R,W,AP        ... /Users/…/.herdr-drover/agent.log
+herdr-dro 32859 ... 2u REG R,W,AP,0x10000 ... /Users/…/.herdr-drover/agent.log
+                            ^^ AP = O_APPEND
+```
+
+### 踏まないようにしたこと
+- **rename にしない**。`agent.log` を rename すると daemon の以後の出力は
+  `agent.log.1`（rename 後の inode）へ行き、`agent.log` は**daemon 再起動まで空**
+  ＝「今のログ」が読めなくなる。`attach.log` は**全 viewer が 1 本を共有**するので、
+  退避を実行しなかったプロセスが古い inode に取り残される。
+- **自分が書いていないログを切り詰めない**（`writerIsSameFile`＝`os.SameFile` の
+  exact-match）。手で `herdr-drover agent` を起動したときに launchd 稼働期の履歴を
+  黙って消すのは害しかない。
+- **同時退避で先の世代を潰さない**（`<log>.rotating` の O_EXCL マーカー。
+  `attach.log` は最大十数プロセスが同時に上限超過を見る）。残骸は 2 分で除去して
+  次周に回す（奪わない）。
+- **効果を検証して止める**。切り詰め直後に上限の半分を超えていたら、その fd は
+  offset を保つ（append でない）＝穴あきファイルを毎周期作り直す thrash になる。
+  1 回で気づいてローテートを停止し、理由を出す。
+- **上限を上げることは対処ではない**（`attach.log` で学習済み: 8MiB を上げても
+  1 日で押し流されるだけで、効いたのは量を減らすこと）。今回も先に BUG-8 で
+  量の元凶を潰した上で上限を置いている。
+
+### テスト（`cmd/herdr-drover/logrotate_test.go` ほか）
+実ファイル＋実 fd で書く（O_APPEND の fd を開いたまま退避するのが本体なので、
+合成では何も担保できない）:
+- `TestRotateAppendLogPreservesInodeAndFollowsAppendFd` — inode が保たれる／`.1` が
+  現物とバイト一致／**退避前から開いている fd の追記が先頭から続く**。
+- `TestRotateAppendLogSkipsUnderCap` / `TestRotateAppendLogRespectsClaim`（競合中は
+  見送る・残骸は除去して次周・除去後は実際に退避する）。
+- `TestAgentLogRotatorRotatesLiveLog`（周期判定で実際に走る）／
+  `TestAgentLogRotatorSkipsForeignLog`（出力先が別なら触らず理由を出す）。
+- `cmd/herdr-drover/attachlog_unix_test.go: TestAttachLogRotatesWhileRunning` —
+  **走行中に**ローテートする。**旧実装（open 時のみ）で FAIL することを確認済み**
+  （`走行中にローテートしていない（35100 バイト・上限 4096）`）。rename 実装でも
+  FAIL する（現ログが fd の下から消える）ことも併せて確認済み。
+
+---
+
+## 補足【テスト衛生】update-all のテストが開発機の実 CLI を本当に更新していた（2026-09-18）
+
+BUG-8〜10 を全体テストで確認しようとして踏んだ、**以前から在った**欠陥
+（`git worktree` で HEAD を切り出して同じ症状が出ることを確認済み）。
+
+`runUpdateAll` は `updatableAgents`＝「`UpdaterSpec` を持つ × **このマシンに
+導入済み**」の**全種別**を順に更新する。ところがテストは stub を claude ぶんしか
+置いていなかったため、**開発機に実在する `cursor-agent` が本当に更新された**
+（`curl -fSL … downloads.cursor.com/…/agent-cli-package.tar.gz` → `tar -xzf`）。
+結果 `cmd/herdr-drover` パッケージが **10 分の test timeout で落ちていた**（実測
+601s）。同じ経路に codex / copilot / opencode / devin も乗る。
+
+対処は `cmd/herdr-drover/updateall_test.go` の `isolateAgentDiscovery`＝探索経路
+（`lookupAgentBin`）の 2 本 **PATH** と **`$HOME` 下の既定導入先**
+（`InstallSpec.WellKnownPaths`）を両方隔離し、**隔離が効いていることを機械で
+確かめる**（claude 以外が 1 つでも解決できたら `t.Fatalf`）。PATH は
+`<stubDir>:/usr/bin:/bin`＝Homebrew（実 CLI が居る）は入れず、stub シェルスクリプト
+が使う `cat` 等のために OS の素の bin だけ足す。パッケージの実行時間は
+**601s（timeout）→ 143s**。
+
+### 教訓
+**「このマシンに導入済みのものを全部やる」機能のテストは、導入済みの探索そのものを
+隔離しないと開発機を書き換える。** HOME 隔離だけでは足りない（PATH が残る）。

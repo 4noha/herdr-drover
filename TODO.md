@@ -30,6 +30,33 @@ v0.5.30 で**判定を経過時間ベースへ**変更し、**実 websocket 越�
 > できない* の記述は**すべて解消済み**（PR #1 merge・`e9bab96` で release に windows 資産。
 > Windows 機の self-update 成功を 7/25 15:52 の Ack で実確認）。
 
+### 2026-09-18: 共用 slave の実障害 3 件を根治（BUG-8/9/10）＋テスト衛生 1 件
+
+「slave で herdr-drover がうまく動いていない」の実測から**別々の 3 件**に分解して
+順に直した。詳細（症状・再現・真因・実測値・テスト）は [BUGS.md](BUGS.md)。
+
+| | 症状 | 修正 | fail-first |
+|---|---|---|---|
+| BUG-8【P0】 | Web の画面が上下に踊り続け CPU が張り付く。observe を **49 万回** respawn（slave-2 498,576 / slave-1 432,456・`agent.log` 99.8MB / 88.5MB） | `internal/bridge`: RESIZE を票（TTL 30s）で持ち、往復を検出したら **min へ収束**。実効サイズ不変なら respawn しない内側ループ | ✅ `SizeVoteTTL` 負値（旧挙動）で `収束後に respawn した: pid 35320 → 35424` |
+| BUG-9【P1】 | (a) 素シェルで `claude` → **空 pane**（自分に observe を張る）／(b) 復元 pane で `No conversation found` → **素シェルへ戻る**（誰も報告しない） | (a) `agentCandidates` に `HERDR_PANE_ID` の自 pane 除外／(b) exec 前に `agentid.TranscriptMissing` で実体確認し、無いと**断定できるときだけ** `--resume` を落として告知 | ✅ 各テストを旧コードで確認（BUGS.md BUG-9） |
+| BUG-10【P2】 | ログにローテートが無い＝調査の一次情報が読めない（mac-studio `agent.log` **126,497,212 バイト**・2 か月ぶん全部／`attach.log.1` が上限 8MiB の 4 倍＝31MB） | `cmd/herdr-drover/logrotate.go` 新設（共有 O_APPEND 用 copy＋truncate・`.rotating` の O_EXCL 排他）。`agent.log` は daemon が 1 分ごと・16MiB／`attach.log` は書いたバイト数で間引いて判定 | ✅ rename 実装／open 時のみ実装の両方で FAIL を確認（`走行中にローテートしていない（35100 バイト・上限 4096）`） |
+| 補足 | `go test ./cmd/herdr-drover/` が **10 分 timeout で落ちる**（実測 601s）。原因は**テストが開発機の実 `cursor-agent` を本当に更新していた**（curl で DL）。以前から在った欠陥（HEAD の worktree で再現） | `updateall_test.go: isolateAgentDiscovery`＝探索の 2 経路（PATH・`$HOME` 下の既定導入先）を隔離し、**隔離が効いていることを機械で確認**（claude 以外が解決できたら Fatal） | 実行時間 601s（timeout）→ **143s** |
+
+⚠ **BUG-10 の順序に意味がある**: 上限を上げるのは対処ではない（`attach.log` で
+学習済み）。先に BUG-8 で量の元凶を潰し、その上で上限を置いた。
+
+#### 🔴 残作業
+
+1. **release と配信**（3 件とも**未 release / 未デプロイ**）。発見機である
+   **共用 slave 2 台はまだ旧バイナリ**＝配信するまで直らない。BUG-9 は `claude`
+   シムの版で決まるので `~/.local/bin/herdr-drover` も要る。
+   ⚠ slave への操作は**複数マシンにまたがる＝ユーザーの明示確認後**。
+2. **slave-1 の `/login`**（`~/.claude/.credentials.json` が無い＝共用 Mac の
+   実機操作が必要。ここからはできない）。
+3. BUG-8 の収束サイズは **min** なので、2 台から見ている間は大きい側に余白が出る。
+   実運用で不満が出たら「操作している側の実寸へ寄せる」を検討する（今回は
+   **崩れない**ことを優先した）。
+
 ### 2026-09-04: 再起動で壊れる 2 件を根治（BUG-6 = ↗窓 全滅 / BUG-7 = Tab 倍増）
 
 「再起動したから直して」を毎回手作業で修復していた症状の**両方**に手を入れた。

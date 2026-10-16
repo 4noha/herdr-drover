@@ -83,6 +83,16 @@ cwd 自動 attach／新 Tab 起動を提供する。Python 版 claude-master(cm)
   **対話シェル経由**で起こす＝`alias claude` が効く）。BUGS.md BUG-7 の発生条件。
 - `tab.move` は同一 WS の reorder 専用＝WS 間移動は `pane.move` が唯一。
 - workspace label は重複可＝識別子にしない（workspace_id を使う）。
+- **`--help` はグループ止まり**＝`herdr pane --help` は一覧が出るが
+  `herdr pane read --help` は `unknown command`（引数の正はグループの usage 行）。
+  `pane read --source` は `visible|recent|recent-unwrapped` のみ
+  （不正値は `invalid read source: <値>`）。
+- `pane send-keys` のキー名は **`ctrl-c` が通らない**（`invalid_key: unsupported key
+  ctrl-c`）。`ctrl+c` / `C-c` / `c-c` / `enter` は通る。キー検証は **pane 解決の後**
+  なので、存在しない pane では検証されない（実測 2026-09-18・隔離 herdr 上）。
+- relay のデータ線は **sid ごとに 1 本**（drover-cloud `webterm.go` の `active` map が
+  重複 wake を無視する）＝**同じ pane を 2 台から見ると両者の RESIZE が同じ
+  `resizeCh` に混ざる**。BUGS.md BUG-8（observe を 49 万回 respawn）の前提条件。
 
 ## ビルド / テスト / デプロイ
 

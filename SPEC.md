@@ -90,12 +90,26 @@ Firestore サーバは Cloud Run に 1 回デプロイして全 PC で共有す�
 
 | 状況 | 起動先 |
 |---|---|
-| 引数なし × cwd 一致 1 件 | その既存セッションへ接続（ビューア） |
-| 引数なし × cwd 一致 複数 | picker（非 TTY は先頭を報告して非 attach 終了） |
+| 引数なし × cwd 一致 1 件（**自 pane は候補から除く**） | その既存セッションへ接続（ビューア） |
+| 引数なし × cwd 一致 複数（同上） | picker（非 TTY は先頭を報告して非 attach 終了） |
 | `--resume <ref>` × **他 pane** に同 ref の live agent | その pane へ接続（dup 防止） |
-| `--resume <ref>` × **自 pane**（`HERDR_PANE_ID`）が同 ref で **live でない** | **その pane で本体へ exec**（＝復元。Tab を増やさない） |
+| `--resume <ref>` × **自 pane**（`HERDR_PANE_ID`）が同 ref で **live でない** | **その pane で本体へ exec**（＝復元。Tab を増やさない）。⚠exec 前に transcript の実体を確認し、**無いと断定できるときだけ** `--resume` を落とす（下記） |
 | 上記以外（引数あり） | 常に新しい Tab（cm 規律「user の明示指定を尊重」） |
 | 引数あり × 非 TTY | herdr 非経由で素のバイナリへ透過 |
+
+⚠ **cwd 一致の候補から自 pane を必ず除く**（`HERDR_PANE_ID` の exact-match・
+2026-09-18 追加＝BUGS.md BUG-9(a)）。除かないと `attachOrReport` が**自分自身へ
+observe を張る**＝本体が起動しないまま空 pane になる。BUG-1 で直したのは
+`--resume` 経路だけで、この引数なし経路が残っていた。
+
+⚠ **自 pane exec は置換なので起動後に戻れない**＝§2.4 の二段構え（resume で
+起こす→即終了したら resume 無しで作り直す）が使えない。よって
+`agentid.TranscriptMissing(agent, ref)` が**断定した**ときだけ前倒しで `--resume`
+を落とす（`agentid.StripResume`）。断定条件は「保管場所が実測済み × 保管ルートに
+他の会話が 1 件以上在る × ref のファイルが無い」の 3 つ揃ったときのみで、
+判定不能なら**必ず従来どおり resume を試す**（誤って落とすと生きている会話を捨てる）。
+落としたことは stdout に理由付きで出す。落とさないと `No conversation found` で
+即終了して pane が素シェルに戻り、**誰も何も報告しない**（実測 2026-09-18・BUG-9(b)）。
 
 ⚠ **`live でない` の条件を外してはいけない**。自 pane に実 agent が走っているのに
 exec すると同じ会話 jsonl に 2 本目のプロセスを生む（cm で実害のあった型）。
@@ -737,6 +751,9 @@ workspace.close  workspace.create  workspace.focus  workspace.list  workspace.re
 - **1 サイクル粒度**（フレームごとには書かない）。BUG-3 の thrash で agent.log が
   16.8MB に膨れた前例があるため粒度は粗く保つ。8MB で 1 世代だけローテートし、
   **ローテートした事実は新ファイルの先頭に必ず書く**（silent に捨てない）。
+  判定は **open 時だけでなく、書いたバイト数（1MB ごと）で走行中も**行う
+  （2026-09-18 追加。open 時のみだと長寿命 viewer では永久に走らず、実測で
+  `attach.log.1` が上限の 4 倍＝31MB になっていた＝BUGS.md BUG-10）。
 - 主要な行:
 
   | 行 | 何が読めるか |
@@ -749,6 +766,28 @@ workspace.close  workspace.create  workspace.focus  workspace.list  workspace.re
 
 - ⚠ ログを開けなくても attach は動き続ける（↗窓 の表示と入力がログ都合で壊れる方が
   害が大きい）。ただし黙って諦めず画面に 1 行出す。
+
+### 6.5 daemon ログのローテート（`agent.log`・2026-09-18 追加）
+
+`agent.log` は **launchd の `StandardOutPath` / `StandardErrorPath`**＝launchd が
+ファイルを開いて daemon の fd 1/2 に渡すもので、以前は**ローテートが一切無かった**
+（実測: mac-studio 126,497,212 バイト＝初回起動から 2 か月ぶん全部。共用 slave は
+11 日で 99.8MB。BUGS.md BUG-10）。daemon は数か月落ちないので**周期判定でなければ
+意味が無い**＝daemon 内の goroutine が **1 分ごとに stat**し、**16MiB** 超で 1 世代
+（`agent.log.1`）退避する。機構は `attach.log` と共有（`logrotate.go`
+`rotateAppendLog`）。
+
+| 性質 | 理由 |
+|---|---|
+| **rename せず copy＋truncate**（inode を保つ） | fd を開いているのは launchd / 他 viewer で、止められない。rename すると以後の出力が `.1` 側へ行き **`agent.log` が daemon 再起動まで空**になる |
+| **O_APPEND 前提**（実測 `lsof +fg` で `AP` 確認） | 切り詰め後の追記が先頭から続く。offset を保つ fd なら穴あきファイルを再生産する |
+| **退避直後に効果を検証して止める** | 切り詰め直後に上限の半分超なら append でない fd＝毎周期 thrash になる。1 回で気づいて停止し理由を出す（`.1` は保存済み） |
+| **`<log>.rotating` の O_EXCL 排他**（残骸は 2 分で除去して次周へ） | `attach.log` は最大十数プロセスが同時に上限超過を見る＝同時退避で先に保存した世代を潰さない |
+| **自分が書いていないログは触らない**（`os.SameFile` の exact-match） | 手で `herdr-drover agent` を起動したときに launchd 稼働期の履歴を黙って消さない |
+| 退避・見送り・取りこぼしバイト数は**必ず 1 行出す** | silent な破棄の禁止（鉄則⑤） |
+
+⚠ **上限を上げることは対処ではない**。`attach.log` で学習済み（8MiB を上げても 1 日で
+押し流されるだけ）＝まず量の元凶を潰す（今回は BUG-8 の RESIZE thrash）。
 
 ### 6.3 注入 pane の版数追随（`attach-version`）
 
@@ -826,6 +865,25 @@ herdr＝drover daemon が exit/再起動しても入れ替わらない。** よ�
     自 pane がその会話の持ち主なら **同 pane で exec** する＝pane_id・Tab・配置が
     保たれる。16 と同根（metadata は存在の権威）だが、こちらは**自分が誰かを
     `HERDR_PANE_ID` で先に確定する**ことで解ける。
+18. **自 pane を attach 候補にしない**（§2.3・BUG-9(a)）。pane を列挙して「接続先」を
+    選ぶ経路は**すべて** `HERDR_PANE_ID` の exact-match で自分を除く。自分に observe を
+    張ると本体が起動しないまま**空 pane**になり、ユーザーには「打ったのに立ち上がら
+    ない」としか見えない。17 と同じく「自分が誰かを先に確定する」で解ける型。
+19. **resume を落とすのは「会話の実体が無い」と断定できるときだけ**（§2.3・BUG-9(b)）。
+    `agent_session` の ref は再起動を跨いで残るが transcript は消えていることがある。
+    判定不能なら必ず resume を試す（誤って落とすと**生きている会話を捨てる**）。
+    落としたときは理由を出す。exec のように**後に戻れない経路**では、§2.4 の二段構えの
+    前段をこの判定で代替する。
+20. **ログは有限である**（§6.4 / §6.5・BUG-10）。共有 O_APPEND ログは **inode を保つ
+    copy＋truncate** で 1 世代退避する（rename すると開いている書き手を古い inode に
+    取り残す）。判定は**周期／書いた量**で行う（open 時だけでは数か月走る daemon と
+    長寿命 viewer で永久に走らない）。**自分が書いていないログは触らない**。
+    退避・見送り・取りこぼしは必ずログに残す。
+21. **実効サイズが変わらない RESIZE で observe を作り直さない**（BUG-8）。relay の
+    データ線は **sid ごとに 1 本**＝**同じ pane を複数 PC から見ると全 viewer の RESIZE が
+    同じ `resizeCh` に混ざる**。無条件 respawn は往復の無限ループになる（実測 49 万回）。
+    複数 viewer の競合は **TTL 内の票の min** へ収束させる（min なら全 viewer が
+    折り返しなしで描ける）。単独 viewer の一方向リサイズは巻き込まない。
 
 ---
 
