@@ -60,6 +60,13 @@ const (
 	// 自分から閉じ、次の wake まで解放する＝near-$0 設計の要。
 	DefaultIdle = 30 * time.Second
 
+	// DefaultSizeVoteTTL は「どの viewer サイズをまだ生きているとみなすか」の
+	// 既定寿命。DefaultIdle と同値にしてあるのは、viewer は quiescence 自切断の
+	// たびに再接続して RESIZE を送り直す＝生きている viewer の票は Idle 周期で
+	// 必ず更新されるため。TTL を過ぎた票は落ちるので、片方の viewer が去れば
+	// 残った viewer の実寸へ自然に戻る。負値で無効（テスト用）。
+	DefaultSizeVoteTTL = 30 * time.Second
+
 	// writeTimeout は conn への frame 書込の上限（cm renderClientLocked の
 	// 2s write deadline と同値・同クラスの対処）。viewer が読まない（TCP
 	// backpressure）と writer が Conn.Write で無期限ブロックし、RESIZE 時の
@@ -107,6 +114,10 @@ type Bridge struct {
 	// 無効（テスト用）。cm relay.idlePump の「どちら向きでもバイトが流れる
 	// たび bump・ticker(idle/2) で判定」と同じ意味論。
 	Idle time.Duration
+	// SizeVoteTTL は複数 viewer の RESIZE 競合判定に使う票の寿命
+	//（0 なら DefaultSizeVoteTTL(30s)、負なら競合検出そのものを無効＝
+	// 常に最新サイズへ respawn する旧挙動）。effectiveSize のコメント参照。
+	SizeVoteTTL time.Duration
 	// Logf は診断ログ（nil なら log.Printf）。
 	Logf func(format string, args ...any)
 
@@ -129,6 +140,21 @@ type Bridge struct {
 	// mu 越しで観測する）。
 	mu  sync.Mutex
 	cur *observeProc
+
+	// 以下 3 つは RESIZE 競合（複数 viewer）の判定状態。resizeCh の受信は
+	// すべて Run の goroutine だけで行う（readConn は送るのみ）＝この状態を
+	// 触るのも Run の 1 goroutine のみなので mu で守らない。
+	votes     []sizeVote // TTL 内の viewer サイズ（同サイズは 1 票へ畳む）
+	lastVote  winSize    // 直近に届いた要求（往復＝競合の検出に使う）
+	contended bool       // 競合モード（min 収束中）
+	effLogged winSize    // 直近にログした収束サイズ（同内容の連続ログ抑止）
+}
+
+// sizeVote は viewer 由来 RESIZE の 1 票（clamp 済み）。at は同サイズが再来
+// するたび更新する＝生きている viewer の票は TTL で落ちない。
+type sizeVote struct {
+	size winSize
+	at   time.Time
 }
 
 // New は必須 3 フィールドだけ埋めるコンビニエンス（webterm 配線は struct
@@ -192,6 +218,98 @@ func (b *Bridge) clamp(rows, cols int) winSize {
 	return winSize{rows: rows, cols: cols}
 }
 
+// effectiveSize は届いた RESIZE 要求 req から「実際に observe を起動する
+// サイズ」を決める。呼び出しは Run の goroutine のみ（votes/lastVote/
+// contended を排他なしで触るのはそのため）。
+//
+// なぜ要るか（2026-09-18 実測・両 slave の実障害）: relay のデータ線は
+// **sid ごとに 1 本**（webterm.go の active map が重複 wake を無視する）＝同じ
+// pane を 2 台の owner PC から見ると、両者の RESIZE が同じ resizeCh に混ざって
+// 届く。RESIZE ごとに無条件 respawn する実装だと mac-studio(200x76) と
+// d24wt27c3j(Nx74) が永久に往復し、slave-2 で 498,576 回 / slave-1 で 432,456 回の
+// observe spawn になっていた（agent.log 99.8MB / 88.5MB）。
+//
+// 判定:
+//   - **別サイズを挟んで同じサイズが再来**したら複数 viewer の競合とみなす。
+//     単独 viewer のウィンドウリサイズは一方向（同じサイズへ戻らない）なので
+//     巻き込まれない＝従来どおり最新サイズへ追従する。
+//   - 競合中は TTL 内の全票の **min**（rows/cols それぞれ独立の最小）へ収束
+//     させる。min なら全 viewer が折り返しなしで描ける（大きい側は右下に余白が
+//     出るだけ）。逆に max だと小さい側で折り返して画面が崩れる。
+//   - 票は TTL で失効する＝片方の viewer が去れば残った側の実寸へ自然に戻る。
+//
+// 丸め（要求と実サイズの乖離）は必ずログする（鉄則⑤: silent な丸め禁止）。
+func (b *Bridge) effectiveSize(req winSize) winSize {
+	ttl := b.SizeVoteTTL
+	if ttl == 0 {
+		ttl = DefaultSizeVoteTTL
+	}
+	if ttl < 0 {
+		return req // 競合検出を無効化（テスト用の旧挙動）
+	}
+	now := time.Now()
+
+	// TTL 切れの票を落とす（去った viewer のサイズを引きずらない）。
+	kept := b.votes[:0]
+	for _, v := range b.votes {
+		if now.Sub(v.at) < ttl {
+			kept = append(kept, v)
+		}
+	}
+	b.votes = kept
+
+	// 同サイズの票があれば時刻を更新、無ければ足す。
+	repeat := false
+	for i := range b.votes {
+		if b.votes[i].size == req {
+			b.votes[i].at = now
+			repeat = true
+			break
+		}
+	}
+	if !repeat {
+		b.votes = append(b.votes, sizeVote{size: req, at: now})
+	}
+
+	// 「別サイズを挟んで同じサイズが再来」＝競合。
+	if repeat && b.lastVote != req && len(b.votes) > 1 {
+		if !b.contended {
+			b.logf("RESIZE 競合検出: %d 通りの viewer サイズが往復（%s TTL）＝min へ収束させる",
+				len(b.votes), ttl)
+		}
+		b.contended = true
+	}
+	b.lastVote = req
+
+	if !b.contended {
+		b.effLogged = winSize{}
+		return req
+	}
+	if len(b.votes) < 2 {
+		// 競合相手が TTL で消えた＝単独 viewer へ復帰。
+		b.logf("RESIZE 競合解消: 生存票 1（%dx%d）＝実寸追従へ戻る", req.cols, req.rows)
+		b.contended = false
+		b.effLogged = winSize{}
+		return req
+	}
+
+	eff := b.votes[0].size
+	for _, v := range b.votes[1:] {
+		if v.size.rows < eff.rows {
+			eff.rows = v.size.rows
+		}
+		if v.size.cols < eff.cols {
+			eff.cols = v.size.cols
+		}
+	}
+	if eff != b.effLogged {
+		b.logf("RESIZE 競合: 要求 %dx%d → 実 %dx%d（TTL 内 %d 票の min）",
+			req.cols, req.rows, eff.cols, eff.rows, len(b.votes))
+		b.effLogged = eff
+	}
+	return eff
+}
+
 // Run はブリッジ本体（webterm 配線の契約メソッド）。初回 RESIZE を待って
 // observe を spawn し、
 //   - RESIZE 再受信 → observe respawn（新サイズ・新 full frame）
@@ -249,7 +367,8 @@ func (b *Bridge) Run(ctx context.Context) error {
 	// そのまま終了）。
 	var size winSize
 	select {
-	case size = <-resizeCh:
+	case req := <-resizeCh:
+		size = b.effectiveSize(req)
 	case err := <-connDone:
 		return err
 	case <-ctx.Done():
@@ -278,7 +397,8 @@ func (b *Bridge) Run(ctx context.Context) error {
 			case <-time.After(backoff):
 				backoff = nextBackoff(backoff)
 				continue
-			case size = <-resizeCh:
+			case req := <-resizeCh:
+				size = b.effectiveSize(req)
 				continue
 			case err := <-connDone:
 				return err
@@ -288,63 +408,76 @@ func (b *Bridge) Run(ctx context.Context) error {
 		}
 		b.setProc(proc)
 
-		select {
-		case newSize := <-resizeCh:
-			// RESIZE → respawn。旧 observe の writer が完全に止まってから
-			// 新 observe を起動する（旧新の frame が conn 上で交錯すると
-			// 断片スプライス画面になる＝cm relay takeover 修正と同じ規律）。
-			proc.stop()
-			if proc.connErr != nil {
-				// stop 中に writer が書込失敗（write deadline 超過含む）＝
-				// データ線死。respawn しても書き損ね続けるだけなので終える
-				// （proc.done 分岐と同じ判定。stalled viewer の実再現バグで
-				// ここを欠くと閉じた線へ respawn し続ける）。
-				b.setProc(nil)
-				if b.idleClosed.Load() {
-					return nil
-				}
-				return proc.connErr
-			}
-			size = newSize
-			backoff = backoffMin
-			continue
-		case <-proc.done:
-			proc.stop() // 書き手は既に終了・Wait で回収のみ
-			if proc.connErr != nil {
-				// conn へ書けない＝データ線が死んでいる。respawn しても
-				// 無限に書き損ね続けるだけなので bridge を終える。
-				// 自分の quiescence 自切断に起因する書込失敗は正常扱い。
-				b.setProc(nil)
-				if b.idleClosed.Load() {
-					return nil
-				}
-				return proc.connErr
-			}
-			if proc.gotFrame.Load() {
-				backoff = backoffMin // 実績あり＝一過性の死とみなす
-			}
-			b.logf("observe 終了（%s 後に respawn）", backoff)
+		// wait は現行 observe を維持したまま待つ内側ループ。RESIZE が来ても
+		// 実効サイズが変わらない（複数 viewer の往復が min へ収束済み）なら
+		// respawn せずここに留まる＝往復ごとの無条件 respawn を潰す。
+	wait:
+		for {
 			select {
-			case <-time.After(backoff):
-				backoff = nextBackoff(backoff)
-			case size = <-resizeCh:
+			case req := <-resizeCh:
+				newSize := b.effectiveSize(req)
+				if newSize == size {
+					// 実効サイズ不変＝作り直す理由が無い（full frame 再送も
+					// 帯域の純損失）。ログは effectiveSize が出している。
+					continue wait
+				}
+				// RESIZE → respawn。旧 observe の writer が完全に止まってから
+				// 新 observe を起動する（旧新の frame が conn 上で交錯すると
+				// 断片スプライス画面になる＝cm relay takeover 修正と同じ規律）。
+				proc.stop()
+				if proc.connErr != nil {
+					// stop 中に writer が書込失敗（write deadline 超過含む）＝
+					// データ線死。respawn しても書き損ね続けるだけなので終える
+					// （proc.done 分岐と同じ判定。stalled viewer の実再現バグで
+					// ここを欠くと閉じた線へ respawn し続ける）。
+					b.setProc(nil)
+					if b.idleClosed.Load() {
+						return nil
+					}
+					return proc.connErr
+				}
+				size = newSize
 				backoff = backoffMin
+				break wait
+			case <-proc.done:
+				proc.stop() // 書き手は既に終了・Wait で回収のみ
+				if proc.connErr != nil {
+					// conn へ書けない＝データ線が死んでいる。respawn しても
+					// 無限に書き損ね続けるだけなので bridge を終える。
+					// 自分の quiescence 自切断に起因する書込失敗は正常扱い。
+					b.setProc(nil)
+					if b.idleClosed.Load() {
+						return nil
+					}
+					return proc.connErr
+				}
+				if proc.gotFrame.Load() {
+					backoff = backoffMin // 実績あり＝一過性の死とみなす
+				}
+				b.logf("observe 終了（%s 後に respawn）", backoff)
+				select {
+				case <-time.After(backoff):
+					backoff = nextBackoff(backoff)
+				case req := <-resizeCh:
+					size = b.effectiveSize(req)
+					backoff = backoffMin
+				case err := <-connDone:
+					b.setProc(nil)
+					return err
+				case <-ctx.Done():
+					b.setProc(nil)
+					return ctx.Err()
+				}
+				break wait
 			case err := <-connDone:
+				proc.stop()
 				b.setProc(nil)
 				return err
 			case <-ctx.Done():
+				proc.stop()
 				b.setProc(nil)
 				return ctx.Err()
 			}
-			continue
-		case err := <-connDone:
-			proc.stop()
-			b.setProc(nil)
-			return err
-		case <-ctx.Done():
-			proc.stop()
-			b.setProc(nil)
-			return ctx.Err()
 		}
 	}
 }

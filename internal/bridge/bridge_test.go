@@ -531,3 +531,142 @@ func TestSendInputRouting(t *testing.T) {
 		return bytes.Equal(got, want), fmt.Errorf("got=%x want=%x", got, want)
 	})
 }
+
+// TestBridgeMultiViewerSizeOscillation は「同 sid に別サイズの viewer が複数
+// 繋がる」実運用形（owner PC が 2 台）を再現し、RESIZE の往復で observe が
+// respawn し続けないことを検証する。
+//
+// 実障害（2026-09-18 実測・両 slave）: relay の sid ごとにデータ線は 1 本
+// （webterm.go の active map）＝**全 viewer の RESIZE が同じ resizeCh に混ざる**。
+// RESIZE ごとに無条件 respawn する実装だと mac-studio(200x76) と
+// d24wt27c3j(Nx74) が永久に往復し、slave-2 で 498,576 回 / slave-1 で 432,456 回の
+// observe spawn（agent.log 99.8MB / 88.5MB・rotation 無し）になっていた。
+//
+// 期待仕様: 同じサイズが「別サイズを挟んで」再来したら競合と判定し、TTL 内の
+// 全要求の **min**（rows/cols それぞれの最小）へ収束する。min なら全 viewer が
+// 折り返しなしで描ける（大きすぎる側は右下に余白が出るだけ）。収束後は実効
+// サイズが変わらない＝respawn しない。
+func TestBridgeMultiViewerSizeOscillation(t *testing.T) {
+	_, hc := startHerdr(t)
+	ws, err := hc.WorkspaceCreate()
+	if err != nil {
+		t.Fatalf("workspace.create: %v", err)
+	}
+	paneID := ws.RootPane.PaneID
+
+	viewerConn, bridgeConn := net.Pipe()
+	defer viewerConn.Close()
+	sink := newConnSink(viewerConn)
+
+	b := New(paneID, bridgeConn, hc)
+	b.Idle = -1 // 段階間に静止があり得る＝quiescence は別テストで検証
+	b.Logf = t.Logf
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runDone := make(chan error, 1)
+	go func() { runDone <- b.Run(ctx) }()
+
+	// --- viewer A（153x74）が接続 ---
+	if _, err := viewerConn.Write(resizeMagic(74, 153)); err != nil {
+		t.Fatalf("write RESIZE(A): %v", err)
+	}
+	waitFor(t, 15*time.Second, "初回 frame (DECSET 2026)", func() (bool, error) {
+		return sink.containsFrom(0, []byte("\x1b[?2026h")), nil
+	})
+	if pid := b.observePID(); pid == 0 || !pidAlive(pid) {
+		t.Fatalf("初回 observe が居ない: pid=%d", pid)
+	}
+
+	// --- 競合の検出と収束（A/B が 2 往復するまでに min へ落ち着く） ---
+	writeAlt := func(round int) {
+		t.Helper()
+		if _, err := viewerConn.Write(resizeMagic(76, 200)); err != nil {
+			t.Fatalf("write RESIZE(B) round=%d: %v", round, err)
+		}
+		time.Sleep(400 * time.Millisecond)
+		if _, err := viewerConn.Write(resizeMagic(74, 153)); err != nil {
+			t.Fatalf("write RESIZE(A) round=%d: %v", round, err)
+		}
+		time.Sleep(400 * time.Millisecond)
+	}
+	for i := 0; i < 2; i++ {
+		writeAlt(i)
+	}
+	waitFor(t, 15*time.Second, "min サイズ(153x74)へ収束した observe", func() (bool, error) {
+		args := strings.Join(b.observeArgs(), " ")
+		return strings.Contains(args, "--cols 153 --rows 74"), fmt.Errorf("args=%q", args)
+	})
+	stable := b.observePID()
+	if stable == 0 {
+		t.Fatal("収束後に observe が居ない")
+	}
+
+	// --- 以降の往復では respawn しない（PID 不変が唯一の判定） ---
+	for i := 0; i < 6; i++ {
+		writeAlt(10 + i)
+		if pid := b.observePID(); pid != stable {
+			t.Fatalf("収束後に respawn した（round=%d）: pid %d → %d。"+
+				"RESIZE 往復で observe を作り直し続けている", 10+i, stable, pid)
+		}
+	}
+	if args := strings.Join(b.observeArgs(), " "); !strings.Contains(args, "--cols 153 --rows 74") {
+		t.Fatalf("収束サイズが min でない: %q", args)
+	}
+	if !pidAlive(stable) {
+		t.Fatalf("収束後の observe が死んでいる: pid=%d", stable)
+	}
+
+	cancel()
+	select {
+	case <-runDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("ctx cancel 後 10s で Run が戻らない")
+	}
+	waitFor(t, 5*time.Second, "cancel 後の observe 掃除", func() (bool, error) {
+		return !pidAlive(stable), nil
+	})
+}
+
+// TestBridgeSingleViewerResizeStillFollows は競合検出が「単独 viewer の
+// ウィンドウリサイズ」を巻き込まないことを検証する（min 収束の副作用で
+// 大きくし直しても小さいままになる、を防ぐ回帰テスト）。
+//
+// 単独 viewer は同じサイズへ戻らない（80x24 → 100x33 と一方向）ので競合とは
+// 判定されず、従来どおり最新サイズへ respawn する。
+func TestBridgeSingleViewerResizeStillFollows(t *testing.T) {
+	_, hc := startHerdr(t)
+	ws, err := hc.WorkspaceCreate()
+	if err != nil {
+		t.Fatalf("workspace.create: %v", err)
+	}
+	paneID := ws.RootPane.PaneID
+
+	viewerConn, bridgeConn := net.Pipe()
+	defer viewerConn.Close()
+	sink := newConnSink(viewerConn)
+
+	b := New(paneID, bridgeConn, hc)
+	b.Idle = -1
+	b.Logf = t.Logf
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = b.Run(ctx) }()
+
+	if _, err := viewerConn.Write(resizeMagic(24, 80)); err != nil {
+		t.Fatalf("write RESIZE: %v", err)
+	}
+	waitFor(t, 15*time.Second, "初回 frame", func() (bool, error) {
+		return sink.containsFrom(0, []byte("\x1b[?2026h")), nil
+	})
+	pid1 := b.observePID()
+
+	if _, err := viewerConn.Write(resizeMagic(33, 100)); err != nil {
+		t.Fatalf("write RESIZE2: %v", err)
+	}
+	waitFor(t, 15*time.Second, "最新サイズ(100x33)へ respawn", func() (bool, error) {
+		args := strings.Join(b.observeArgs(), " ")
+		pid := b.observePID()
+		return pid != 0 && pid != pid1 && strings.Contains(args, "--cols 100 --rows 33"),
+			fmt.Errorf("pid=%d args=%q", pid, args)
+	})
+}
