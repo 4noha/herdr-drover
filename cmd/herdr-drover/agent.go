@@ -140,6 +140,16 @@ func cmdAgent(stdout, stderr io.Writer) error {
 	nudge, stopNudge := notifyNudge()
 	defer stopNudge()
 
+	// agent.log の 1 世代ローテート（logrotate.go）。launchd の StandardOutPath /
+	// StandardErrorPath は**無限に伸びる**＝実測 126MB（mac-studio・2 か月）/
+	// 99.8MB（共用 slave・11 日）で、障害調査の一次情報が読めなくなっていた。
+	// daemon は数か月落ちないので判定は**周期**でなければ意味が無い。
+	if p, perr := agentLogPath(); perr != nil {
+		lg.Printf("agent.log ローテート無効（パス解決失敗）: %v", perr)
+	} else {
+		go runAgentLogRotator(ctx, stderr, lg, p, agentLogMaxBytes, agentLogCheckEvery)
+	}
+
 	// live 学習（opt-in・既定 false＝挙動完全不変）: config.json の
 	// learn_moves=true のときだけ pane.moved を購読し手動 Tab 移動を wsmap の
 	// exact ルールへ自動反映（organize.go runLearnLoop）。**プロセス単位で 1 回**

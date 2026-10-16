@@ -118,6 +118,54 @@ func TestCycleEmitsPeriodicallyEvenWhenSame(t *testing.T) {
 	}
 }
 
+// TestAttachLogRotatesWhileRunning は **走っている途中でもローテートする**ことを
+// 固定する。open 時しか判定しない実装（〜2026-09-18）では長寿命の viewer プロセスで
+// 永久に走らず、実測で `attach.log.1` が上限 8MiB の 4 倍（31MB）まで伸びていた
+// ＝「機ごとの比較」用の世代が壊れる。
+//
+// 上限はフィールドから読むので、テストでは小さくして実書き込みで検証する
+// （8MiB を書かせるテストは遅すぎて実質書けない）。
+func TestAttachLogRotatesWhileRunning(t *testing.T) {
+	lg, path := newTestAttachLogger(t)
+	lg.mu.Lock()
+	lg.maxBytes, lg.checkEvery, lg.written = 4096, 1024, 0
+	lg.mu.Unlock()
+
+	for i := 0; i < 300; i++ {
+		lg.Printf("行 %04d %s", i, strings.Repeat("y", 64))
+	}
+
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if fi.Size() > 2*4096 {
+		t.Fatalf("走行中にローテートしていない（%d バイト・上限 4096）＝無限に伸びる", fi.Size())
+	}
+	gen, err := os.Stat(path + ".1")
+	if err != nil {
+		t.Fatalf("退避世代 %s.1 が無い: %v", path, err)
+	}
+	if gen.Size() == 0 {
+		t.Fatalf("退避世代が空＝記録を捨てている")
+	}
+	// 退避したことが本体に残っている（silent な破棄をしない）。
+	body := strings.Join(readLines(t, path), "\n")
+	if !strings.Contains(body, "ローテート:") {
+		t.Fatalf("ローテートを報告していない:\n%s", body)
+	}
+	// inode を保つ＝共有している他プロセスが取り残されない（copy＋truncate）。
+	lg.mu.Lock()
+	ffi, ferr := lg.f.Stat()
+	lg.mu.Unlock()
+	if ferr != nil {
+		t.Fatalf("fd stat: %v", ferr)
+	}
+	if !os.SameFile(ffi, fi) {
+		t.Fatalf("退避で inode が変わった＝他 viewer プロセスが古い inode に取り残される")
+	}
+}
+
 // TestCycleKind は終了理由の畳み方（可変部分をキーにしない）を固定する。
 func TestCycleKind(t *testing.T) {
 	for _, c := range []struct {
