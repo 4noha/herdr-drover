@@ -401,12 +401,24 @@ func runOneCloud(ctx context.Context, cfg Config, cl Cloud, primary bool, hcli *
 	// master 限定の考え方。slave 分の Webhook は drover-cloud の
 	// web.slavePush が代理送信する）。WithOnSessions は1つしか持てないため
 	// 同じコールバックの中で両方の check を呼ぶ。
+	//
+	// Webhook 側だけ**さらに primary クラウド限定**にする（wn を primary
+	// の時だけ構築し、呼び出しも nil ガード。runRemoteInject と同じ理由:
+	// 複数クラウド構成で同じ外部 webhook URL を双方の settings/webhook に
+	// 設定していた場合、1セッションの状態遷移を複数クラウドの goroutine が
+	// それぞれ観測し重複送信してしまうのを防ぐ。taskNotifier は push token
+	// が元々クラウド毎に別管理で、この重複懸念が無いため対象外＝不変）。
 	if scConcrete != nil {
 		tn := newTaskNotifier(ctx, cl, lg)
-		wn := newWebhookNotifier(cl.PCName, lg)
+		var wn *webhookNotifier
+		if primary {
+			wn = newWebhookNotifier(cl.PCName, lg)
+		}
 		prod = prod.WithOnSessions(func(sessions []map[string]any) {
 			tn.check(ctx, scConcrete, sessions)
-			wn.check(ctx, scConcrete, sessions)
+			if wn != nil {
+				wn.check(ctx, scConcrete, sessions)
+			}
 		})
 	}
 
