@@ -21,12 +21,45 @@ import (
 	"github.com/4noha/herdr-drover/internal/herdrapi"
 )
 
+// isolateAgentDiscovery は「このマシンに導入済みのエージェント」の探索を stub dir に
+// 閉じ込める。
+//
+// ⚠**これが無いと update-all のテストは開発機の実 CLI を本当に更新する**
+// （2026-09-18 実害）: runUpdateAll は updatableAgents＝「UpdaterSpec を持つ ×
+// このマシンに導入済み」の**全種別**を順に更新するので、stub は claude しか無いのに
+// `cursor-agent update` が走って本物の新版を curl で DL し始め、
+// `cmd/herdr-drover` パッケージが 10 分の test timeout で落ちていた
+// （実測 601s。他に codex/copilot/opencode/devin も同じ経路に乗る）。
+//
+// 探索経路は 2 本（lookupAgentBin）＝**PATH** と **$HOME 下の既定導入先**
+// （InstallSpec.WellKnownPaths）なので両方を隔離する。
+func isolateAgentDiscovery(t *testing.T, stubDir string) {
+	t.Helper()
+	setTestHome(t, t.TempDir()) // ~/.local/bin/<agent>（claude / cursor-agent）を引かせない
+	// stub＋OS の素の bin だけ。**Homebrew（/opt/homebrew/bin）は入れない**
+	// ＝codex / copilot / opencode / devin の実 CLI がそこに居る。/usr/bin:/bin は
+	// stub シェルスクリプトが使う cat 等のために必要（エージェント CLI は居ない）。
+	t.Setenv("PATH", stubDir+":/usr/bin:/bin")
+	// 隔離が効いていることを**機械で確かめる**（将来 /usr/bin に何か入っても
+	// 黙って実 CLI を更新しないように）。
+	for _, a := range agentid.UpdaterAgents() {
+		if a == "claude" {
+			continue // stub をそこに置いている（更新対象はこれだけ）
+		}
+		if p, err := lookupAgentBin(a); err == nil {
+			t.Fatalf("探索の隔離が効いていない: %s の実バイナリ %s が見える"+
+				"＝このテストは開発機の本物を更新してしまう", a, p)
+		}
+	}
+}
+
 // setupUpdateAllPane は実 herdr に claude pane を 1 枚用意して api を返す。
 func setupUpdateAllPane(t *testing.T, from, to string) (*herdrapi.Client, string) {
 	t.Helper()
-	sock := startHerdrForTest(t)
+	sock := startHerdrForTest(t) // ⚠隔離より先（herdr の spawn には実 PATH が要る）
 	api := herdrapi.New(sock)
 	bin, _ := writeUpdatableStub(t, t.TempDir(), from, to)
+	isolateAgentDiscovery(t, filepath.Dir(bin))
 	cwd := t.TempDir()
 	wsID, err := currentWorkspaceID(api)
 	if err != nil {
@@ -116,6 +149,7 @@ func TestUpdateAllContinuesWhenOneAgentFails(t *testing.T) {
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
 		t.Fatalf("stub 作成: %v", err)
 	}
+	isolateAgentDiscovery(t, work) // ⚠実 CLI を更新しない（helper の doc 参照）
 	cwd := t.TempDir()
 	wsID, _ := currentWorkspaceID(api)
 	pane, err := applyClaudeTab(api, wsID, "proj", []string{bin}, cwd)
