@@ -2,9 +2,9 @@ package main
 
 // webhookNotifier の遷移検知ロジックを検証する。drover-cloud 側（Firestore
 // 永続化・https/CRLF検証）は webhook/state パッケージの自前テストが担保
-// 済み＝ここは done/blocked 遷移の検知条件（taskNotifier と対称）だけを
-// 軽量に確認する。webhook.Validate が https を必須にしているため受信側は
-// httptest.NewTLSServer を使い、自己署名証明書を一時的に信頼させる。
+// 済み＝ここは working→{idle,done,blocked} 遷移の検知条件（taskNotifier と
+// 対称）だけを軽量に確認する。webhook.Validate が https を必須にしているため
+// 受信側は httptest.NewTLSServer を使い、自己署名証明書を一時的に信頼させる。
 
 import (
 	"context"
@@ -84,8 +84,9 @@ func (wr *webhookReceiver) last() webhook.Payload {
 	return wr.got[len(wr.got)-1]
 }
 
-// 初観測（prev 無し）の done/blocked は送らない（daemon 再起動直後に既に
-// done な pane を誤通知しない。taskNotifier の working 限定ロジックと対称）。
+// 初観測（prev 無し）の idle/done/blocked は送らない（daemon 再起動直後に
+// 既に idle な pane を誤通知しない。taskNotifier の working 限定ロジックと
+// 対称）。
 func TestWebhookNotifierNoSendOnFirstObservation(t *testing.T) {
 	wr := newWebhookReceiver(t)
 	wn := newWebhookNotifier("mac-studio-herdr", log.New(io.Discard, "", 0))
@@ -93,12 +94,15 @@ func TestWebhookNotifierNoSendOnFirstObservation(t *testing.T) {
 	wn.cachedAt = time.Now()
 	ctx := context.Background()
 
-	wn.check(ctx, &fakeWebhookStore{}, []map[string]any{sess("w1:p1", "done", "claude")})
+	wn.check(ctx, &fakeWebhookStore{}, []map[string]any{sess("w1:p1", "idle", "claude")})
 	wr.assertStableCount(t, 0)
 }
 
-// working→done で送信・done→done（同一状態）は再送しない・done→blocked で
-// 再度送信する。
+// working→idle（CLI エージェントの通常の作業完了。herdr は "done" ではなく
+// "idle" で報告する＝webhook.NotifyStates のコメント参照）で送信・idle→idle
+// （同一状態）は再送しない・idle→blocked は working 起点でないため送らない
+// （taskNotifier と同じ working 限定の規律）・working に戻ってからの
+// working→blocked では再度送信する。
 func TestWebhookNotifierDetectsTransitions(t *testing.T) {
 	wr := newWebhookReceiver(t)
 	wn := newWebhookNotifier("mac-studio-herdr", log.New(io.Discard, "", 0))
@@ -110,21 +114,27 @@ func TestWebhookNotifierDetectsTransitions(t *testing.T) {
 	wn.check(ctx, store, []map[string]any{sessDir("w1:p1", "working", "claude", "proj")})
 	wr.assertStableCount(t, 0)
 
-	wn.check(ctx, store, []map[string]any{sessDir("w1:p1", "done", "claude", "proj")})
+	wn.check(ctx, store, []map[string]any{sessDir("w1:p1", "idle", "claude", "proj")})
 	wr.waitCount(t, 1)
 	p := wr.last()
 	if p.PC != "mac-studio-herdr" || p.SID != "w1:p1" || p.OldStatus != "working" ||
-		p.NewStatus != "done" || p.WindowName != "claude" || p.Cwd != "" || p.At == "" {
+		p.NewStatus != "idle" || p.WindowName != "claude" || p.Cwd != "" || p.At == "" {
 		t.Fatalf("payload 不正: %+v", p)
 	}
 
-	wn.check(ctx, store, []map[string]any{sessDir("w1:p1", "done", "claude", "proj")})
+	wn.check(ctx, store, []map[string]any{sessDir("w1:p1", "idle", "claude", "proj")})
 	wr.assertStableCount(t, 1)
 
 	wn.check(ctx, store, []map[string]any{sessDir("w1:p1", "blocked", "claude", "proj")})
+	wr.assertStableCount(t, 1) // idle→blocked は working 起点でない＝送らない
+
+	wn.check(ctx, store, []map[string]any{sessDir("w1:p1", "working", "claude", "proj")})
+	wr.assertStableCount(t, 1) // blocked→working（working 自体は通知対象外）
+
+	wn.check(ctx, store, []map[string]any{sessDir("w1:p1", "blocked", "claude", "proj")})
 	wr.waitCount(t, 2)
-	if p2 := wr.last(); p2.OldStatus != "done" || p2.NewStatus != "blocked" {
-		t.Fatalf("done→blocked の payload 不正: %+v", p2)
+	if p2 := wr.last(); p2.OldStatus != "working" || p2.NewStatus != "blocked" {
+		t.Fatalf("working→blocked の payload 不正: %+v", p2)
 	}
 }
 
@@ -138,12 +148,14 @@ func TestWebhookNotifierNoopWhenDisabled(t *testing.T) {
 	ctx := context.Background()
 
 	wn.check(ctx, store, []map[string]any{sess("w1:p1", "working", "a")})
-	wn.check(ctx, store, []map[string]any{sess("w1:p1", "done", "a")})
+	wn.check(ctx, store, []map[string]any{sess("w1:p1", "idle", "a")})
 	wr.assertStableCount(t, 0)
 }
 
-// working/idle/unknown への遷移は通知対象外（NotifyStates=done/blockedのみ）。
-func TestWebhookNotifierIgnoresNonTargetStates(t *testing.T) {
+// working 以外からの遷移は通知対象外（working→X の X が NotifyStates に
+// 入っていても、遷移元が working でなければ送らない。taskNotifier と同じ
+// 規律。unknown からの遷移は一時的な検出揺れで誤通知しないため特に重要）。
+func TestWebhookNotifierIgnoresNonWorkingOrigin(t *testing.T) {
 	wr := newWebhookReceiver(t)
 	wn := newWebhookNotifier("mac-studio-herdr", log.New(io.Discard, "", 0))
 	wn.cachedCfg = webhook.Config{Enabled: true, URL: wr.srv.URL, HeaderName: "X", HeaderSecret: "y"}
@@ -151,10 +163,10 @@ func TestWebhookNotifierIgnoresNonTargetStates(t *testing.T) {
 	store := &fakeWebhookStore{cfg: wn.cachedCfg}
 	ctx := context.Background()
 
-	wn.check(ctx, store, []map[string]any{sess("w1:p1", "working", "a")})
-	wn.check(ctx, store, []map[string]any{sess("w1:p1", "idle", "a")})
-	wn.check(ctx, store, []map[string]any{sess("w1:p1", "working", "a")})
-	wn.check(ctx, store, []map[string]any{sess("w1:p1", "unknown", "a")})
+	wn.check(ctx, store, []map[string]any{sess("w1:p1", "unknown", "a")}) // 初観測
+	wn.check(ctx, store, []map[string]any{sess("w1:p1", "idle", "a")})    // unknown→idle
+	wn.check(ctx, store, []map[string]any{sess("w1:p1", "blocked", "a")}) // idle→blocked
+	wn.check(ctx, store, []map[string]any{sess("w1:p1", "working", "a")}) // blocked→working（working 自体も対象外）
 	wr.assertStableCount(t, 0)
 }
 

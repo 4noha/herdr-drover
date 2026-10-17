@@ -63,8 +63,10 @@ func (wn *webhookNotifier) configFor(ctx context.Context, st webhookConfigStore)
 }
 
 // check は 1 tick 分の sessions（session.BuildSessions の結果）を見て、
-// pane 毎に done/blocked への遷移を検知し送る。消滅した pane_id は prev から
-// 掃除する（今回 sessions に出ない key を除去。taskNotifier と同じ規律）。
+// pane 毎に working から NotifyStates（idle/done/blocked）への遷移を検知し
+// 送る（taskNotifier と同じ working 起点の規律。unknown 等からの遷移は一時的
+// な検出揺れで誤通知しないため対象外）。消滅した pane_id は prev から掃除する
+// （今回 sessions に出ない key を除去。taskNotifier と同じ規律）。
 func (wn *webhookNotifier) check(ctx context.Context, st webhookConfigStore, sessions []map[string]any) {
 	cur := make(map[string]bool, len(sessions))
 	var cfg webhook.Config
@@ -78,7 +80,7 @@ func (wn *webhookNotifier) check(ctx context.Context, st webhookConfigStore, ses
 		status, _ := s["agent_status"].(string)
 		prevStatus, known := wn.prev[key]
 		wn.prev[key] = status
-		if !webhook.NotifyStates[status] || !known || prevStatus == status {
+		if !webhook.NotifyStates[status] || !known || prevStatus != "working" {
 			continue
 		}
 		if !cfgLoaded {
