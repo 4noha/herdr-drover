@@ -659,3 +659,47 @@ Web コンソール（`/term`）を開いても**ログも入力窓も出ない*
 `cmd/herdr-drover/webterm_yield_test.go`: `TestYieldToNewWake`。
 既存 `test/webterm_e2e_test.go` の `TestE2EWebTerminal` が「**データが流れている**
 bridge への多重 wake は従来どおり無視」を固定＝繋がっている画面を切らないことの担保。
+
+### 🔎 続報（2026-09-16）— 別症状として再発。BUG-8 の修正自体は健在
+
+ユーザー報告:「Web コンソール黒画面から何回も開き直さないと全然来ない」。
+
+**まず確認したこと（BUG-8 の退行ではない）**: 稼働バイナリは `fa69b26`（BUG-8 修正
+そのもの）。`launchctl print` で daemon プロセスは **2026-09-07 01:14:35 から
+9 日間再起動なし**＝古いバイナリが動き続けている可能性を除外。`多重 wake 無視` ログ
+も実際に出ており（`w1:p3J` で 02:16〜02:17 に 6 回）、**dedup は機能している**。
+
+**新しく実測した症状**: non-`#inj` sid（＝ブラウザ直の `/term`、リモート pane 注入
+`#inj` とは別経路）で、**RESIZE も observe spawn も一切無いまま
+「quiescence: 5s 初回データ未着」で自切断する**ケースが一定数ある。
+
+- 09/15 19:18〜19:23（5 分）: sid `w2K:p1` で **11 回 open を試み成功 5 回**
+  （＝ユーザーが手で開き直していた区間と時刻が一致）。
+- 09/16 02:15 のライブ観察（`tail -F` で実況）: 同時に開いた 3 pane のうち
+  `w1:p3J`（このセッション）と `w2K:p1`（fly_brain）は初回で成功、
+  `w2J:p8`（3dstudio）は **5 秒で失敗しそのまま無音**（クライアント側の
+  自動再試行も起きていない＝黒画面のまま人間の再読み込み待ちになっていた）。
+- 過去には同一 sid（`w2K:p1`）で **30 秒周期の失敗が 70 分間・約 130 回**続いた
+  記録もあるが、間隔が機械的すぎ・`#inj`（BUG-3 の再発領域）ではない non-`#inj`
+  でこの周期が出る理由は未特定＝**別途調査要**（今回のスコープ外）。
+
+**まだ結論していないこと（推測で埋めない）**: BUG-8 が「初回データ未着」の猶予を
+30s→**5s**（`bridge.DefaultFirstByteIdle`）に縮めた際、同じ commit が「空振りは
+0.042s/7.687s で切れる」と実測していた＝5s はその実測を踏まえた意図的な値。
+今回集めた失敗が「relay 往復込みで RESIZE が 5s に間に合っていないだけの正規
+viewer」なのか「相変わらず 1 バイトも送らない空振り」なのかは、**この repo 側の
+ログだけでは区別できない**（relay/フロントエンド側の接続時間ログが要る＝
+drover-cloud 側・本 repo の管轄外）。ゆえに **既定値 5s はまだ動かしていない**。
+
+**やったこと（既定値は不変・計測用の口だけ追加）**: `DROVER_IDLE` と同じ形で
+`DROVER_FIRST_BYTE_IDLE` 環境変数を新設（`cmd/herdr-drover/config.go` /
+`webterm.go` / `agent.go` / `install.go` の env passthrough / `main.go` help）。
+env 未設定なら `bridge.DefaultFirstByteIdle`（5s）のまま＝**本番の挙動は変えて
+いない**。次に同じ症状が出たら、まずこれを一時的に伸ばして
+（例 `DROVER_FIRST_BYTE_IDLE=15s`）黒画面の頻度が変わるか観測してから、
+既定値そのものを動かすか判断する。
+
+テスト: `TestResolveConfigDefaults`（未設定時 0=bridge 既定へ委譲）・
+`TestResolveConfigEnvOverrides`（`DROVER_FIRST_BYTE_IDLE=10s` の反映）・
+`TestResolveConfigBadFirstByteIdle`（不正値/0 以下を拒否）。gofmt/build/vet/test
+全緑（`go test ./... -count=1`）。

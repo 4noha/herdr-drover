@@ -80,9 +80,18 @@ func yieldToNewWake(h *bridgeRun) bool {
 type webTerm struct {
 	relayURL string
 	idle     time.Duration // quiescence 自切断（0=bridge 既定 30s。DROVER_IDLE 由来）
-	st       agentState    // master=*state.Client（byte 同一）／slave=*relayState
-	hcli     *herdrapi.Client
-	lg       *log.Logger
+	// firstByteIdle は「初回データ未着」の自切断猶予（0=bridge 既定 5s。
+	// DROVER_FIRST_BYTE_IDLE 由来）。BUG-8（v0.5.38）で新設した閾値で、当時は
+	// env knob を用意せず bridge.DefaultFirstByteIdle 固定にした。2026-09-16
+	// 実測: 直近の失敗（w2J:p8 等）は「初回データ未着」で 5s ちょうど自切断
+	// しており、relay 経由の往復（Cloud Run 含む）が 5s を超えて正規 viewer の
+	// RESIZE が間に合っていない可能性を排除できていない＝**現物のデータが
+	// 無いまま既定値を動かすのは鉄則1違反**。まずこの knob で計測できるように
+	// するだけに留める（既定 0=5s のままで挙動は変えない）。
+	firstByteIdle time.Duration
+	st            agentState // master=*state.Client（byte 同一）／slave=*relayState
+	hcli          *herdrapi.Client
+	lg            *log.Logger
 
 	// dialSource は relay へ source 役で dial する seam。nil=master（header-less
 	// relayclient.Dial＝byte 同一）／slave は bearer 付き dialer を注入する。
@@ -257,6 +266,7 @@ func (w *webTerm) handleWake(ctx context.Context, sid string) {
 	// quiescence（無通信自切断）は DROVER_IDLE で調整可（0 なら bridge 既定
 	// 30s＝cm 本番 IdleClose と同値）。e2e が短い idle で実切断を検証する。
 	b.Idle = w.idle
+	b.FirstByteIdle = w.firstByteIdle
 	// 画像貼付（既定 off）。off の間は従来どおり IMAGE frame を破棄する。
 	b.ImagePaste = w.imagePaste
 	b.Logf = func(format string, args ...any) {

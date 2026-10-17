@@ -302,6 +302,9 @@ func usage(w io.Writer) {
   HERDR_SOCKET_PATH               herdr ndjson API socket（既定 ~/.config/herdr/herdr.sock）
   DROVER_TICK                     producer 周期（Go duration 形式。既定 5s）
   DROVER_IDLE                     Web ターミナル quiescence 自切断の無通信時間（既定 30s）
+  DROVER_FIRST_BYTE_IDLE          Web ターミナル「初回データ未着」自切断の猶予（既定 5s。
+                                  BUG-8 対策値。relay 往復が遅い環境で正規 viewer の
+                                  RESIZE が間に合わず黒画面になる場合の計測・調整用）
 
   herdr-drover attach <pc> <sid>
                           リモート pane 注入の viewer client（↗窓 の中身）。
