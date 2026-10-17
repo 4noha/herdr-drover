@@ -620,8 +620,8 @@ func cmdRestartClaudeNamed(args []string, stdout, stderr io.Writer, legacyClaude
 	// 未知の種別は「一致 0 件」に degrade せず loud に撥ねる（黙って何もしない
 	// のが一番わかりにくい失敗）。
 	if *agent != "" && !agentid.IsCanonical(*agent) {
-		return fmt.Errorf("%w: 未知のエージェント種別 %q（canonical label 21 種のいずれか）",
-			errUsage, *agent)
+		return fmt.Errorf("%w: 未知のエージェント種別 %q（canonical label %d 種のいずれか）",
+			errUsage, *agent, len(agentid.CanonicalLabels))
 	}
 	// ⚠**モデル名は agent 固有**（claude=opus / codex=gpt-5 / cursor=sonnet-4-thinking）。
 	// 種別を絞らずに渡すと、値が通らないエージェントの pane を壊す（作り直しに

@@ -101,6 +101,37 @@ install.ps1 を `-LocalPackagePath` で実行・zip は GitHub digest と sha256
   powershell.exe 7428・親 10200 不在・テスト用 release パス）が残っている。本セッション由来の
   孤児（20:18/20:26）は PID 指定で回収済み。19:33 分は出所未確定のため未処置。
 
+**herdr 内部表ミラーの 0.9.5 再照合（2026-10-17・別セッション・未コミット）**: `internal/agentid`
+の 4 表（plan()／lookup_agent／agent_label／is_official_agent_source）を herdr **v0.9.5 タグの
+実ソース**と照合し更新（コードは写さずデータ表＋出典コメントのみ）。詳細は SPEC.md §4.2〜4.3・§5.2。
+- 変更: canonical **21→24**（qwen/letta/muse）。resume **14→17**（qwen `--resume`・agy
+  `--conversation`・grok `--resume`。agy/grok は 0.7.4 では session 無しだった）。alias 追加
+  （cline `.cline`／opencode `opencode2`／qwen・letta・muse 一式＋muse の `muse-bin-<数字…>`）。
+- 🔴 **Resolve の取りこぼしを修正**: 公認 source を `"herdr:"+agent` と決め打っていた＝0.9.5 の
+  agy（source `herdr:antigravity_cli`）の session を identity に使えなかった → `herdrOfficialSources`
+  （18 組）で exact 照合（旧コードで新テスト FAIL 確認済み）。
+- **IsDirectInvocation の名前正規化を herdr と同一に**（`HerdrAgentForExec`: 小文字化・`.exe/.cmd/
+  .bat/.ps1/.js` を 1 個・`/` `\` 両方で basename・OS 非依存）。前セッションの「Windows のみ `.exe`、
+  `.cmd` は検出に載らない」を**実測で否定**: 実 herdr 0.9.5 は `qwen.cmd`（npm shim 形）を qwen と
+  検出し、`%*` で付けた引数も本体へ届く。herdr 自身も Windows の cursor 再開を `cursor-agent.cmd
+  --resume` で組む。`TestIsDirectInvocationExeSuffix` をこの意味へ書き換えた。
+- 実測: `TestWindowsHerdrAliasDetection`（新規・Windows 実 herdr）＝**全 24 agent の全 alias 56 名**
+  （空白入り `qwen code.exe`・`.cline.exe`・`muse-bin-0.1.0-R708.1.exe` を含む）が偽 agent で
+  ミラーどおりに検出される＋shim の引数到達。⚠ 1 本 ~2 秒の spawn（新 exe）で **~2 分かかる**
+  （並列化しても縮まない）。
+- **letta resume は意図的に未写**（`herdrResumeUnmirrored`）: `default:<agent_id>` ref だけ
+  `--conversation default --agent <id>` になる 2 形＝ResumeSpec で表せず、平写しは誤 argv を作る。
+- **0.9.2+ の agent 自己申告 `resume_argv`**: herdr の自前復元は plan() より優先するが値は
+  session.json にしか残らず API（pane.get/agent.list）に出ない＝drover の restart は表で組む
+  まま（影響なし・SPEC §4.3 に記載）。
+- **未検証**: 新 agent（qwen/letta/muse/agy/grok）の**実 CLI での resume 引数の受理と会話 e2e**
+  （この PC に実機なし・偽 agent で検出のみ）。InstallSpec/UpdaterSpec/ModelSpec は新 agent に
+  載せていない（実バイナリ未確認＝推測しない）。ValidSessionRef は 512B 一律（herdr は path
+  kind 4096B＋絶対パス必須・制御文字は C1 も拒否）＝差は未解消。
+- **派生 TODO**: シムの Windows バイナリ探索が `<name>.exe` のみ＝**npm 導入（`codex.cmd`・
+  cursor の `cursor-agent.cmd`）の agent をシムが見つけられない**（platform_windows.go の
+  「`.cmd` は検出に載らない」根拠は上記で否定済み）。InstallSpec の Windows 名も要再設計。
+
 **残**: `test/`・`internal/session`・`internal/commands` のテストは `!windows` のまま。
 `reconcile_test.go`/`reconcilelive_test.go`/`attachrefresh_unix_test.go` も `unix` 限定（BUG-6
 復活経路が POSIX シェル前提）。`main.go` の argv[0] multi-call（`claude` という名前のシム）は

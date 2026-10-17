@@ -28,8 +28,9 @@
 // `agent == "claude"` になっている pane が存在する。token 除外を後ろに置くと
 // リモートの鏡をローカルセッションと誤認する（organize が実際にこれを踏んだ）。
 //
-// **1 が最も強い理由**: herdr は agent_session の `(source, agent)` を 14 組の
-// exact 許可制でしか受け付けない（`src/agent_resume.rs is_official_agent_source`）。
+// **1 が最も強い理由**: herdr は agent_session の `(source, agent)` を exact 許可制
+// （v0.9.5 で 18 組＝spec.go herdrOfficialSources）でしか受け付けない
+// （`src/agent_resume.rs is_official_agent_source`）。
 // 未知の組は保存されないので、**値域が canonical に閉じている**のが強みである。
 //
 // ⚠**「偽装が構造的に不可能」ではない**: `pane.report_agent_session` は認証の無い
@@ -63,8 +64,6 @@ package agentid
 
 import (
 	"fmt"
-	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 
@@ -72,8 +71,9 @@ import (
 )
 
 // CanonicalLabels は herdr が `pane.agent` / `agent.agent` に出す canonical な
-// エージェント種別の全集合。herdr 0.7.4 の `src/detect/mod.rs agent_label()` から
-// 実ソース抽出した 21 値（改変禁止のソースを読むだけ＝vendor ではない）。
+// エージェント種別の全集合。herdr の `src/detect/mod.rs agent_label()` から
+// 実ソース抽出した値（改変禁止のソースを読むだけ＝vendor ではない）。
+// 0.7.4 の 21 値に、v0.9.5（2026-10-17 再照合）で qwen / letta / muse が加わり 24 値。
 //
 // ⚠ここに**無い**文字列は identity に採用しない。herdr は未知ラベルを trim して
 // 素通しする（`normalize_reported_agent_label`）ので、素通し値を信じると
@@ -88,7 +88,7 @@ var CanonicalLabels = map[string]bool{
 	"copilot": true, "cursor": true, "devin": true, "droid": true, "gemini": true,
 	"grok": true, "hermes": true, "kilo": true, "kimi": true, "kiro": true,
 	"maki": true, "mastracode": true, "omp": true, "opencode": true, "pi": true,
-	"qodercli": true,
+	"qodercli": true, "qwen": true, "letta": true, "muse": true,
 }
 
 func IsCanonical(s string) bool { return CanonicalLabels[s] }
@@ -150,32 +150,22 @@ func Decode(name string) (string, bool) {
 // **これが「どの basename ならそのエージェントとして動いているか」の唯一の権威**
 // （herdr の検出も同じ表で行われる＝drover が別の表を持つと両者がずれる）。
 // 表に無い kind は false＝**知らないものは触らない**（推測禁止の鉄則①③）。
+//
+// argv[0] の名前の正規化も herdr と同一（HerdrAgentForExec: 小文字化・拡張子
+// .exe/.cmd/.bat/.ps1/.js を 1 個落とす・`/` `\` 両方で basename）。経緯:
+//   - Windows の実体は `claude.exe`。当初は拡張子を落とさず、Windows では**全 pane が
+//     「直接起動でない」で restart/update から除外**されていた（2026-10-17 実 herdr
+//     0.9.5 で発覚）。
+//   - npm global shim（`codex.cmd` 等）も argv[0] として**直接起動**に数える: shim は
+//     `%*` で引数を本体へ渡すので付け直した resume 引数は届く。herdr 0.9.5 自身が
+//     Windows の cursor 再開 argv を `cursor-agent.cmd --resume <v>` で組む
+//     （agent_resume.rs plan()）＝shim 経由の再開は herdr の公式経路。`zsh -lc …` /
+//     `cmd /c …` のようなシェル経由は従来どおり false（argv[0] がシェル）。
 func IsDirectInvocation(kind string, argv []string) bool {
-	if len(argv) == 0 {
+	if len(argv) == 0 || kind == "" {
 		return false
 	}
-	base := execBaseName(argv[0])
-	for _, want := range herdrExecAliases[kind] {
-		if base == want {
-			return true
-		}
-	}
-	return false
-}
-
-// execBaseName は argv[0] の basename。Windows は実行ファイル拡張子 .exe（大小無視）を
-// 落とす: 実体は `claude.exe` で、herdr 0.9.x も前景 `claude.exe` を claude と検出する
-// （実測）。落とさないと Windows では**全 pane が「直接起動でない」で restart/update
-// から除外**されていた（2026-10-17 実 herdr 0.9.5 で発覚）。.cmd 等のラッパは前景が
-// 別プロセスになり検出にも載らない＝直接起動ではないので落とさない。
-func execBaseName(argv0 string) string {
-	base := filepath.Base(argv0)
-	if runtime.GOOS == "windows" {
-		if ext := filepath.Ext(base); strings.EqualFold(ext, ".exe") {
-			base = strings.TrimSuffix(base, ext)
-		}
-	}
-	return base
+	return HerdrAgentForExec(argv[0]) == kind
 }
 
 // Identity は identity 判定に要る最小情報。PaneInfo / AgentInfo の
@@ -226,10 +216,11 @@ func Resolve(id Identity) (kind, conflict string) {
 		return "", ""
 	}
 
-	// 1. agent_session（値域が 14 組の exact 許可制に閉じている。ただし
-	//    「誰が名乗れるか」の認証ではない＝上部 comment の警告を参照）
+	// 1. agent_session（値域が公認組の exact 許可制に閉じている。ただし
+	//    「誰が名乗れるか」の認証ではない＝上部 comment の警告を参照）。
+	//    ⚠source は "herdr:"+agent と決め打たない（agy は "herdr:antigravity_cli"）。
 	fromSession := ""
-	if a := id.Session.Agent; a != "" && id.Session.Source == "herdr:"+a && IsCanonical(a) {
+	if a := id.Session.Agent; a != "" && IsOfficialSession(id.Session.Source, a) && IsCanonical(a) {
 		fromSession = a
 	}
 	// 2. シム命名（ユーザーも書ける同一フィールド。慣習的に drover が書く）

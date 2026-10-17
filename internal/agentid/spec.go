@@ -9,18 +9,34 @@ package agentid
 //
 // # ResumeSpec の出所
 //
-// herdr の `src/agent_resume.rs plan()` の**実ソースから写経**した（2026-07-25 に
-// 全 14 分岐を照合済み）。この表は **herdr の API では公開されていない**ので、
-// drover にミラーを持つしかない。
+// herdr の `src/agent_resume.rs plan()` の**実ソースから写経**した（初版 0.7.4 を
+// 2026-07-25 に 14 分岐照合、**v0.9.5 を 2026-10-17 に再照合＝18 分岐**）。この表は
+// **herdr の API では公開されていない**ので、drover にミラーを持つしかない。
+//
+// 0.7.4 → 0.9.5 の差分: qwen（新 agent・`--resume`）／agy（`--conversation`・
+// **source が "herdr:antigravity_cli"** で agent 名と違う唯一の組）／grok（`--resume`）／
+// letta（新 agent。2 形あり＝下の herdrResumeUnmirrored）を追加。cursor は Windows で
+// argv[0] が `cursor-agent.cmd`（npm shim）になった。
 //
 // ⚠herdr 側が増えたらここも増やす必要がある。取りこぼしても「resume 非対応」へ
 // loud に落ちるだけで破壊はしない（Supported=false と同じ扱い）。
 //
-// # resume 非対応 7 種は「未実装」ではない
+// # resume 非対応 6 種は「未実装」ではない
 //
-// agy / amp / cline / gemini / grok / kiro / maki は herdr が agent_session を
-// **出さない**＝原理的に再開できない。restart 時は resume 無しの素起動へ落とし、
-// その旨を loud に出力して Ack detail に残す（黙って会話を失わない）。
+// amp / cline / gemini / kiro / maki / muse は herdr が agent_session を
+// **出さない**（is_official_agent_source に組が無い）＝原理的に再開できない。
+// restart 時は resume 無しの素起動へ落とし、その旨を loud に出力して Ack detail に
+// 残す（黙って会話を失わない）。letta だけは herdr は再開できるが drover は
+// **意図的にミラーしない**（herdrResumeUnmirrored）。
+//
+// # 0.9.2+ の自己申告 resume_argv（drover からは読めない）
+//
+// herdr 0.9.2 から agent は `pane.report_agent` / `pane.report_agent_session` に
+// `resume_argv` を添えられる。herdr の**自前の復元**は plan() より**それを優先**する
+// （`persist/restore.rs pane_restore_startup`）。しかし値は session.json にだけ残り、
+// pane.get / agent.list には出ない＝drover の restart/update（pane を自分で作り直す）は
+// 従来どおり**この表で** argv を組む。自己申告だけで再開できる agent（表外・
+// 未公認 source の agent）は drover の restart では素起動へ落ちる（loud）。
 
 import (
 	"fmt"
@@ -63,8 +79,8 @@ type ResumeSpec struct {
 	Kinds []string
 }
 
-// resumeSpecs は herdr agent_resume.rs plan() の写し（14 種）。
-// ここに無い canonical label は resume 非対応（＝残り 7 種）。
+// resumeSpecs は herdr agent_resume.rs plan() の写し（v0.9.5: 18 分岐のうち letta を
+// 除く 17 種）。ここに無い canonical label は resume 非対応（＝残り 7 種）。
 var resumeSpecs = map[string]ResumeSpec{
 	// `<bin> --resume <v>`
 	"claude": {Supported: true, Flag: "--resume", Aliases: []string{"-r"}, Form: FormSpace, Kinds: []string{"id"}},
@@ -76,8 +92,17 @@ var resumeSpecs = map[string]ResumeSpec{
 	"droid":    {Supported: true, Flag: "--resume", Form: FormSpace, Kinds: []string{"id"}},
 	"hermes":   {Supported: true, Flag: "--resume", Form: FormSpace, Kinds: []string{"id"}},
 	"qodercli": {Supported: true, Flag: "--resume", Form: FormSpace, Kinds: []string{"id"}},
-	// argv[0] が agent 名と違う唯一の例。
+	// qwen / grok（0.9.5 で追加）。⚠grok は 0.7.4 では agent_session を出さなかった。
+	"qwen": {Supported: true, Flag: "--resume", Form: FormSpace, Kinds: []string{"id"}},
+	"grok": {Supported: true, Flag: "--resume", Form: FormSpace, Kinds: []string{"id"}},
+	// argv[0] が agent 名と違う唯一の例。⚠herdr 0.9.5 は Windows では
+	// `cursor-agent.cmd`（npm shim）を argv[0] にする。drover は Argv0 を argv 組み立てに
+	// 使わない（稼働 argv[0] を温存する）ので unix 名のまま持つ。`.cmd` 付きでも
+	// HerdrAgentForExec が cursor と引ける（herdr と同じ正規化）。
 	"cursor": {Supported: true, Flag: "--resume", Form: FormSpace, Argv0: "cursor-agent", Kinds: []string{"id"}},
+	// `<bin> --conversation <v>` — agy（0.9.5 で追加。0.7.4 では agent_session 無し）。
+	// ⚠source は "herdr:antigravity_cli"（"herdr:agy" ではない）＝herdrOfficialSources。
+	"agy": {Supported: true, Flag: "--conversation", Form: FormSpace, Kinds: []string{"id"}},
 	// `<bin> --session <v>`
 	"kimi": {Supported: true, Flag: "--session", Form: FormSpace, Kinds: []string{"id"}},
 	// opencode は `-s, --session <id>`（実測 1.18.10）。⚠`-c, --continue` は「直前の
@@ -98,8 +123,41 @@ var resumeSpecs = map[string]ResumeSpec{
 	"codex": {Supported: true, Subcommand: "resume", Form: FormSubcommand, Kinds: []string{"id"}},
 }
 
+// herdrResumeUnmirrored は herdr の plan() にはあるが**意図的に**ミラーしない agent と
+// その理由（取りこぼしではないことを明示し、テストで plan() の全分岐を数え切る）。
+var herdrResumeUnmirrored = map[string]string{
+	// letta は ref の形で argv が 2 通りに分かれる: "default:<agent_id>" なら
+	// `letta --conversation default --agent <agent_id>`、それ以外は
+	// `letta --conversation <v>`。ResumeSpec（フラグ 1 個＋値 1 個）では表せず、
+	// FormSpace で写すと "default:…" を素で渡す**誤った argv を黙って作る**。
+	// 実機も無く strip 側（--agent の扱い）も未検証＝resume 非対応（素起動・loud）に倒す。
+	"letta": "ref 依存の 2 形（default:<agent_id> → --conversation default --agent <id>）を ResumeSpec で表せない",
+}
+
 // Resume は agent の ResumeSpec を返す。未知／非対応は Supported=false。
 func Resume(agent string) ResumeSpec { return resumeSpecs[agent] }
+
+// herdrOfficialSources は herdr `src/agent_resume.rs is_official_agent_source` の
+// (source, agent) 許可表を agent → source で持つ（v0.9.5: 18 組）。herdr はここに無い
+// 組の agent_session を保存しない＝pane.agent_session の値域はこの表に閉じる。
+//
+// ⚠**source は "herdr:"+agent とは限らない**: agy は "herdr:antigravity_cli"
+// （0.9.5 で追加）。旧 Resolve は `Source == "herdr:"+agent` と決め打ちしていたため、
+// agy の会話 session を identity に使えなかった。
+var herdrOfficialSources = map[string]string{
+	"claude": "herdr:claude", "codex": "herdr:codex", "copilot": "herdr:copilot",
+	"devin": "herdr:devin", "droid": "herdr:droid", "kimi": "herdr:kimi",
+	"omp": "herdr:omp", "mastracode": "herdr:mastracode", "pi": "herdr:pi",
+	"hermes": "herdr:hermes", "opencode": "herdr:opencode", "qodercli": "herdr:qodercli",
+	"qwen": "herdr:qwen", "kilo": "herdr:kilo", "cursor": "herdr:cursor",
+	"agy": "herdr:antigravity_cli", "grok": "herdr:grok", "letta": "herdr:letta",
+}
+
+// IsOfficialSession は (source, agent) が herdr の公認組かを exact に返す。
+func IsOfficialSession(source, agent string) bool {
+	s, ok := herdrOfficialSources[agent]
+	return ok && s == source
+}
 
 // UpdaterSpec は「本体の更新」の差分。
 type UpdaterSpec struct {
@@ -300,16 +358,20 @@ func BuildModel(agent string, argv []string, model string) []string {
 	return append(StripModel(agent, argv), sp.Flag, model)
 }
 
-// herdrExecAliases は herdr `lookup_agent` の alias 表（実ソース抽出）。
-// 「この basename で起動すれば herdr がその agent として検出する」の権威。
+// herdrExecAliases は herdr `src/detect/mod.rs lookup_agent` の alias 表（実ソース抽出・
+// v0.9.5 で再照合 2026-10-17）。「この basename で起動すれば herdr がその agent として
+// 検出する」の権威。値は**正規化後**の形（小文字・拡張子なし）＝HerdrAgentForExec 参照。
+//
+// 0.7.4 → 0.9.5 の差分: cline に ".cline"、opencode に "opencode2" を追加。新 agent
+// qwen / letta / muse を追加（muse は版付き実体 `muse-bin-<数字…>` も＝isMuseVersionedBinary）。
 var herdrExecAliases = map[string][]string{
 	"pi": {"pi"}, "claude": {"claude", "claude-code"}, "codex": {"codex"},
 	"gemini": {"gemini"}, "cursor": {"cursor", "cursor-agent"},
 	"devin": {"devin", "devin-cli", "devin cli"},
 	"agy":   {"agy", "antigravity", "antigravity-cli"},
-	"cline": {"cline"}, "omp": {"omp"},
+	"cline": {"cline", ".cline"}, "omp": {"omp"},
 	"mastracode": {"mastracode", "mastra-code", "mastra code"},
-	"opencode":   {"opencode", "open-code"},
+	"opencode":   {"opencode", "opencode2", "open-code"},
 	"copilot":    {"copilot", "github-copilot", "ghcs"},
 	"kimi":       {"kimi", "kimi-code", "kimi code"},
 	"kiro":       {"kiro", "kiro-cli"}, "droid": {"droid"},
@@ -317,17 +379,74 @@ var herdrExecAliases = map[string][]string{
 	"hermes":   {"hermes", "hermes-agent"},
 	"kilo":     {"kilo", "kilo-code", "kilo code"},
 	"qodercli": {"qodercli", "qoderclicn", "qoder", "qodercn"},
+	"qwen":     {"qwen", "qwen-code", "qwen code"},
+	"letta":    {"letta", "letta-code", "letta code"},
 	"maki":     {"maki"},
+	"muse":     {"muse", "muse-code", "muse-cli"},
 }
 
 // HerdrExecAliases は agent を herdr に検出させられる実行ファイル名を返す。
 func HerdrExecAliases(agent string) []string { return herdrExecAliases[agent] }
+
+// herdrExecSuffixes は herdr `normalized_agent_lookup_name` が落とす拡張子（先に
+// 一致した 1 個だけ・大小無視）。Windows の実体 `claude.exe` や npm の global shim
+// `codex.cmd` / `codex.ps1` もこれで alias に一致する。herdr は OS を問わず落とす。
+var herdrExecSuffixes = []string{".exe", ".cmd", ".bat", ".ps1", ".js"}
+
+// HerdrAgentForExec は実行ファイル名（パス可）を herdr の `parse_agent_label` と同じ
+// 規則で canonical label へ引く。一致しなければ ""。
+//
+// 規則（v0.9.5 実ソース）: trim → 小文字化 → herdrExecSuffixes を 1 個落とす →
+// `/` と `\` の両方で basename（**OS を問わない**）→ alias 表の exact-match、
+// または muse の版付き実体。前景プロセス名からの検出（ラッパ越しの推定など）は
+// herdr 側の別ロジックで、ここでは**argv[0] の名前そのもの**だけを見る。
+func HerdrAgentForExec(name string) string {
+	n := strings.ToLower(strings.TrimSpace(name))
+	for _, suf := range herdrExecSuffixes {
+		if strings.HasSuffix(n, suf) {
+			n = n[:len(n)-len(suf)]
+			break
+		}
+	}
+	n = herdrPathBasename(n)
+	for agent, aliases := range herdrExecAliases {
+		for _, al := range aliases {
+			if n == al {
+				return agent
+			}
+		}
+	}
+	if isMuseVersionedBinary(n) {
+		return "muse"
+	}
+	return ""
+}
+
+// herdrPathBasename は herdr `path_basename` の写し: `/` と `\` で区切った最後の
+// 空でない要素（全部空なら元の文字列）。
+func herdrPathBasename(p string) string {
+	parts := strings.FieldsFunc(p, func(r rune) bool { return r == '/' || r == '\\' })
+	if len(parts) == 0 {
+		return p
+	}
+	return parts[len(parts)-1]
+}
+
+// isMuseVersionedBinary は herdr `is_muse_versioned_binary` の写し: muse の launcher は
+// `muse-bin-<version>` を exec するので、`muse-bin-` の直後が ASCII 数字なら muse
+// （`muse-binary` や素の `muse-bin` は不一致）。
+func isMuseVersionedBinary(base string) bool {
+	rest, ok := strings.CutPrefix(base, "muse-bin-")
+	return ok && rest != "" && rest[0] >= '0' && rest[0] <= '9'
+}
 
 // ValidateSpecs は Spec 群の内部整合を検査する（起動時／テストで呼ぶ）。
 // **黙って壊れる種類の誤りを起動時に落とす**のが目的:
 //   - canonical でない agent の Spec（誰にも一致しないので永久に無効）
 //   - lookup_agent の alias 表に無い BinNames（herdr の検出に載らず、resume も
 //     organize の検出系統も silent に無効化される）
+//   - herdr の公認 source 表と resume 表の食い違い（session が来ない resume Spec／
+//     理由なく写していない plan() 分岐）
 func ValidateSpecs() error {
 	var errs []string
 	for a := range resumeSpecs {
@@ -359,6 +478,36 @@ func ValidateSpecs() error {
 	for a := range updaterSpecs {
 		if !IsCanonical(a) {
 			errs = append(errs, fmt.Sprintf("updaterSpecs[%q]: canonical label でない", a))
+		}
+	}
+	// alias 表と canonical 集合は同じ agent 群（herdr の Agent enum）を指す。
+	for a := range CanonicalLabels {
+		if len(herdrExecAliases[a]) == 0 {
+			errs = append(errs, fmt.Sprintf("CanonicalLabels[%q] が lookup_agent 表に無い", a))
+		}
+	}
+	for a, aliases := range herdrExecAliases {
+		if !IsCanonical(a) {
+			errs = append(errs, fmt.Sprintf("herdrExecAliases[%q]: canonical label でない", a))
+		}
+		// 表の値は正規化後の形で持つ（大文字や .exe を書くと誰にも一致しない）。
+		for _, al := range aliases {
+			if got := HerdrAgentForExec(al); got != a {
+				errs = append(errs, fmt.Sprintf("herdrExecAliases[%q] の %q が自分に引けない（=%q）", a, al, got))
+			}
+		}
+	}
+	// resume は公認 session を前提にする（herdr は公認組の session しか出さない）。
+	for a := range resumeSpecs {
+		if _, ok := herdrOfficialSources[a]; !ok {
+			errs = append(errs, fmt.Sprintf("resumeSpecs[%q]: herdr の公認 source 表に無い（session が来ない）", a))
+		}
+	}
+	for a := range herdrOfficialSources {
+		_, mirrored := resumeSpecs[a]
+		_, skipped := herdrResumeUnmirrored[a]
+		if !IsCanonical(a) || mirrored == skipped {
+			errs = append(errs, fmt.Sprintf("herdrOfficialSources[%q]: canonical かつ resumeSpecs／herdrResumeUnmirrored のちょうど一方に要る", a))
 		}
 	}
 	// ResumeSpec.Argv0 も alias 表の要素でなければならない（cursor-agent）。

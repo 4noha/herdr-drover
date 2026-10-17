@@ -91,7 +91,7 @@ func cmdClaude(args []string, stdout, stderr io.Writer) error {
 // したい**」が失敗する（↗窓/リモート運用では起こりうる）。
 func cmdAgentShim(agent string, args []string, stdout, stderr io.Writer) error {
 	if !agentid.IsCanonical(agent) {
-		return fmt.Errorf("未知のエージェント種別 %q（canonical label 21 種のいずれか）", agent)
+		return fmt.Errorf("未知のエージェント種別 %q（canonical label %d 種のいずれか）", agent, len(agentid.CanonicalLabels))
 	}
 
 	// 非 TTY×引数あり: herdr を経由せず素のバイナリへプロセス置換する。

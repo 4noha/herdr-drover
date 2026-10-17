@@ -6,7 +6,6 @@ package agentid
 
 import (
 	"runtime"
-	"strings"
 	"testing"
 
 	"github.com/4noha/herdr-drover/internal/herdrapi"
@@ -77,6 +76,19 @@ func TestResolveAgentKindPriority(t *testing.T) {
 			name:     "agent_session が最強（命名・検出が無くても決まる）",
 			id:       Identity{Session: agentSess("codex", "id", "s-1")},
 			wantKind: "codex",
+		},
+		{
+			// herdr 0.9.5 の agy は source が "herdr:antigravity_cli"（agent 名と違う）。
+			// 旧実装は Source=="herdr:"+agent 決め打ちで、この公認 session を捨てていた。
+			name: "agy の公認 session（source=herdr:antigravity_cli）を採用する",
+			id: Identity{Session: herdrapi.AgentSession{
+				Source: "herdr:antigravity_cli", Agent: "agy", Kind: "id", Value: "c-1"}},
+			wantKind: "agy",
+		},
+		{
+			name:     "herdr が受けない組（herdr:agy）は session として採用しない",
+			id:       Identity{Session: agentSess("agy", "id", "c-1")},
+			wantKind: "",
 		},
 		{
 			name:     "シム命名のみ",
@@ -191,7 +203,7 @@ func TestIsDirectAgentInvocation(t *testing.T) {
 		}
 	}
 	// 表に無い kind は常に false（知らないものは触らない）。
-	// ⚠codex は **対応済**（herdr の alias 表に載る canonical 21 種はすべて判定
+	// ⚠codex は **対応済**（herdr の alias 表に載る canonical 全種（v0.9.5 で 24）はすべて判定
 	// できる）。ここで見るのは canonical ですらない文字列。
 	if IsDirectInvocation("nosuch-agent", []string{"/usr/bin/nosuch-agent"}) {
 		t.Error("未対応 kind を直接起動と判定した（推測で触ってはいけない）")
@@ -201,26 +213,31 @@ func TestIsDirectAgentInvocation(t *testing.T) {
 	}
 }
 
-// Windows の実体は `claude.exe`＝拡張子を落として判定する（落とさないと Windows では
-// 全 pane が「直接起動でない」になり restart/update が何もしなかった）。unix では
-// `claude.exe` という名前は claude ではない（exact-match を緩めない）。
+// argv[0] の名前は herdr `normalized_agent_lookup_name` と同じ規則で引く（OS 非依存）。
+// Windows の実体は `claude.exe`＝拡張子を落とさないと全 pane が「直接起動でない」になり
+// restart/update が何もしなかった。npm shim（`codex.cmd`）は `%*` で引数を本体へ渡す
+// ＝直接起動（herdr 0.9.5 自身が `cursor-agent.cmd --resume <v>` で再開する）。
+// 実 herdr 0.9.5 での裏付けは cmd/herdr-drover の TestWindowsHerdrAliasDetection。
 func TestIsDirectInvocationExeSuffix(t *testing.T) {
-	win := runtime.GOOS == "windows"
 	for _, tc := range []struct {
-		argv0 string
-		want  bool
+		kind, argv0 string
+		want        bool
 	}{
-		{`C:\Users\x\.local\bin\claude.exe`, win},
-		{`C:\Users\x\.local\bin\claude.EXE`, win},
-		{`C:\Users\x\AppData\Roaming\npm\codex.cmd`, false}, // ラッパ＝前景は別プロセス
-		{`C:\x\claude-wrapper.exe`, false},
+		{"claude", `C:\Users\x\.local\bin\claude.exe`, true},
+		{"claude", `C:\Users\x\.local\bin\Claude.EXE`, true},
+		{"codex", `C:\Users\x\AppData\Roaming\npm\codex.cmd`, true},
+		{"codex", `C:\Users\x\AppData\Roaming\npm\codex.ps1`, true},
+		{"cursor", `cursor-agent.cmd`, true},
+		{"claude", `C:\x\claude-wrapper.exe`, false},
+		{"claude", `claude.exe.exe`, false}, // 落とす拡張子は 1 個だけ（herdr と同じ）
+		{"claude", `C:\Windows\System32\cmd.exe`, false},
 	} {
-		kind := "claude"
-		if strings.Contains(tc.argv0, "codex") {
-			kind = "codex"
+		if got := IsDirectInvocation(tc.kind, []string{tc.argv0}); got != tc.want {
+			t.Errorf("IsDirectInvocation(%s, %q) = %v, want %v（GOOS=%s）", tc.kind, tc.argv0, got, tc.want, runtime.GOOS)
 		}
-		if got := IsDirectInvocation(kind, []string{tc.argv0}); got != tc.want {
-			t.Errorf("IsDirectInvocation(%s, %q) = %v, want %v（GOOS=%s）", kind, tc.argv0, got, tc.want, runtime.GOOS)
-		}
+	}
+	// シェル経由（argv[0] がシェル）は従来どおり false。
+	if IsDirectInvocation("codex", []string{`C:\Windows\System32\cmd.exe`, "/c", "codex.cmd"}) {
+		t.Error("cmd /c 経由を直接起動と判定した")
 	}
 }

@@ -327,11 +327,13 @@ write が 1 回増えることのみ。
 
 ## 4.2 エージェント種別（canonical label）
 
-herdr が検出する **21 種**（`src/detect/mod.rs agent_label()` から実ソース抽出）:
+herdr が検出する **24 種**（`src/detect/mod.rs agent_label()` から実ソース抽出。
+0.7.4 の 21 種を **v0.9.5 で再照合（2026-10-17）**し qwen / letta / muse が増えた）:
 
 ```
 agy amp claude cline codex copilot cursor devin droid gemini grok
-hermes kilo kimi kiro maki mastracode omp opencode pi qodercli
+hermes kilo kimi kiro letta maki mastracode muse omp opencode pi
+qodercli qwen
 ```
 
 **identity 判定は `internal/agentid.Resolve` に一元化**（shim / restart・update /
@@ -340,7 +342,7 @@ organize / producer が共有）。権威は強い順に:
 | # | 権威 | 供給元 | 備考 |
 |---|---|---|---|
 | 0 | 注入 token | `drover_inj_pc` / `drover_inj_sid` | **最優先で対象外**。reconcile の `mirror_agents` が注入 pane の検出値に `claude` を書くため、後段に置くとリモートの鏡を誤認する |
-| 1 | `agent_session.(source,agent)` | herdr の 14 組 allowlist | 値域が canonical に閉じる。ただし `report_agent_session` は無認証の公開 API＝**偽装不能ではない** |
+| 1 | `agent_session.(source,agent)` | herdr の allowlist（v0.9.5 で 18 組＝`herdrOfficialSources`。**agy だけ source が `herdr:antigravity_cli`**＝`"herdr:"+agent` と決め打たない） | 値域が canonical に閉じる。ただし `report_agent_session` は無認証の公開 API＝**偽装不能ではない** |
 | 2 | シム命名 `<agent>` / `<agent>-N` | drover が慣習的に書く | ユーザーも `herdr agent rename` で書ける同一フィールド |
 | 3 | herdr の検出値 `agent` | プロセス名検出 ∪ hook 申告 | **canonical への exact-match 必須**（未知文字列は捨てる） |
 
@@ -350,13 +352,38 @@ organize / producer が共有）。権威は強い順に:
 
 `internal/agentid/spec.go`。**分岐をコードに散らさずデータで持つ**。
 
-- **ResumeSpec**（herdr `agent_resume.rs plan()` の写し・14 種）— resume 引数の形は
-  4 通り: `--resume <v>`（claude/devin/droid/hermes/qodercli/cursor）／
-  `--session <v>`（kimi/opencode/kilo/pi）／`--thread <v>`（mastracode）／
-  `--resume=<v>`（copilot/omp）／`codex resume <v>`（**位置引数サブコマンド**）。
-  `cursor` だけ argv[0] が `cursor-agent`。`pi`/`omp` は `path` kind も取る。
-  **残り 7 種（agy/amp/cline/gemini/grok/kiro/maki）は resume 原理的に不可**
+- **ResumeSpec**（herdr `agent_resume.rs plan()` の写し。v0.9.5 の 18 分岐のうち
+  letta を除く **17 種**）— resume 引数の形: `--resume <v>`（claude/devin/droid/hermes/
+  qodercli/cursor/**qwen**/**grok**）／`--session <v>`（kimi/opencode/kilo/pi）／
+  `--thread <v>`（mastracode）／`--conversation <v>`（**agy**）／`--resume=<v>`
+  （copilot/omp）／`codex resume <v>`（**位置引数サブコマンド**）。
+  `cursor` だけ argv[0] が `cursor-agent`（herdr 0.9.5 は **Windows では
+  `cursor-agent.cmd`**。drover は稼働 argv[0] を温存するので表は unix 名のまま）。
+  `pi`/`omp` は `path` kind も取る。
+  **非対応 6 種（amp/cline/gemini/kiro/maki/muse）は resume 原理的に不可**
   （herdr が `agent_session` を出さない）＝素起動へ落として loud に報告。
+  **letta は意図的に写さない**（`herdrResumeUnmirrored`）: ref が `default:<agent_id>`
+  なら `letta --conversation default --agent <id>`、それ以外は `--conversation <v>`
+  の 2 形で ResumeSpec に収まらず、平写しすると誤 argv を黙って作る＝非対応扱い。
+  - 0.7.4 → 0.9.5 の差分: qwen 追加、agy・grok（0.7.4 は session 無し）が resume
+    対応に、letta 追加（未写）、cursor の Windows argv[0]。既存 14 種の形は不変。
+    `ValidateSpecs()` が「resume 表 ⊆ 公認 source 表」「公認 source 表の各 agent は
+    resume 表か `herdrResumeUnmirrored` のちょうど一方」を検証する。
+  - **0.9.2+ の自己申告 `resume_argv`**: agent は `pane.report_agent(_session)` に
+    `resume_argv` を添えられ、herdr の**自前復元**は plan() より優先する
+    （`persist/restore.rs`）。値は session.json（`agent_resume`）にだけ残り
+    **pane.get / agent.list に出ない**＝drover の restart/update は従来どおり
+    ResumeSpec で argv を組む（自己申告だけで再開できる表外 agent は drover の
+    restart では素起動・loud）。
+- **herdr 名前ミラー**（`HerdrAgentForExec`・alias 表 `herdrExecAliases`）— herdr
+  `parse_agent_label` と同規則: trim → 小文字 → 拡張子 `.exe/.cmd/.bat/.ps1/.js` を
+  1 個落とす → `/` `\` 両方で basename → alias 表 exact-match（＋muse の
+  `muse-bin-<数字…>`）。**OS 非依存**（herdr と同じ）。`IsDirectInvocation` はこれで
+  argv[0] を引く＝npm shim（`codex.cmd`）も直接起動に数える（shim は `%*` で引数を
+  渡す・herdr 自身が `cursor-agent.cmd --resume` で再開する）。0.9.5 の alias 追加:
+  cline `.cline`／opencode `opencode2`／qwen・letta・muse 一式。実 herdr 0.9.5 で
+  **全 56 名＋`qwen.cmd` shim の検出一致と引数到達**を確認
+  （`TestWindowsHerdrAliasDetection`）。
 - **UpdaterSpec** — `VersionArgv`（nil=版比較 skip）／`UpdateArgv`（nil=更新口なし＝
   再起動のみ）／`Timeout`（**per-agent 予算**。全体に 1 本掛けない）。
   実 CLI で確認した 5 種（claude / codex / cursor / copilot は `<bin> update`＋
@@ -634,7 +661,8 @@ macOS fleet は 0.7.4 のまま＝**両方で動く**ように実装している
 | `pane.report_agent_session` | 許可 `(source, agent)` なら反映 | **前景が当該 agent と検出された pane でないと黙って捨てる**（シェル／別プロセス前景の pane では `ok` なのに `agent_session` が付かない） | 製品は herdr 自身の integration が報告する値を読むだけ＝影響なし。テストは偽 agent を前景に置いて報告する |
 | `events.subscribe` | 購読ごとに過去 event を再送 | **live から始まる**（再送なし） | 製品は event を nudge＋周期 poll backstop で扱う＝影響なし。テストは「作って待つ」を購読確立まで繰り返す |
 | pane の `cwd`（Windows） | — | **末尾 `\` 付き**（`C:\…\001\`）。値は前景プロセスの**実 cwd** | 比較は `filepath.Clean` 後（シムの cwd 一致 attach＝`sameCwd`・organize capture） |
-| launch argv[0]（Windows） | — | 実体は `claude.exe`。herdr は前景 `claude.exe` を `claude` と検出 | `IsDirectInvocation` は Windows のみ `.exe` を落として判定。シムの PATH/既定導入先探索は `<name>.exe`（`.cmd/.ps1` ラッパは前景が別プロセス＝検出に載らないので候補外） |
+| launch argv[0]（Windows） | — | 実体は `claude.exe`。herdr は前景 `claude.exe` を `claude` と検出。**npm shim `qwen.cmd` も `qwen` と検出**（前景は `cmd.exe /c …\qwen.cmd`＝子の本体名は無関係。`%*` で付けた引数も本体へ届く＝実測 `TestWindowsHerdrAliasDetection`） | `IsDirectInvocation` は herdr と同じ正規化（`.exe/.cmd/.bat/.ps1/.js`・OS 非依存＝§4.3）で判定。シムの PATH/既定導入先探索は `<name>.exe` のみ＝**npm 導入（`.cmd`）の agent をシムが見つけられない**（未対応・TODO。旧記述「`.cmd` は検出に載らない」は実測で否定） |
+| agent 表（0.7.4→0.9.5） | 21 種・plan 14 分岐・公認 source 14 組 | **24 種**（qwen/letta/muse）・plan **18 分岐**（qwen/agy/grok/letta）・公認 **18 組**（agy は `herdr:antigravity_cli`）・alias 追加（`.cline`/`opencode2`/新 agent）・cursor の Windows 再開 argv[0] は `cursor-agent.cmd`・agent 自己申告 `resume_argv`（0.9.2+・API に出ない） | spec.go / agentid.go を再照合（§4.2〜4.3）。letta resume は意図的に未写。実機 agent での会話 e2e は未検証（偽 agent で検出のみ確認） |
 | `pane.process_info` の前景（Windows） | — | シェルの子は **agent と検出されたものしか出ない**（非 agent の子が走っていても前景はシェルのまま） | 製品影響なし（reconcile の前景判定は unix 限定）。テストは agent 名の子で観測 |
 | `(herdr:opencode, opencode)` の session 報告 | 反映 | **反映されない**（layout 起動・shell 起動とも。claude/codex は反映） | 製品は読むだけ。テストは codex で代用 |
 | `herdr server stop`（Windows） | — | pane のプロセスツリーを**確実には畳まない**（親の消えた OpenConsole＋pane プロセスが残る） | テストは自 spawn の herdr の子孫を回収（`herdrtree_windows_test.go`） |

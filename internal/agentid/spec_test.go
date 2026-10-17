@@ -14,14 +14,17 @@ func TestValidateSpecs(t *testing.T) {
 	}
 }
 
-// resume 対応は herdr agent_resume.rs plan() の 14 種ちょうど。
-// 残り 7 種は「未実装」ではなく原理的に不可能（herdr が agent_session を出さない）。
+// resume 対応は herdr v0.9.5 agent_resume.rs plan() の 18 分岐から letta を除いた 17 種。
+// 非対応 6 種は「未実装」ではなく原理的に不可能（herdr が agent_session を出さない）。
+// letta は herdr は再開できるが drover は意図的に写さない（herdrResumeUnmirrored）。
 func TestResumeSupportMatchesHerdr(t *testing.T) {
 	want := map[string]bool{
 		"claude": true, "codex": true, "copilot": true, "devin": true,
 		"droid": true, "kimi": true, "mastracode": true, "pi": true,
 		"omp": true, "hermes": true, "opencode": true, "qodercli": true,
 		"kilo": true, "cursor": true,
+		// 0.9.5 で追加（agy / grok は 0.7.4 では agent_session 無し＝非対応だった）
+		"qwen": true, "agy": true, "grok": true,
 	}
 	n := 0
 	for label := range CanonicalLabels {
@@ -33,18 +36,73 @@ func TestResumeSupportMatchesHerdr(t *testing.T) {
 			n++
 		}
 	}
-	if n != 14 {
-		t.Errorf("resume 対応 = %d 種, want 14（herdr agent_resume.rs plan）", n)
+	if n != 17 {
+		t.Errorf("resume 対応 = %d 種, want 17（herdr v0.9.5 agent_resume.rs plan − letta）", n)
 	}
-	// 非対応 7 種を名指しで固定。
-	for _, a := range []string{"agy", "amp", "cline", "gemini", "grok", "kiro", "maki"} {
+	// 非対応を名指しで固定。
+	for _, a := range []string{"amp", "cline", "gemini", "kiro", "maki", "muse", "letta"} {
 		if Resume(a).Supported {
-			t.Errorf("%s は herdr が agent_session を出さない＝resume 不能のはず", a)
+			t.Errorf("%s は resume 非対応のはず", a)
+		}
+	}
+	if _, ok := herdrResumeUnmirrored["letta"]; !ok {
+		t.Error("letta を写さない理由が herdrResumeUnmirrored に無い")
+	}
+}
+
+// herdr の公認 (source, agent) 表（is_official_agent_source・v0.9.5 で 18 組）。
+// agy だけ source が agent 名と違う。
+func TestIsOfficialSession(t *testing.T) {
+	if n := len(herdrOfficialSources); n != 18 {
+		t.Errorf("公認組 = %d, want 18（herdr v0.9.5）", n)
+	}
+	for _, tc := range []struct {
+		source, agent string
+		want          bool
+	}{
+		{"herdr:claude", "claude", true},
+		{"herdr:antigravity_cli", "agy", true},
+		{"herdr:agy", "agy", false},
+		{"herdr:letta", "letta", true},
+		{"herdr:qwen", "qwen", true},
+		{"herdr:gemini", "gemini", false}, // gemini は session を出さない
+		{"herdr:claude", "codex", false},
+		{"", "", false},
+	} {
+		if got := IsOfficialSession(tc.source, tc.agent); got != tc.want {
+			t.Errorf("IsOfficialSession(%q, %q) = %v, want %v", tc.source, tc.agent, got, tc.want)
 		}
 	}
 }
 
-// argv 組み立てが herdr の plan() と同じ形になること（全 14 種）。
+// 名前の正規化は herdr parse_agent_label と同一（OS 非依存）: 小文字化・拡張子 1 個・
+// `/` と `\` 両方で basename・muse の版付き実体。
+func TestHerdrAgentForExec(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"claude", "claude"},
+		{"  Claude.EXE ", "claude"},
+		{`C:\Users\x\AppData\Roaming\npm\codex.cmd`, "codex"},
+		{"/usr/local/bin/cursor-agent", "cursor"},
+		{"cursor-agent.cmd", "cursor"},
+		{"opencode2", "opencode"},   // 0.9.5 で追加
+		{"/home/u/.cline", "cline"}, // 0.9.5 で追加
+		{"qwen code", "qwen"},       // 新 agent
+		{"letta-code.js", "letta"},  // 新 agent
+		{"muse-cli.ps1", "muse"},    // 新 agent
+		{"/opt/muse/muse-bin-0.1.0-R708.1", "muse"},
+		{"muse-bin", ""},       // 版が無い
+		{"muse-binary", ""},    // 直後が数字でない
+		{"claude.exe.exe", ""}, // 落とす拡張子は 1 個
+		{"my-codex-helper", ""},
+		{"", ""},
+	} {
+		if got := HerdrAgentForExec(tc.in); got != tc.want {
+			t.Errorf("HerdrAgentForExec(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// argv 組み立てが herdr の plan() と同じ形になること（写している 17 種すべて）。
 func TestBuildResumeMatchesHerdrPlan(t *testing.T) {
 	for _, tc := range []struct {
 		agent string
@@ -64,6 +122,10 @@ func TestBuildResumeMatchesHerdrPlan(t *testing.T) {
 		{"copilot", []string{"copilot", "--resume=V"}},
 		{"omp", []string{"omp", "--resume=V"}},
 		{"codex", []string{"codex", "resume", "V"}},
+		// 0.9.5 で追加
+		{"qwen", []string{"qwen", "--resume", "V"}},
+		{"grok", []string{"grok", "--resume", "V"}},
+		{"agy", []string{"agy", "--conversation", "V"}},
 	} {
 		// argv[0] は Spec の Argv0（あれば）／なければ agent 名。
 		argv0 := tc.agent
@@ -175,7 +237,7 @@ func TestSupportsKind(t *testing.T) {
 	}
 }
 
-// IsDirectInvocation は **21 種すべて**で機能しなければならない。
+// IsDirectInvocation は **canonical 全種（v0.9.5 で 24）**で機能しなければならない。
 // 実装当初は claude だけの独自テーブルを見ており、codex / cursor の pane は
 // 「対象に入るが必ず skip」という静かな不発になっていた（restart-agent-session
 // --agent codex が永久に何もしない）。判定表は herdr の lookup_agent と同一にする。
