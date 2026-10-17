@@ -9,6 +9,8 @@ package main
 
 import (
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -145,24 +147,121 @@ func TestLocalViewObserveFramesAndLockFree(t *testing.T) {
 	}
 }
 
+// TestObsGenReadyClosesOnFirstFrame は実 herdr で observe を張ると gen.ready が
+// すぐ close することを検証する（firstFrameTimeout が正常系で誤爆しないこと
+// の担保）。
+func TestObsGenReadyClosesOnFirstFrame(t *testing.T) {
+	sock := startHerdrForTest(t)
+	api := herdrapi.New(sock)
+	ws, err := api.WorkspaceCreate()
+	if err != nil {
+		t.Fatalf("workspace.create: %v", err)
+	}
+	paneID := ws.RootPane.PaneID
+
+	gen, err := spawnStreamGen("herdr", streamObserve, paneID, sock, 40, 100, &capBuf{})
+	if err != nil {
+		t.Fatalf("spawnStreamGen: %v", err)
+	}
+	defer gen.stop()
+
+	select {
+	case <-gen.ready:
+	case <-time.After(10 * time.Second):
+		t.Fatal("実 herdr で observe しても gen.ready が close しない（正常系で firstFrameTimeout が誤爆する）")
+	}
+}
+
+// TestObsGenReadyBlocksWithoutFrames は2026-10-16に実機再現したデッドロック
+// （同 cwd への同時 attach で herdr サーバが応答を返さなくなり、プロセスは
+// 生きたまま terminal.frame が一切来ず、黒画面のまま無期限に固着する）を
+// 疑似再現する。fake herdr（起動はするが stdout に何も書かず生き続ける stub）
+// を使い、gen.ready も gen.done も発火しないこと＝firstFrameTimeout の監視が
+// 必要になる状況そのものを確認する。
+func TestObsGenReadyBlocksWithoutFrames(t *testing.T) {
+	dir := t.TempDir()
+	fakeHerdr := filepath.Join(dir, "herdr")
+	// 引数は無視し、何も出力せず長時間生き続けるだけの stub
+	// （実機の「herdr サーバが応答しない」状態の最小再現）。
+	if err := os.WriteFile(fakeHerdr, []byte("#!/bin/sh\nexec sleep 300\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	gen, err := spawnStreamGen(fakeHerdr, streamObserve, "p1", "/nonexistent-sock", 40, 100, &capBuf{})
+	if err != nil {
+		t.Fatalf("spawnStreamGen: %v", err)
+	}
+	defer gen.stop()
+
+	select {
+	case <-gen.ready:
+		t.Fatal("frame を一切出さない stub なのに gen.ready が close した")
+	case <-gen.done:
+		t.Fatal("frame を一切出さない stub なのに gen.done が close した（プロセスが生きているはず）")
+	case <-time.After(2 * time.Second):
+		// 期待どおり：どちらも発火しない＝firstFrameTimeout が無ければここで
+		// runLocalView は無期限に固着する（実機バグの再現条件）。
+	}
+}
+
+// TestRunLocalViewTimesOutWithoutFrames は runLocalView 全体（select ループ
+// 込み）で、frame が一切来ない相手（fake herdr stub）に対して無期限に固着せず
+// firstFrameTimeout でエラーを返して戻ることを検証する。2026-10-16 実機再現
+// （同 cwd 同時 attach で herdr サーバが応答不能になり黒画面のまま数分以上
+// 固着した報告）への回帰テスト。
+func TestRunLocalViewTimesOutWithoutFrames(t *testing.T) {
+	old := firstFrameTimeout
+	firstFrameTimeout = 300 * time.Millisecond
+	defer func() { firstFrameTimeout = old }()
+
+	dir := t.TempDir()
+	fakeHerdr := filepath.Join(dir, "herdr")
+	if err := os.WriteFile(fakeHerdr, []byte("#!/bin/sh\nexec sleep 300\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	tty := openPtySlaveForTest(t)
+	api := herdrapi.New("/nonexistent-sock")
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- runLocalView(api, "p1", fakeHerdr, tty, tty, tty) }()
+
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("frame が一切来ないのに runLocalView が成功扱いで戻った")
+		}
+		if !strings.Contains(err.Error(), "タイムアウト") {
+			t.Fatalf("エラー内容がタイムアウトだと分からない: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("firstFrameTimeout（300ms）を大幅に超えても runLocalView が戻らない＝デッドロック再発")
+	}
+}
+
 // TestPickStreamMode は自動 min の決定的分岐（純関数）を機械検証する。
 // ローカルが grid より縦に小さいときだけ control（縮小＋ロック）、それ以外は
-// observe（ロック非取得）、grid 不明(0)は安全側 observe。
+// observe（ロック非取得）、grid 不明(0)は安全側 observe。busy=true は grid 比較を
+// 無視して常に observe（2026-10-13 実機再現: busy pane への control が黒画面＋
+// agent_status unknown 固着を起こした。localview.go 冒頭コメント参照）。
 func TestPickStreamMode(t *testing.T) {
 	cases := []struct {
 		name                string
 		localRows, gridRows int
+		busy                bool
 		want                string
 	}{
-		{"ローカルが grid より小さい→control（縮小）", 30, 112, streamControl},
-		{"ローカルが grid より大きい→observe（メイン優先）", 120, 112, streamObserve},
-		{"同値→observe（余白ゼロ・ロック不要）", 40, 40, streamObserve},
-		{"grid 不明(0)→observe（安全側・ロック非取得）", 30, 0, streamObserve},
-		{"grid 負値→observe（安全側）", 30, -1, streamObserve},
+		{"ローカルが grid より小さい→control（縮小）", 30, 112, false, streamControl},
+		{"ローカルが grid より大きい→observe（メイン優先）", 120, 112, false, streamObserve},
+		{"同値→observe（余白ゼロ・ロック不要）", 40, 40, false, streamObserve},
+		{"grid 不明(0)→observe（安全側・ロック非取得）", 30, 0, false, streamObserve},
+		{"grid 負値→observe（安全側）", 30, -1, false, streamObserve},
+		{"busy＋ローカルが grid より小さい→observe（control 禁止が優先）", 30, 112, true, streamObserve},
+		{"busy＋grid 不明→observe（従来と同じ結論だが busy 経路を通る）", 30, 0, true, streamObserve},
 	}
 	for _, c := range cases {
-		if got := pickStreamMode(c.localRows, c.gridRows); got != c.want {
-			t.Errorf("%s: pickStreamMode(%d,%d)=%q want %q", c.name, c.localRows, c.gridRows, got, c.want)
+		if got := pickStreamMode(c.localRows, c.gridRows, c.busy); got != c.want {
+			t.Errorf("%s: pickStreamMode(%d,%d,%v)=%q want %q", c.name, c.localRows, c.gridRows, c.busy, got, c.want)
 		}
 	}
 }
@@ -195,10 +294,11 @@ func TestLocalViewControlShrinksGridWhenLocalSmaller(t *testing.T) {
 		t.Skipf("初期 grid が小さすぎて縮小差分を作れない（r0=%d）", r0)
 	}
 
-	// pane より確実に小さいローカルサイズ。pickStreamMode は control を選ぶ。
+	// pane より確実に小さいローカルサイズ。pickStreamMode は control を選ぶ
+	// （この test pane は agent が付かない素の workspace root＝busy=false）。
 	localRows := r0 - 6
-	if got := pickStreamMode(localRows, r0); got != streamControl {
-		t.Fatalf("pickStreamMode(%d,%d)=%q want control", localRows, r0, got)
+	if got := pickStreamMode(localRows, r0, false); got != streamControl {
+		t.Fatalf("pickStreamMode(%d,%d,false)=%q want control", localRows, r0, got)
 	}
 
 	out := &capBuf{}
