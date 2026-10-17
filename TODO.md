@@ -58,11 +58,54 @@ install.ps1 を `-LocalPackagePath` で実行・zip は GitHub digest と sha256
   OS 共通コード。**実機（この PC）へのデプロイはまだ**（↗窓 が初めて有効になる）。
 - BUG-6 の注入 pane 復活は POSIX シェル前提＝Windows では何もしない側に倒れる。
 
-**残（Windows のテスト赤・全て harness 側）**: `cmd/herdr-drover` の実 herdr テスト約
-40 本が **sh スクリプトの偽 claude/codex**（Windows では実行不可 "not a valid Win32
-application"）に依存。偽 agent を Windows で作る方式（cmd.exe 複製は argv が変わる・
-新規 go build の stub は SAC に弾かれ得る）を決めて移植する必要がある。
-`test/`・`internal/session`・`internal/commands` のテストは `!windows` のまま。
+**Windows のテスト赤の解消（2026-10-17・別セッション・未コミット）**: `go test ./cmd/herdr-drover`
+が **Windows 実 herdr 0.9.5 で全緑**（198 PASS・SKIP 5 は全て環境由来＝下記）。
+`GOOS=darwin|linux go vet ./...` clean。unix の偽 agent は従来の sh スクリプトをバイト同一で書く。
+- **偽 agent 方式**（`cmd/herdr-drover/stubagent_test.go`）: Windows では**テストバイナリ自身**を
+  `<name>.exe` に複製し、隣の spec（JSON）を `TestMain` が見つけたら stub として振る舞う
+  （起動マーカ追記・stdout・`$1`/任意 argv 一致の応答と exit code・sleep）。SAC は通る
+  （go test のバイナリと同一内容）。前景 argv＝launch argv のまま・herdr が `claude.exe`→
+  claude と検出することを `TestWindowsStubAgentIsRealAgent` で実測固定。ハードリンク不可
+  （実行中バイナリと実体共有で消せない）。helper: `writeAgentStub`/`sleepStub`/
+  `sleeperArgv`（非 agent の生存プロセス）/`wrapperArgv`（`%ComSpec% /c`）。
+- **後始末**（`status_test.go`・`herdrtree_windows_test.go`）: herdr 0.9.5 は stop で pane の
+  プロセスツリーを確実には畳まず、**親の消えた OpenConsole＋pane プロセスが残る**（実行の
+  たびに溜まっていた）。孤児がテストの TempDir（pane cwd）を握り間欠 FAIL → 自分が spawn
+  した herdr の子孫だけ回収。さらに testing は**最初の** `t.TempDir()` で削除 Cleanup を
+  1 個だけ登録する（LIFO）ので、`startHerdrForTest` で先に 1 回呼び、削除を herdr 停止の
+  後へ回す（Go 1.26 の TempDir 削除再試行は効かなかった）。
+- **update 系テストの安全化**: 解決が PATH へ退行すると開発機の**本物の `claude update`** を
+  走らせ得た（この PC は `~/.local/bin/claude.exe` が PATH 上）。`hideRealAgentBins` で実
+  エージェントの dir を PATH から外し、update-all は stub の dir を足す（実機の導入有無にも
+  依存しなくなった）。
+- **テストが見つけた製品バグ（Windows 限定・旧コードで FAIL 確認済み）**:
+  1. 🔴 `agentid.IsDirectInvocation` が `claude.exe` を claude と認めず、**restart/update が
+     Windows の全 pane を「直接起動でない」で skip**していた → `.exe` を落として判定（unix は
+     exact のまま。`TestIsDirectInvocationExeSuffix`）。
+  2. 🔴 シムの `pathCandidates`/`lookupAgentBin`（と `resolveClaudeBin`）が unix の実行ビットで
+     判定＝**Windows では `claude.exe` を一切見つけられずシムが常に失敗** → `agentExeName`/
+     `isExecFile`（platform_*.go）。`.cmd/.ps1` ラッパは前景が別プロセスで検出に載らない＝候補外。
+     実機の `~/.local/bin/claude.exe` を解決→herdr が claude と検出することを
+     `TestInstalledAgentsAreDetectedByHerdr` で実測（PATH を隠さない実行で PASS）。
+  3. 🔴 シムの cwd 一致 attach が**Windows で一度も成立せず毎回新 Tab**（herdr の pane cwd は末尾
+     `\` 付き）→ `sameCwd`（Clean 比較）。organize capture の表示/集約キーも Clean。
+- **0.9.5 の新しい実測事実**（SPEC.md §5.2 に追記済み）: shell の子は agent と検出された
+  もの以外 `foreground_processes` に出ない（Windows）／`(herdr:opencode, opencode)` の session
+  報告は反映されない／events は再送しない（organize の stale バックログ経路は protocol<22 のみ
+  検証）／検出なし pane は命名できない（organize capture の「(a) 命名のみ」経路は 0.9.x に存在
+  しない＝作れないこと自体を検証）／powershell は前景に居てもプロンプト表示まで ~1.5s 入力を
+  捨てる（`waitShellReady`）。
+- SKIP 5（Windows・正当）: symlink 権限なし 2（開発者モード無し）・`ps eww` 無し 1・helper
+  process 1・`TestInstalledAgentsAreDetectedByHerdr`（PATH に実エージェントが無い環境のみ）。
+- 🧹 この PC に**前セッション由来と思われる孤児**（19:33 起動の OpenConsole.exe 15512＋
+  powershell.exe 7428・親 10200 不在・テスト用 release パス）が残っている。本セッション由来の
+  孤児（20:18/20:26）は PID 指定で回収済み。19:33 分は出所未確定のため未処置。
+
+**残**: `test/`・`internal/session`・`internal/commands` のテストは `!windows` のまま。
+`reconcile_test.go`/`reconcilelive_test.go`/`attachrefresh_unix_test.go` も `unix` 限定（BUG-6
+復活経路が POSIX シェル前提）。`main.go` の argv[0] multi-call（`claude` という名前のシム）は
+Windows の `claude.exe` を認識しない（未対応・未検証）。
+
 
 ### 2026-10-16: MCP Phase 2（画面取得/入力/中断・last_seen）実装・未デプロイ
 

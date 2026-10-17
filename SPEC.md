@@ -633,7 +633,12 @@ macOS fleet は 0.7.4 のまま＝**両方で動く**ように実装している
 | `agent.rename` の target | 任意 pane | **agent と認識された pane のみ**（それ以外は `agent_not_found`） | 生成直後は前景検出まで約 1 秒＝`AgentRename` が `agent_not_found` の間だけ最大 10 秒再試行（シム・restart の命名） |
 | `pane.report_agent_session` | 許可 `(source, agent)` なら反映 | **前景が当該 agent と検出された pane でないと黙って捨てる**（シェル／別プロセス前景の pane では `ok` なのに `agent_session` が付かない） | 製品は herdr 自身の integration が報告する値を読むだけ＝影響なし。テストは偽 agent を前景に置いて報告する |
 | `events.subscribe` | 購読ごとに過去 event を再送 | **live から始まる**（再送なし） | 製品は event を nudge＋周期 poll backstop で扱う＝影響なし。テストは「作って待つ」を購読確立まで繰り返す |
-| pane の `cwd`（Windows） | — | **末尾 `\` 付き**（`C:\…\001\`） | 比較は `filepath.Clean` 後 |
+| pane の `cwd`（Windows） | — | **末尾 `\` 付き**（`C:\…\001\`）。値は前景プロセスの**実 cwd** | 比較は `filepath.Clean` 後（シムの cwd 一致 attach＝`sameCwd`・organize capture） |
+| launch argv[0]（Windows） | — | 実体は `claude.exe`。herdr は前景 `claude.exe` を `claude` と検出 | `IsDirectInvocation` は Windows のみ `.exe` を落として判定。シムの PATH/既定導入先探索は `<name>.exe`（`.cmd/.ps1` ラッパは前景が別プロセス＝検出に載らないので候補外） |
+| `pane.process_info` の前景（Windows） | — | シェルの子は **agent と検出されたものしか出ない**（非 agent の子が走っていても前景はシェルのまま） | 製品影響なし（reconcile の前景判定は unix 限定）。テストは agent 名の子で観測 |
+| `(herdr:opencode, opencode)` の session 報告 | 反映 | **反映されない**（layout 起動・shell 起動とも。claude/codex は反映） | 製品は読むだけ。テストは codex で代用 |
+| `herdr server stop`（Windows） | — | pane のプロセスツリーを**確実には畳まない**（親の消えた OpenConsole＋pane プロセスが残る） | テストは自 spawn の herdr の子孫を回収（`herdrtree_windows_test.go`） |
+| 既定シェル pane への入力（Windows） | — | powershell は前景に居てもプロンプト表示まで約 1.5 秒入力を捨てる | テストは前景＋プロンプト表示を待って送る（`waitShellReady`） |
 | socket（Windows） | — | named pipe。pipe 名＝socket パス文字列。既定パスは `XDG_CONFIG_HOME` > `%APPDATA%` 系の `herdr\herdr.sock` | `dial_windows.go` |
 | 既定シェル（Windows） | — | pwsh があれば pwsh、無ければ Windows PowerShell | BUG-6 の復活経路（シェル名表＋sh quote）は Windows では**触らない側に倒れる**（未対応・下記） |
 

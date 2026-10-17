@@ -9,7 +9,6 @@ package main
 
 import (
 	"bytes"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -277,27 +276,22 @@ func TestSummarizeRestart(t *testing.T) {
 // 同名でも「別バイナリ」を作れる（曖昧判定のテストが成立する）。
 func writeStubClaude(t *testing.T) string {
 	t.Helper()
-	stub := filepath.Join(t.TempDir(), "claude")
-	if err := os.WriteFile(stub, []byte("#!/bin/sh\nexec sleep 300\n"), 0o755); err != nil {
-		t.Fatalf("stub 作成: %v", err)
-	}
-	return stub
+	return sleepStub(t, filepath.Join(t.TempDir(), "claude"), "#!/bin/sh\nexec sleep 300\n", 300)
 }
 
 // writeResumeRejectingStub は「--resume を渡されたら即 exit 1」する stub を作る
 // ＝会話 jsonl が消えている claude の実挙動（"No conversation found"）の再現。
 func writeResumeRejectingStub(t *testing.T) string {
 	t.Helper()
-	stub := filepath.Join(t.TempDir(), "claude")
 	script := "#!/bin/sh\n" +
 		"for a in \"$@\"; do\n" +
 		"  if [ \"$a\" = \"--resume\" ]; then echo 'No conversation found' >&2; exit 1; fi\n" +
 		"done\n" +
 		"exec sleep 300\n"
-	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
-		t.Fatalf("stub 作成: %v", err)
-	}
-	return stub
+	return writeAgentStub(t, filepath.Join(t.TempDir(), "claude"), script, stubSpec{
+		AnyArg:   map[string]stubReply{"--resume": {Stderr: "No conversation found", Exit: 1}},
+		SleepSec: 300,
+	})
 }
 
 // 復元できない会話 uuid（jsonl 消失）を渡しても **pane を消したまま終わらせない**。
@@ -848,26 +842,41 @@ func TestRestartSkipMessageUsesActualAgentKind(t *testing.T) {
 	api := herdrapi.New(sock)
 
 	// launch argv を持たない pane（＝workspace の root pane は shell）を用意し、
-	// そこに opencode の identity を報告する＝実運用の「shell から起動した」形。
+	// そこから claude 以外のエージェントを起動する＝実運用の「shell から起動した」形。
+	//
+	// 種別は codex（実バグは opencode で起きたが、検証している性質＝「claude 以外の
+	// 種別名が出て claude が出ない」は種別に依らない）。herdr 0.9.5 は
+	// (herdr:opencode, opencode) の session 報告を layout 起動・shell 起動のどちらでも
+	// 反映しない（claude/codex は反映＝2026-10-17 実測）＝opencode では identity が作れない。
+	const kind, ref = "codex", "019f9964-f4af-7a72-a999-7dc3f64c521e"
 	ws, err := api.WorkspaceCreate()
 	if err != nil {
 		t.Fatalf("workspace.create: %v", err)
 	}
 	pane := ws.RootPane.PaneID
-	if err := api.ReportAgent(pane, "test-native", "opencode", "idle"); err != nil {
+	// herdr 0.9.x は report_agent_session を**前景が agent と検出された pane**でしか
+	// 受けない（ok を返して黙って捨てる・SPEC.md §5.2）。素シェルへの報告だけでは
+	// identity が付かないので、シェルから stub を起動して検出させる（exec しない＝
+	// sh が codex 名のまま前景に残る形・orgFakeClaude と同じ）。
+	stub := sleepStub(t, filepath.Join(t.TempDir(), kind), "#!/bin/sh\nsleep 300\n", 300)
+	waitShellReady(t, api, pane)
+	if err := api.PaneSendText(pane, stub+"\r"); err != nil {
+		t.Fatalf("pane.send_text: %v", err)
+	}
+	if err := api.ReportAgent(pane, "test-native", kind, "idle"); err != nil {
 		t.Fatalf("report_agent: %v", err)
 	}
-	if err := api.ReportAgentSession(pane, "herdr:opencode", "opencode",
-		"ses_0453f4bacffeVovPPMlEdXPNTj"); err != nil {
-		t.Fatalf("report_agent_session: %v", err)
-	}
-	waitCond(t, 15*time.Second, "opencode identity が反映", func() bool {
+	// 検出（非同期・~1s）前の session 報告は捨てられ得る＝反映されるまで報告し直す。
+	waitCond(t, 15*time.Second, kind+" identity が反映", func() bool {
+		if err := api.ReportAgentSession(pane, "herdr:"+kind, kind, ref); err != nil {
+			t.Fatalf("report_agent_session: %v", err)
+		}
 		p, e := api.PaneGet(pane)
-		return e == nil && p != nil && p.Agent == "opencode" && p.AgentSession.Value != ""
+		return e == nil && p != nil && p.Agent == kind && p.AgentSession.Value != ""
 	})
 
 	var log bytes.Buffer
-	results, err := restartClaudePanes(api, restartOptions{SID: pane, Agent: "opencode"}, &log)
+	results, err := restartClaudePanes(api, restartOptions{SID: pane, Agent: kind}, &log)
 	if err != nil {
 		t.Fatalf("restartClaudePanes: %v", err)
 	}
@@ -875,7 +884,7 @@ func TestRestartSkipMessageUsesActualAgentKind(t *testing.T) {
 		t.Fatalf("results = %+v（launch argv 無しは skip のはず）", results)
 	}
 	d := results[0].Detail
-	if !strings.Contains(d, "opencode") {
+	if !strings.Contains(d, kind) {
 		t.Errorf("skip 理由に実際の種別名が出ていない: %q", d)
 	}
 	if strings.Contains(d, "claude") {

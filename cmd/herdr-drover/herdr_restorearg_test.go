@@ -14,8 +14,8 @@ package main
 //     `alias claude` が効く＝drover シムが走る）。BUG-7 の入口はこちら。
 
 import (
-	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -28,17 +28,23 @@ func TestHerdrPersistsLaunchArgvNotForegroundProcess(t *testing.T) {
 	api := herdrapi.New(sock)
 	dir := t.TempDir()
 
+	// Windows は exec が無い＝stub が 600 秒生存する（launch argv と前景が同一
+	// プロセスになるが、(1) は layout.export の記録を見るので同じ契約を検証できる）。
 	mk := func(name, body string) string {
-		p := filepath.Join(dir, name)
-		if err := os.WriteFile(p, []byte(body), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		return p
+		return sleepStub(t, filepath.Join(dir, name), body, 600)
 	}
 	// launch argv 用（自身を exec で置き換える＝前景は argv と別物になる）。
 	launched := mk("PROBE-LAUNCHARGV", "#!/bin/sh\nexec sleep 600\n")
 	// あとから前景に来る子プロセス（本番のシム相当）。
-	child := mk("PROBE-SHELLCHILD", "#!/bin/sh\nsleep 600\n")
+	// ⚠Windows の herdr 0.9.5 は pane.process_info の前景に、シェルの子のうち**agent と
+	// 検出されたものしか出さない**（PROBE-SHELLCHILD.exe は実在するのに前景はシェルの
+	// まま＝2026-10-17 実測）。BUG-7 の実形（素シェルで claude を打つ）どおり claude 名の
+	// 子で代用する（検証対象は同じ＝シェル pane の command が記録されないこと）。
+	childName := "PROBE-SHELLCHILD"
+	if runtime.GOOS == "windows" {
+		childName = "claude"
+	}
+	child := mk(childName, "#!/bin/sh\nsleep 600\n")
 
 	ws, err := api.WorkspaceCreate()
 	if err != nil {
@@ -62,16 +68,13 @@ func TestHerdrPersistsLaunchArgvNotForegroundProcess(t *testing.T) {
 		return strings.Join(s, " | ")
 	}
 	// ⚠シェル初期化（rbenv init 等）の最中に送ると入力が消える＝「記録されない」と
-	// 誤読する。前景がシェルだけになるまで待ってから送る。
-	waitCond(t, 30*time.Second, "シェル初期化の完了（前景がシェルだけ）", func() bool {
-		pi, err := api.PaneProcessInfo(shellPane)
-		return err == nil && pi != nil && len(pi.ForegroundProcesses) == 1
-	})
+	// 誤読する。入力を受けられるまで待ってから送る。
+	waitShellReady(t, api, shellPane)
 	if err := api.PaneSendText(shellPane, child+" --resume REF\r"); err != nil {
 		t.Fatal(err)
 	}
 	waitCond(t, 30*time.Second, "シェル pane の前景に子プロセスが現れる", func() bool {
-		return strings.Contains(fgOf(shellPane), "PROBE-SHELLCHILD")
+		return strings.Contains(fgOf(shellPane), childName)
 	})
 	waitCond(t, 30*time.Second, "launch argv pane の前景が立ち上がる", func() bool {
 		return fgOf(argvPane) != ""

@@ -56,6 +56,22 @@ func waitCond(t *testing.T, timeout time.Duration, desc string, fn func() bool) 
 	t.Fatalf("timeout: %s", desc)
 }
 
+// waitShellReady はシェル pane が入力を受けられる状態（前景がシェルだけ＋画面に
+// プロンプトが出ている）になるまで待つ。⚠シェル初期化（rbenv init 等）の最中に
+// 送ると入力が消える。Windows の powershell は起動直後から前景に 1 個だけ居るが
+// プロンプト表示まで ~1.5s 入力を捨てる（実測）＝前景だけでは判定できない。
+func waitShellReady(t *testing.T, api *herdrapi.Client, pane string) {
+	t.Helper()
+	waitCond(t, 30*time.Second, "シェル初期化の完了（前景がシェルだけ＋プロンプト表示）", func() bool {
+		pi, err := api.PaneProcessInfo(pane)
+		if err != nil || pi == nil || len(pi.ForegroundProcesses) != 1 {
+			return false
+		}
+		r, err := api.PaneRead(pane, "visible")
+		return err == nil && r != nil && strings.TrimSpace(r.Text) != ""
+	})
+}
+
 func TestDispatchVersion(t *testing.T) {
 	code, out, _ := runCapture(t, "version")
 	if code != 0 {

@@ -25,7 +25,6 @@ func writeUpdatableStub(t *testing.T, dir, from, to string) (bin, verFile string
 	if err := os.WriteFile(verFile, []byte(from), 0o644); err != nil {
 		t.Fatalf("version.txt: %v", err)
 	}
-	bin = filepath.Join(dir, "claude")
 	script := "#!/bin/sh\n" +
 		"VF=" + verFile + "\n" +
 		"case \"$1\" in\n" +
@@ -33,10 +32,33 @@ func writeUpdatableStub(t *testing.T, dir, from, to string) (bin, verFile string
 		"  update) echo \"updated to " + to + "\"; printf %s '" + to + "' > \"$VF\"; exit 0 ;;\n" +
 		"esac\n" +
 		"exec sleep 300\n"
-	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
-		t.Fatalf("stub 作成: %v", err)
-	}
+	bin = writeAgentStub(t, filepath.Join(dir, "claude"), script, stubSpec{
+		Arg1: map[string]stubReply{
+			"--version": {StdoutFile: verFile},
+			"update":    {Stdout: "updated to " + to, WriteFile: verFile, WriteBody: to},
+		},
+		SleepSec: 300,
+	})
 	return bin, verFile
+}
+
+// writeFailingUpdateStub は `--version` は答えるが `update` が非 0 で終わる stub
+// claude（回線断で更新できない実状況の再現）。
+func writeFailingUpdateStub(t *testing.T, path string) string {
+	t.Helper()
+	script := "#!/bin/sh\n" +
+		"case \"$1\" in\n" +
+		"  --version) echo '2.1.214'; exit 0 ;;\n" +
+		"  update) echo 'network unreachable' >&2; exit 1 ;;\n" +
+		"esac\n" +
+		"exec sleep 300\n"
+	return writeAgentStub(t, path, script, stubSpec{
+		Arg1: map[string]stubReply{
+			"--version": {Stdout: "2.1.214"},
+			"update":    {Stderr: "network unreachable", Exit: 1},
+		},
+		SleepSec: 300,
+	})
 }
 
 // 主経路: 稼働 pane の argv[0] を権威に claude を更新し、続けてセッションを
@@ -47,6 +69,7 @@ func TestUpdateClaudeUpdatesThenRestarts(t *testing.T) {
 	api := herdrapi.New(sock)
 	work := t.TempDir()
 	bin, verFile := writeUpdatableStub(t, work, "2.1.214", "2.1.219")
+	hideRealAgentBins(t) // PATH 退行時に実機の claude を更新しない（stub も PATH に置かない）
 	cwd := t.TempDir()
 
 	wsID, err := currentWorkspaceID(api)
@@ -104,6 +127,7 @@ func TestUpdateClaudeRestartsEvenWhenAlreadyLatest(t *testing.T) {
 	api := herdrapi.New(sock)
 	work := t.TempDir()
 	bin, _ := writeUpdatableStub(t, work, "2.1.219", "2.1.219")
+	hideRealAgentBins(t)
 	cwd := t.TempDir()
 
 	wsID, err := currentWorkspaceID(api)
@@ -197,10 +221,7 @@ func TestResolveClaudeBin(t *testing.T) {
 // （実測 2026-07-25: ノート PC の遅い回線で 5 分上限に当たり、生エラーからは
 // 回線が遅いのか claude が壊れたのか判別できなかった）。
 func TestRunClaudeUpdateReportsTimeoutReason(t *testing.T) {
-	bin := filepath.Join(t.TempDir(), "claude")
-	if err := os.WriteFile(bin, []byte("#!/bin/sh\nsleep 30\n"), 0o755); err != nil {
-		t.Fatalf("stub 作成: %v", err)
-	}
+	bin := sleepStub(t, filepath.Join(t.TempDir(), "claude"), "#!/bin/sh\nsleep 30\n", 30)
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 	_, err := runClaudeUpdate(ctx, "claude", bin)
@@ -218,16 +239,8 @@ func TestUpdateClaudeDoesNotRestartWhenUpdateFails(t *testing.T) {
 	sock := startHerdrForTest(t)
 	api := herdrapi.New(sock)
 	work := t.TempDir()
-	bin := filepath.Join(work, "claude")
-	script := "#!/bin/sh\n" +
-		"case \"$1\" in\n" +
-		"  --version) echo '2.1.214'; exit 0 ;;\n" +
-		"  update) echo 'network unreachable' >&2; exit 1 ;;\n" +
-		"esac\n" +
-		"exec sleep 300\n"
-	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
-		t.Fatalf("stub 作成: %v", err)
-	}
+	bin := writeFailingUpdateStub(t, filepath.Join(work, "claude"))
+	hideRealAgentBins(t)
 	cwd := t.TempDir()
 
 	wsID, err := currentWorkspaceID(api)
@@ -280,7 +293,7 @@ func TestClaudeBinsIgnoresRelativeAndWrapperArgv(t *testing.T) {
 	}
 	reportTestSession(t, api, paneAbs, "claude", "aaaaaaaa-1111-4111-8111-751635459137")
 	// (b) herdr 側で wrapper 起動された pane（argv[0] が claude ではない）
-	paneWrap, err := applyClaudeTab(api, wsID, "wrap", []string{"/bin/sh", "-c", stub}, cwd)
+	paneWrap, err := applyClaudeTab(api, wsID, "wrap", wrapperArgv(stub), cwd)
 	if err != nil {
 		t.Fatalf("layout.apply(wrapper): %v", err)
 	}
@@ -325,7 +338,7 @@ func TestRestartSkipsWrapperInvocation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("currentWorkspaceID: %v", err)
 	}
-	pane, err := applyClaudeTab(api, wsID, "wrap", []string{"/bin/sh", "-c", stub}, cwd)
+	pane, err := applyClaudeTab(api, wsID, "wrap", wrapperArgv(stub), cwd)
 	if err != nil {
 		t.Fatalf("layout.apply: %v", err)
 	}

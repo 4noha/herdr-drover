@@ -64,6 +64,7 @@ package agentid
 import (
 	"fmt"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -153,13 +154,28 @@ func IsDirectInvocation(kind string, argv []string) bool {
 	if len(argv) == 0 {
 		return false
 	}
-	base := filepath.Base(argv[0])
+	base := execBaseName(argv[0])
 	for _, want := range herdrExecAliases[kind] {
 		if base == want {
 			return true
 		}
 	}
 	return false
+}
+
+// execBaseName は argv[0] の basename。Windows は実行ファイル拡張子 .exe（大小無視）を
+// 落とす: 実体は `claude.exe` で、herdr 0.9.x も前景 `claude.exe` を claude と検出する
+// （実測）。落とさないと Windows では**全 pane が「直接起動でない」で restart/update
+// から除外**されていた（2026-10-17 実 herdr 0.9.5 で発覚）。.cmd 等のラッパは前景が
+// 別プロセスになり検出にも載らない＝直接起動ではないので落とさない。
+func execBaseName(argv0 string) string {
+	base := filepath.Base(argv0)
+	if runtime.GOOS == "windows" {
+		if ext := filepath.Ext(base); strings.EqualFold(ext, ".exe") {
+			base = strings.TrimSuffix(base, ext)
+		}
+	}
+	return base
 }
 
 // Identity は identity 判定に要る最小情報。PaneInfo / AgentInfo の

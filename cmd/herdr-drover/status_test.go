@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -42,8 +43,20 @@ func startHerdrForTest(t *testing.T) string {
 		"HERDR_SOCKET_PATH="+sock,
 		"XDG_CONFIG_HOME="+xdg)
 
+	// Windows: 実行中プロセスの cwd になっている dir は消せない。testing は**最初の**
+	// t.TempDir() 呼び出しで「TempDir 一式を消す」Cleanup を 1 個だけ登録し、Cleanup は
+	// LIFO＝herdr 起動後に初めて t.TempDir() を呼ぶテストでは、pane の cwd に使った
+	// TempDir の削除が herdr 停止より**先に**走って "being used by another process" で
+	// 落ちる（実測。pane プロセスの終了が間に合う回もあるので間欠に見える。Go 1.26 の
+	// TempDir 削除の再試行も効かなかった）。ここで先に 1 回呼んでおけば削除は下の
+	// herdr 停止＋孤児回収の**後**に走る。unix は消せるので触らない（従来どおり）。
+	if runtime.GOOS == "windows" {
+		_ = t.TempDir()
+	}
+
 	cmd := exec.Command(bin, "server")
 	cmd.Env = env
+	started := time.Now()
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start herdr server: %v", err)
 	}
@@ -59,6 +72,10 @@ func startHerdrForTest(t *testing.T) string {
 			_ = cmd.Process.Kill() // 自分が spawn した PID のみ
 			<-done
 		}
+		// Windows: herdr 0.9.5 は stop で pane のプロセスツリーを確実には畳まない（親が
+		// 消えた OpenConsole＋pane プロセスが残る＝実測）。自分が spawn した herdr の
+		// 子孫だけを回収する（herdrtree_windows_test.go）。unix は no-op。
+		killHerdrOrphans(cmd.Process.Pid, started)
 		os.RemoveAll(dir)
 	})
 

@@ -88,7 +88,11 @@ cwd 自動 attach／新 Tab 起動を提供する。Python 版 claude-master(cm)
 - `events.subscribe` は過去 event を再送しない（live から）。
 - Windows: socket は named pipe・pane cwd は末尾 `\` 付き・パス区切りは
   `filepath.Separator`（"/" 固定の比較は Windows で全滅する）。新規ビルドの
-  未署名 exe は Smart App Control に弾かれ得る（テストの偽 agent は cmd.exe 複製）。
+  未署名 exe は Smart App Control に弾かれ得る。実体は `claude.exe`（argv[0]・PATH 探索は
+  `.exe` 前提）。テストの偽 agent は**テストバイナリの複製 `<name>.exe`＋spec**
+  （`cmd/herdr-drover/stubagent_test.go`。unix は従来の sh スクリプト）。
+- Windows の `herdr server stop` は pane のプロセスを畳み切らない（孤児が cwd を握る）＝
+  テストの herdr は `startHerdrForTest` 経由で起こす（子孫回収＋TempDir 削除順の保証）。
 
 ## ビルド / テスト / デプロイ
 

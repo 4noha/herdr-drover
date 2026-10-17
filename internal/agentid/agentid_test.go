@@ -5,6 +5,8 @@ package agentid
 // 片側だけ変えると「対象 0 件」や「他エージェントの pane を横取り」が静かに起きる。
 
 import (
+	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/4noha/herdr-drover/internal/herdrapi"
@@ -196,5 +198,29 @@ func TestIsDirectAgentInvocation(t *testing.T) {
 	}
 	if !IsDirectInvocation("codex", []string{"/usr/bin/codex"}) {
 		t.Error("codex は対応済のはず（alias 表に載っている）")
+	}
+}
+
+// Windows の実体は `claude.exe`＝拡張子を落として判定する（落とさないと Windows では
+// 全 pane が「直接起動でない」になり restart/update が何もしなかった）。unix では
+// `claude.exe` という名前は claude ではない（exact-match を緩めない）。
+func TestIsDirectInvocationExeSuffix(t *testing.T) {
+	win := runtime.GOOS == "windows"
+	for _, tc := range []struct {
+		argv0 string
+		want  bool
+	}{
+		{`C:\Users\x\.local\bin\claude.exe`, win},
+		{`C:\Users\x\.local\bin\claude.EXE`, win},
+		{`C:\Users\x\AppData\Roaming\npm\codex.cmd`, false}, // ラッパ＝前景は別プロセス
+		{`C:\x\claude-wrapper.exe`, false},
+	} {
+		kind := "claude"
+		if strings.Contains(tc.argv0, "codex") {
+			kind = "codex"
+		}
+		if got := IsDirectInvocation(kind, []string{tc.argv0}); got != tc.want {
+			t.Errorf("IsDirectInvocation(%s, %q) = %v, want %v（GOOS=%s）", kind, tc.argv0, got, tc.want, runtime.GOOS)
+		}
 	}
 }

@@ -605,9 +605,9 @@ func pathCandidates(name string) []string {
 		if dir == "" {
 			dir = "."
 		}
-		p := filepath.Join(dir, name)
+		p := filepath.Join(dir, agentExeName(name))
 		fi, err := os.Stat(p)
-		if err != nil || fi.IsDir() || fi.Mode().Perm()&0o111 == 0 {
+		if err != nil || !isExecFile(fi) {
 			continue
 		}
 		if abs, err := filepath.Abs(p); err == nil {
@@ -648,7 +648,7 @@ func lookupAgentBin(agent string) (string, error) {
 	}
 	if home, err := os.UserHomeDir(); err == nil {
 		for _, wk := range sp.WellKnownPaths {
-			p := filepath.Join(home, strings.TrimPrefix(wk, "~/"))
+			p := filepath.Join(home, agentExeName(strings.TrimPrefix(wk, "~/")))
 			if fi, serr := os.Stat(p); serr == nil && !fi.IsDir() {
 				if self != "" && sameFile(p, self) {
 					skippedSelf = true
@@ -684,7 +684,7 @@ func claudeCandidates(agents []herdrapi.AgentInfo, cwd string) []herdrapi.AgentI
 func agentCandidates(agents []herdrapi.AgentInfo, agent, cwd string) []herdrapi.AgentInfo {
 	var out []herdrapi.AgentInfo
 	for _, a := range agents {
-		if a.Cwd != cwd {
+		if !sameCwd(a.Cwd, cwd) {
 			continue
 		}
 		if kind, conflict := agentid.Resolve(agentid.OfAgent(a)); conflict != "" || kind != agent {
@@ -694,6 +694,13 @@ func agentCandidates(agents []herdrapi.AgentInfo, agent, cwd string) []herdrapi.
 	}
 	return out
 }
+
+// sameCwd は herdr が返す pane/agent の cwd とシム側の cwd が同じ dir か。Windows の
+// herdr は cwd を**末尾バックスラッシュ付き**で返す（SPEC.md §5.2）＝Clean で揃える。素の == だった
+// 旧コードは Windows で cwd 一致 attach が一度も成立せず、毎回新 Tab を量産していた
+// （2026-10-17 実 herdr 0.9.5 のテストで発覚）。unix の herdr は Clean 済みの物理パス
+// を返す＝挙動不変。
+func sameCwd(a, b string) bool { return filepath.Clean(a) == filepath.Clean(b) }
 
 // pickerChoice は picker 1 行入力の解釈（純関数＝テーブルテスト対象）。
 // cm start と同 UX: Enter=先頭 / "n" か "0"=新規 / 1..n=番号指定。

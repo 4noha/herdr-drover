@@ -14,10 +14,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -189,16 +191,16 @@ func TestComputeCaptureTable(t *testing.T) {
 	for _, it := range items {
 		got[it.Cwd] = it
 	}
-	if it := got["/a"]; it.Skip != "" || it.Label != "src" {
+	if it := got[filepath.Clean("/a")]; it.Skip != "" || it.Label != "src" {
 		t.Errorf("/a: %+v", it)
 	}
-	if it := got["/amb"]; !strings.Contains(it.Skip, "曖昧") {
+	if it := got[filepath.Clean("/amb")]; !strings.Contains(it.Skip, "曖昧") {
 		t.Errorf("/amb: %+v", it)
 	}
-	if it := got["/nolabel"]; !strings.Contains(it.Skip, "label が無い") {
+	if it := got[filepath.Clean("/nolabel")]; !strings.Contains(it.Skip, "label が無い") {
 		t.Errorf("/nolabel: %+v", it)
 	}
-	if _, ok := got["/b"]; ok {
+	if _, ok := got[filepath.Clean("/b")]; ok {
 		t.Errorf("/b（非 claude）が capture に混入")
 	}
 }
@@ -231,11 +233,11 @@ func TestComputeCaptureDuplicateLabelSkips(t *testing.T) {
 		got[it.Cwd] = it
 	}
 	for _, cwd := range []string{"/dup", "/dupmin"} {
-		if it := got[cwd]; it.Skip == "" || !strings.Contains(it.Skip, "重複") {
+		if it := got[filepath.Clean(cwd)]; it.Skip == "" || !strings.Contains(it.Skip, "重複") {
 			t.Errorf("%s: label 重複がルール化された: %+v", cwd, it)
 		}
 	}
-	if it := got["/ok"]; it.Skip != "" || it.Label != "solo" {
+	if it := got[filepath.Clean("/ok")]; it.Skip != "" || it.Label != "solo" {
 		t.Errorf("/ok: 重複の無い label が巻き添え skip された: %+v", it)
 	}
 }
@@ -249,7 +251,7 @@ func TestComputeCaptureDuplicateLabelSkips(t *testing.T) {
 func TestCaptureSaveKeepsConcurrentWrite(t *testing.T) {
 	home := t.TempDir()
 	setTestHome(t, home)
-	orgWriteRules(t, home, `{"exact":{"/proj/a":"src"}}`)
+	orgWriteRules(t, home, `{"exact":{`+jsonKey("/proj/a")+`:"src"}}`)
 	m, err := wsmap.Load() // cmdOrganize と同じ「先読み」snapshot
 	if err != nil {
 		t.Fatal(err)
@@ -259,12 +261,12 @@ func TestCaptureSaveKeepsConcurrentWrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m2.Exact["/proj/b"] = "learned"
+	m2.Exact[absKey("/proj/b")] = "learned"
 	if err := m2.Save(); err != nil {
 		t.Fatal(err)
 	}
 	// capture 実行: /proj/a のみ newlabel へ upsert（/proj/b は触らない）。
-	panes := []herdrapi.PaneInfo{{PaneID: "p1", WorkspaceID: "w1", Cwd: "/proj/a", Agent: "claude"}}
+	panes := []herdrapi.PaneInfo{{PaneID: "p1", WorkspaceID: "w1", Cwd: absKey("/proj/a"), Agent: "claude"}}
 	wss := []herdrapi.WorkspaceInfo{{WorkspaceID: "w1", Number: 1, Label: "newlabel"}}
 	var out bytes.Buffer
 	if err := runCaptureMode(m, panes, nil, nil, wss, false, &out); err != nil {
@@ -274,10 +276,10 @@ func TestCaptureSaveKeepsConcurrentWrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Exact["/proj/b"] != "learned" {
+	if got.Exact[absKey("/proj/b")] != "learned" {
 		t.Fatalf("learn の書込が capture の保存で失われた（lost update）: %+v\n%s", got.Exact, out.String())
 	}
-	if got.Exact["/proj/a"] != "newlabel" {
+	if got.Exact[absKey("/proj/a")] != "newlabel" {
 		t.Fatalf("capture 自身の upsert が無い: %+v", got.Exact)
 	}
 }
@@ -285,15 +287,15 @@ func TestCaptureSaveKeepsConcurrentWrite(t *testing.T) {
 func TestFindExactKeyTildePreserved(t *testing.T) {
 	home := t.TempDir()
 	setTestHome(t, home)
-	m := &wsmap.Map{Exact: map[string]string{"~/proj": "alpha", "/other": "beta"}}
+	m := &wsmap.Map{Exact: map[string]string{"~/proj": "alpha", absKey("/other"): "beta"}}
 	// "~/proj" キーは home 展開で同一パス＝既存キーの書式を保って上書き対象
 	old, existed, key := findExactKey(m, filepath.Join(home, "proj"))
 	if !existed || old != "alpha" || key != "~/proj" {
 		t.Fatalf("got old=%q existed=%v key=%q", old, existed, key)
 	}
 	// 未登録 cwd はキー=cwd そのもの
-	old, existed, key = findExactKey(m, "/newdir")
-	if existed || old != "" || key != "/newdir" {
+	old, existed, key = findExactKey(m, absKey("/newdir"))
+	if existed || old != "" || key != absKey("/newdir") {
 		t.Fatalf("miss: got old=%q existed=%v key=%q", old, existed, key)
 	}
 }
@@ -357,12 +359,8 @@ func TestOrganizeDispatchErrors(t *testing.T) {
 // なり検出されない（実測で確認済み。sleep を子に持つ sh のままなら検出される）。
 func orgFakeClaude(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
-	bin := filepath.Join(dir, "claude")
-	if err := os.WriteFile(bin, []byte("#!/bin/sh\nsleep 300\n"), 0o755); err != nil {
-		t.Fatalf("fake claude 作成: %v", err)
-	}
-	return bin
+	// Windows: claude.exe（テストバイナリ複製）自身が前景で生存＝同じく検出される。
+	return sleepStub(t, filepath.Join(t.TempDir(), "claude"), "#!/bin/sh\nsleep 300\n", 300)
 }
 
 // orgPhysDir は物理パス（symlink 解決済）の一時 dir。herdr は pane cwd を
@@ -440,7 +438,8 @@ func orgPanes(t *testing.T, api *herdrapi.Client) []herdrapi.PaneInfo {
 // orgFindPaneByCwd は cwd 完全一致の pane を返す（無ければ nil）。
 func orgFindPaneByCwd(panes []herdrapi.PaneInfo, cwd string) *herdrapi.PaneInfo {
 	for i := range panes {
-		if panes[i].Cwd == cwd {
+		// Windows の herdr は pane cwd を末尾 `\` 付きで返す（SPEC.md §5.2）＝Clean で揃える。
+		if filepath.Clean(panes[i].Cwd) == filepath.Clean(cwd) {
 			return &panes[i]
 		}
 	}
@@ -513,7 +512,7 @@ func TestOrganizeRealHerdrMoveTabKeepDryRun(t *testing.T) {
 	mixedTab := orgLayoutApply(t, api, w1, "mixed", map[string]any{
 		"type": "split", "direction": "right", "ratio": 0.5,
 		"first":  orgPaneNode(dirB, claude),
-		"second": orgPaneNode(dirB, "/bin/sleep", "300"),
+		"second": orgPaneNode(dirB, sleeperArgv(t, 300)...),
 	})
 	orgLayoutApply(t, api, w1, "norule", orgPaneNode(dirC, claude))
 	orgWaitClaudeDetected(t, api, dirA, dirB, dirC)
@@ -581,10 +580,10 @@ func TestOrganizeRealHerdrMoveTabKeepDryRun(t *testing.T) {
 	// MOVE_TAB: mixed Tab を丸ごと dst へ（claude も同居 sleep も dst・元 Tab は自動 close）
 	var pB, pSleep *herdrapi.PaneInfo
 	for i := range panes {
-		if panes[i].Cwd == dirB && panes[i].Agent == "claude" {
+		if sameCwd(panes[i].Cwd, dirB) && panes[i].Agent == "claude" {
 			pB = &panes[i]
 		}
-		if panes[i].Cwd == dirB && panes[i].Agent != "claude" {
+		if sameCwd(panes[i].Cwd, dirB) && panes[i].Agent != "claude" {
 			pSleep = &panes[i]
 		}
 	}
@@ -642,38 +641,53 @@ func TestOrganizeCaptureRealHerdrRoundTrip(t *testing.T) {
 	orgLayoutApply(t, api, w2, "b", orgPaneNode(dirB, claude))
 	orgLayoutApply(t, api, w1, "c1", orgPaneNode(dirC, claude))
 	orgLayoutApply(t, api, w2, "c2", orgPaneNode(dirC, claude))
-	if _, err := api.AgentStart("claude", []string{"/bin/sleep", "300"}, &herdrapi.AgentStartOptions{Cwd: dirD, WorkspaceID: w2}); err != nil {
-		t.Fatalf("agent.start named claude: %v", err)
+	// (a) 経路＝「シム命名のみ・検出なし」の pane。herdr 0.9.x は agent.rename を
+	// **検出済み pane に限る**（agent_not_found・SPEC.md §5.2）＝この状態自体が作れず、
+	// 命名 pane は常に検出経路（dirA〜C と同じ）にも載る。作れる herdr（0.7.x）でだけ
+	// (a) を検証し、0.9.x では「作れない」こと自体を契約として確かめる。
+	namedOnly := true
+	if _, err := api.AgentStart("claude", sleeperArgv(t, 300), &herdrapi.AgentStartOptions{Cwd: dirD, WorkspaceID: w2}); err != nil {
+		var apiErr *herdrapi.APIError
+		if !errors.As(err, &apiErr) || apiErr.Code != "agent_not_found" {
+			t.Fatalf("agent.start named claude: %v", err)
+		}
+		t.Logf("herdr 0.9.x: 検出なし pane は命名できない＝(a) 経路は存在しない（%v）", err)
+		namedOnly = false
 	}
 	orgWaitClaudeDetected(t, api, dirA, dirB, dirC)
-	orgWaitFor(t, 10*time.Second, "named agent 出現", func() bool {
-		agents, err := api.AgentList()
-		if err != nil {
-			return false
-		}
-		for _, a := range agents {
-			if a.Name == "claude" {
-				return true
+	if namedOnly {
+		orgWaitFor(t, 10*time.Second, "named agent 出現", func() bool {
+			agents, err := api.AgentList()
+			if err != nil {
+				return false
 			}
-		}
-		return false
-	})
+			for _, a := range agents {
+				if a.Name == "claude" {
+					return true
+				}
+			}
+			return false
+		})
+	}
 
 	// 既存ルール: exact 1 件＋prefix/default（capture は exact のみ触る契約）
-	orgWriteRules(t, home, fmt.Sprintf(`{"exact":{%q:"old"},"rules":[{"prefix":"/zzz-keep","workspace":"keep"}],"default":"dflt"}`, dirA))
+	orgWriteRules(t, home, fmt.Sprintf(`{"exact":{%q:"old"},"rules":[{"prefix":%s,"workspace":"keep"}],"default":"dflt"}`, dirA, jsonKey("/zzz-keep")))
 
 	// --- dry-run: 差分表示のみ・保存しない ---
 	code, out, errb := runCapture(t, "organize", "--capture", "--dry-run")
 	if code != 0 {
 		t.Fatalf("capture dry-run exit=%d\n%s%s", code, out, errb)
 	}
-	for _, want := range []string{
+	wants := []string{
 		"~ " + dirA + " → src（旧: old",
 		"+ " + dirB + " → dst",
-		"+ " + dirD + " → dst",
 		"SKIP " + dirC + ": 曖昧",
 		"dry-run",
-	} {
+	}
+	if namedOnly {
+		wants = append(wants, "+ "+dirD+" → dst")
+	}
+	for _, want := range wants {
 		if !strings.Contains(out, want) {
 			t.Fatalf("capture dry-run 出力に %q が無い:\n%s", want, out)
 		}
@@ -698,13 +712,16 @@ func TestOrganizeCaptureRealHerdrRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m.Exact[dirA] != "src" || m.Exact[dirB] != "dst" || m.Exact[dirD] != "dst" {
+	if m.Exact[dirA] != "src" || m.Exact[dirB] != "dst" || (namedOnly && m.Exact[dirD] != "dst") {
 		t.Fatalf("exact が期待どおりでない: %+v", m.Exact)
+	}
+	if _, ok := m.Exact[dirD]; !namedOnly && ok {
+		t.Fatalf("命名も検出もされていない pane の cwd が保存された: %+v", m.Exact)
 	}
 	if _, ok := m.Exact[dirC]; ok {
 		t.Fatalf("曖昧 cwd が保存された: %+v", m.Exact)
 	}
-	if len(m.Rules) != 1 || m.Rules[0].Prefix != "/zzz-keep" || m.Default != "dflt" {
+	if len(m.Rules) != 1 || m.Rules[0].Prefix != absKey("/zzz-keep") || m.Default != "dflt" {
 		t.Fatalf("prefix/default が変わった: rules=%+v default=%q", m.Rules, m.Default)
 	}
 
@@ -759,10 +776,21 @@ func TestLearnMovesRealEventsAndBacklogDedup(t *testing.T) {
 	defer cancel()
 	go func() { _ = runLearnLoop(ctx, api, lg) }()
 
-	// stale バックログが処理された（skip ログ）ことを確認してから無学習を検証
-	orgWaitFor(t, 15*time.Second, "stale バックログの skip 処理", func() bool {
-		return strings.Contains(buf.String(), "現況取得不能")
-	})
+	// stale バックログが処理された（skip ログ）ことを確認してから無学習を検証。
+	// ⚠herdr 0.9.x（protocol 22〜）は購読ごとの過去 event 再送をやめた（live から・
+	// SPEC.md §5.2）＝stale バックログ自体が届かないので skip ログは出ない。その場合も
+	// 「dirA を学習しない」ことは Phase B の後（live event を処理できた後）で検証する。
+	pong, err := api.Ping()
+	if err != nil {
+		t.Fatalf("ping: %v", err)
+	}
+	if pong.Protocol < 22 {
+		orgWaitFor(t, 15*time.Second, "stale バックログの skip 処理", func() bool {
+			return strings.Contains(buf.String(), "現況取得不能")
+		})
+	} else {
+		t.Logf("herdr protocol=%d は過去 event を再送しない＝stale バックログ経路は無い（dirA 無学習は Phase B 後に検証）", pong.Protocol)
+	}
 	m, err := wsmap.Load()
 	if err != nil {
 		t.Fatal(err)
@@ -895,4 +923,19 @@ func TestLearnSkipsDuplicateLabelWorkspace(t *testing.T) {
 	if len(m.Exact) != 0 {
 		t.Fatalf("重複 label がルール化された: %+v", m.Exact)
 	}
+}
+
+// absKey は POSIX 形の絶対パス表記を実行 OS の絶対パスにする（Windows は "/x" が
+// 絶対パスではない＝ドライブを付ける。internal/wsmap/wsmap_test.go と同じ規則）。
+func absKey(p string) string {
+	if runtime.GOOS == "windows" {
+		return "C:" + filepath.FromSlash(p)
+	}
+	return p
+}
+
+// jsonKey は absKey を JSON 文字列リテラルにする（Windows の \ をエスケープ）。
+func jsonKey(p string) string {
+	b, _ := json.Marshal(absKey(p))
+	return string(b)
 }

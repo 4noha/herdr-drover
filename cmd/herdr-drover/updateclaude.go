@@ -139,7 +139,7 @@ func resolveClaudeBin(api *herdrapi.Client, agent string, out io.Writer) (bin, s
 			"バイナリを特定できない＝更新対象を推測しない", agent)
 	}
 	for _, name := range sp.BinNames {
-		if p, lerr := exec.LookPath(name); lerr == nil {
+		if p, lerr := exec.LookPath(agentExeName(name)); lerr == nil {
 			if abs, aerr := filepath.Abs(p); aerr == nil {
 				return abs, "PATH の " + name, nil
 			}
@@ -147,7 +147,7 @@ func resolveClaudeBin(api *herdrapi.Client, agent string, out io.Writer) (bin, s
 	}
 	if home, herr := os.UserHomeDir(); herr == nil {
 		for _, wk := range sp.WellKnownPaths {
-			p := filepath.Join(home, strings.TrimPrefix(wk, "~/"))
+			p := filepath.Join(home, agentExeName(strings.TrimPrefix(wk, "~/")))
 			if fi, serr := os.Stat(p); serr == nil && !fi.IsDir() {
 				return p, "既定の導入先 " + wk, nil
 			}

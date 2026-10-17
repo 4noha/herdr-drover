@@ -33,13 +33,10 @@ import (
 // agent.start」経路だけを実 herdr で通す。
 func installStubClaude(t *testing.T) string {
 	t.Helper()
-	binDir := t.TempDir()
-	stub := filepath.Join(binDir, "claude")
 	script := "#!/bin/sh\necho HD_SHIM_STUB\nexec sleep 300\n"
-	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
-		t.Fatalf("stub claude 作成: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	stub := writeAgentStub(t, filepath.Join(t.TempDir(), "claude"), script,
+		stubSpec{Stdout: "HD_SHIM_STUB", SleepSec: 300})
+	t.Setenv("PATH", filepath.Dir(stub)+string(os.PathListSeparator)+os.Getenv("PATH"))
 	return stub
 }
 
@@ -128,7 +125,7 @@ func TestClaudeShimRealHerdrLifecycle(t *testing.T) {
 	}
 	ags := waitClaudeAgents(t, api, work, 1)
 	ag := ags[0]
-	if ag.Name != "claude" || ag.Cwd != work {
+	if ag.Name != "claude" || !sameCwd(ag.Cwd, work) {
 		t.Fatalf("agent.list の exact-match が崩れている: %+v (want cwd=%s)", ag, work)
 	}
 	if !strings.Contains(out, "pane_id="+ag.PaneID) || !strings.Contains(out, "terminal_id="+ag.TerminalID) {

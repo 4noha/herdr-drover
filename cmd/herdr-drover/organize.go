@@ -555,7 +555,10 @@ func computeCapture(panes []herdrapi.PaneInfo, claude map[string]bool, wss []her
 	byCwd := map[string][]herdrapi.PaneInfo{}
 	for _, p := range panes {
 		if claude[p.PaneID] && p.Cwd != "" {
-			byCwd[p.Cwd] = append(byCwd[p.Cwd], p)
+			// Clean で揃える: Windows の herdr は cwd を末尾バックスラッシュ付きで返す（SPEC.md §5.2）＝
+			// 表示・突合せを保存されるルールキー（findExactKey も Clean）と同じ形にする。
+			c := filepath.Clean(p.Cwd)
+			byCwd[c] = append(byCwd[c], p)
 		}
 	}
 	cwds := make([]string, 0, len(byCwd))

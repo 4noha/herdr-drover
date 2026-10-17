@@ -116,3 +116,16 @@ func isSSHForwardSid(sid string) bool { return false }
 // handleSSHForwardWake（sshforward.go のメソッドの代替）: isSSHForwardSid が
 // 常に false なので実際には呼ばれない。webterm.go のコンパイルのために定義。
 func (w *webTerm) handleSSHForwardWake(ctx context.Context, afSid string) {}
+
+// agentExeName はエージェントの名前（InstallSpec の BinNames / WellKnownPaths）を
+// ディスク上のファイル名にする。Windows は `<name>.exe` だけを見る:
+//   - 拡張子無しの名前は実在せず、os.FileMode に実行ビットも無い（旧コードは
+//     unix の判定のままで **claude.exe を一切見つけられず、シムが常に失敗**していた
+//     ＝2026-10-17 実 herdr 0.9.5 のテストで発覚）。
+//   - .cmd/.ps1 ラッパ（npm の global 導入形）は前景が cmd/node になり herdr の
+//     エージェント検出（前景 basename 基準）に載らない＝候補にしない（推測しない）。
+func agentExeName(name string) string { return name + ".exe" }
+
+// isExecFile は fi が実行可能な通常ファイルか（Windows に実行ビットは無い＝
+// 拡張子で絞った上で通常ファイルなら可）。
+func isExecFile(fi os.FileInfo) bool { return !fi.IsDir() }

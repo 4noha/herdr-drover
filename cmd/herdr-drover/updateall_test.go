@@ -11,7 +11,6 @@ import (
 	"context"
 	"github.com/4noha/herdr-drover/internal/agentid"
 	"io"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -27,6 +26,10 @@ func setupUpdateAllPane(t *testing.T, from, to string) (*herdrapi.Client, string
 	sock := startHerdrForTest(t)
 	api := herdrapi.New(sock)
 	bin, _ := writeUpdatableStub(t, t.TempDir(), from, to)
+	// 対象選定（updatableAgents）は PATH で導入有無を見る＝実機の claude ではなく stub を
+	// 見せる（実 claude の有無に依存せず・誤って本物を更新しない）。
+	hideRealAgentBins(t)
+	prependPATH(t, filepath.Dir(bin))
 	cwd := t.TempDir()
 	wsID, err := currentWorkspaceID(api)
 	if err != nil {
@@ -106,16 +109,9 @@ func TestUpdateAllContinuesWhenOneAgentFails(t *testing.T) {
 	sock := startHerdrForTest(t)
 	api := herdrapi.New(sock)
 	work := t.TempDir()
-	bin := filepath.Join(work, "claude")
-	script := "#!/bin/sh\n" +
-		"case \"$1\" in\n" +
-		"  --version) echo '2.1.214'; exit 0 ;;\n" +
-		"  update) echo 'network unreachable' >&2; exit 1 ;;\n" +
-		"esac\n" +
-		"exec sleep 300\n"
-	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
-		t.Fatalf("stub 作成: %v", err)
-	}
+	bin := writeFailingUpdateStub(t, filepath.Join(work, "claude"))
+	hideRealAgentBins(t)
+	prependPATH(t, filepath.Dir(bin))
 	cwd := t.TempDir()
 	wsID, _ := currentWorkspaceID(api)
 	pane, err := applyClaudeTab(api, wsID, "proj", []string{bin}, cwd)
