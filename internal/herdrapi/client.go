@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync/atomic"
 	"time"
 )
@@ -292,10 +293,105 @@ func (c *Client) AgentStart(name string, argv []string, opts *AgentStartOptions)
 		params.WorkspaceID = opts.WorkspaceID
 	}
 	var out AgentStarted
-	if err := c.call("agent.start", params, &out); err != nil {
+	err := c.call("agent.start", params, &out)
+	if isAgentStartKindRequired(err) {
+		return c.agentStartViaLayout(name, argv, opts)
+	}
+	if err != nil {
 		return nil, err
 	}
 	return &out.Agent, nil
+}
+
+// isAgentStartKindRequired は「新 wire の agent.start（kind+pane_id 必須）を持つ
+// server に旧 wire を送った」ことを示す応答か。0.9.x で agent.start は
+// 「既存 pane で既知 kind の agent を起動」に変わり、任意 argv・cwd を受けない
+// （実測 0.9.5: invalid_request "missing field `kind`"）。
+func isAgentStartKindRequired(err error) bool {
+	var apiErr *APIError
+	return errors.As(err, &apiErr) && apiErr.Code == "invalid_request" &&
+		strings.Contains(apiErr.Message, "missing field `kind`")
+}
+
+// agentStartViaLayout は旧 agent.start 相当（任意 argv＋cwd の pane に名前を
+// 付ける）を、シム本体と同じ layout.apply＋agent.rename で組み立てる。
+// workspace 未指定なら workspace.create し、その root tab を layout.apply{tab_id}
+// で argv pane に差し替える（素シェル pane を残さない）。
+func (c *Client) agentStartViaLayout(name string, argv []string, opts *AgentStartOptions) (*AgentInfo, error) {
+	var cwd, wsID string
+	if opts != nil {
+		cwd, wsID = opts.Cwd, opts.WorkspaceID
+	}
+	type layoutPane struct {
+		Type    string   `json:"type"`
+		Cwd     string   `json:"cwd,omitempty"`
+		Command []string `json:"command"`
+	}
+	req := struct {
+		WorkspaceID string     `json:"workspace_id,omitempty"`
+		TabID       string     `json:"tab_id,omitempty"`
+		Focus       bool       `json:"focus"`
+		Root        layoutPane `json:"root"`
+	}{WorkspaceID: wsID, Root: layoutPane{Type: "pane", Cwd: cwd, Command: argv}}
+	if wsID == "" {
+		var created WorkspaceCreated
+		if err := c.call("workspace.create", struct {
+			Cwd   string `json:"cwd,omitempty"`
+			Focus bool   `json:"focus"`
+		}{cwd, false}, &created); err != nil {
+			return nil, fmt.Errorf("agent.start fallback: %w", err)
+		}
+		req.TabID = created.Tab.TabID
+	}
+	var applied struct {
+		Layout struct {
+			Root struct {
+				PaneID string `json:"pane_id"`
+			} `json:"root"`
+		} `json:"layout"`
+	}
+	if err := c.call("layout.apply", req, &applied); err != nil {
+		return nil, fmt.Errorf("agent.start fallback: %w", err)
+	}
+	paneID := applied.Layout.Root.PaneID
+	if paneID == "" {
+		return nil, errors.New("agent.start fallback: layout.apply 応答に root pane_id が無い")
+	}
+	ag, err := c.AgentRename(paneID, name)
+	if err != nil {
+		return nil, fmt.Errorf("agent.start fallback (pane %s 作成済み): %w", paneID, err)
+	}
+	return ag, nil
+}
+
+// AgentDetectWait は AgentRename が「まだ agent と認識されていない pane」を
+// 待つ上限。実測 0.9.5（Windows）で layout.apply 直後の検出は約 1 秒。
+var AgentDetectWait = 10 * time.Second
+
+// AgentRename は agent.rename（target は pane_id 可）。0.9.x では target が
+// **herdr に agent と認識された pane**でないと agent_not_found が返る
+// （0.7.4 は任意 pane を命名できた）。生成直後の pane は前景プロセス検出まで
+// 約 1 秒かかるので、agent_not_found の間だけ AgentDetectWait まで再試行する。
+// 待っても agent にならない（検出対象外の argv）ならその agent_not_found を返す。
+func (c *Client) AgentRename(target, name string) (*AgentInfo, error) {
+	deadline := time.Now().Add(AgentDetectWait)
+	for {
+		var out struct {
+			Agent AgentInfo `json:"agent"`
+		}
+		err := c.call("agent.rename", struct {
+			Target string `json:"target"`
+			Name   string `json:"name"`
+		}{target, name}, &out)
+		if err == nil {
+			return &out.Agent, nil
+		}
+		var apiErr *APIError
+		if !errors.As(err, &apiErr) || apiErr.Code != "agent_not_found" || time.Now().After(deadline) {
+			return nil, err
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
 }
 
 // ReportMetadata は pane.report_metadata で設定する値。少なくとも 1 つの

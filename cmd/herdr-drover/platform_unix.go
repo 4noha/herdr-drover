@@ -18,10 +18,6 @@ import (
 	"unsafe"
 )
 
-// remoteInjectSupported: unix は注入 pane 内の attach viewer が動く＝従来どおり
-// リモート pane 注入（↗窓）を有効にできる。
-const remoteInjectSupported = true
-
 // notifyNudge は即時 re-scan トリガ（SIGUSR1）の受け口を作る。返る stop で
 // 購読解除。agent.go の signal.Notify(nudge, SIGUSR1) と同一。
 func notifyNudge() (chan os.Signal, func()) {

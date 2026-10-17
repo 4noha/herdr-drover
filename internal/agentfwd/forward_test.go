@@ -1,3 +1,8 @@
+//go:build !windows
+
+// ssh-forward（SSH エージェント転送）は Windows では out-of-scope（cmdSSHForward は
+// platform_windows.go のスタブ）＝unix socket 前提の本テストは unix のみ。
+
 package agentfwd
 
 import (

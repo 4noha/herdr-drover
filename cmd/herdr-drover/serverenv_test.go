@@ -13,9 +13,11 @@ package main
 import (
 	"bytes"
 	"github.com/4noha/herdr-drover/internal/herdrapi"
+	"github.com/4noha/herdr-drover/internal/testtmp"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -80,11 +82,14 @@ func TestSanitizedServerEnvQuietWhenClean(t *testing.T) {
 // シムが**実際に自動起動した** herdr server がマーカーを持たないこと（e2e）。
 // 純関数テストだけだと「配線を外しても緑」になるので、実プロセスで確かめる。
 func TestAutoStartedServerHasNoCallerMarkers(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("ps eww（他プロセスの環境変数の外部観測）が Windows に無い")
+	}
 	if os.Getenv("CLAUDE_CODE_CHILD_SESSION") == "" {
 		t.Skip("親に CHILD マーカーが無い＝この環境では混入を再現できない")
 	}
 	// 隔離した socket パス（sun_path 104B 制約のため短い /tmp を使う）。
-	dir, err := os.MkdirTemp("/tmp", "se")
+	dir, err := os.MkdirTemp(testtmp.Root(), "se")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -23,11 +23,22 @@ import "encoding/json"
 // 実採取: {"type":"pong","version":"0.7.4","protocol":16,
 //
 //	"capabilities":{"live_handoff":true,"detached_server_daemon":false}}
+//
+// ⚠0.9.x（protocol 22）で capabilities に整数値
+// （"endpoint_protocol_generation":1）が混ざった。map[string]bool だと decode
+// 自体が失敗し Ping() が常にエラー＝daemon 起動不能・シムが「server 不在」と
+// 誤判定した（Windows 0.9.5 で実測）。値の型は固定せず Capability で引く。
 type PongInfo struct {
-	Type         string          `json:"type"` // "pong"
-	Version      string          `json:"version"`
-	Protocol     int             `json:"protocol"`
-	Capabilities map[string]bool `json:"capabilities"`
+	Type         string                     `json:"type"` // "pong"
+	Version      string                     `json:"version"`
+	Protocol     int                        `json:"protocol"`
+	Capabilities map[string]json.RawMessage `json:"capabilities"`
+}
+
+// Capability は bool 値の capability を返す（不在・bool 以外は false）。
+func (p *PongInfo) Capability(name string) bool {
+	var v bool
+	return json.Unmarshal(p.Capabilities[name], &v) == nil && v
 }
 
 // ScrollInfo は PaneInfo.Scroll。

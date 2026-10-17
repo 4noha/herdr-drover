@@ -26,6 +26,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/4noha/herdr-drover/internal/fsutil"
 	"github.com/4noha/herdr-drover/internal/herdrapi"
 )
 
@@ -248,7 +249,7 @@ func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 		os.Remove(tmp)
 		return err
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := fsutil.ReplaceFile(tmp, path); err != nil {
 		os.Remove(tmp)
 		return err
 	}
@@ -313,12 +314,16 @@ func expandTilde(p, home string) string {
 }
 
 // hasPathPrefix は path 境界を守る prefix 一致（cwd == prefix か、
-// prefix + "/" で始まる）。ルート "/" は全 abs パスに一致する。
+// prefix + 区切り で始まる）。ルート（"/"・Windows の `C:\`）は Clean 後も末尾が
+// 区切り＝そのまま前方一致で配下の全パスに一致する。
+// ⚠区切りは filepath.Separator（旧実装は "/" 固定＝Windows では prefix ルールが
+// 一切一致しなかった。回帰: TestResolveWindowsPaths）。
 func hasPathPrefix(cwd, prefix string) bool {
-	if prefix == "/" {
-		return strings.HasPrefix(cwd, "/")
+	sep := string(filepath.Separator)
+	if strings.HasSuffix(prefix, sep) {
+		return strings.HasPrefix(cwd, prefix)
 	}
-	return cwd == prefix || strings.HasPrefix(cwd, prefix+"/")
+	return cwd == prefix || strings.HasPrefix(cwd, prefix+sep)
 }
 
 // Caller は herdrapi.Client の Call を満たす最小 interface（seam。実テストは

@@ -17,6 +17,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+
+	"github.com/4noha/herdr-drover/internal/fsutil"
 )
 
 // Cloud は 1 つのクラウド接続先。SAKeyPath は **クライアント個別**の SA 鍵
@@ -153,5 +155,5 @@ func (c Config) AppendCloud(add Cloud, existing []Cloud) error {
 	if err := os.WriteFile(tmp, b, 0o600); err != nil {
 		return err
 	}
-	return os.Rename(tmp, f)
+	return fsutil.ReplaceFile(tmp, f)
 }

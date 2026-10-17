@@ -17,6 +17,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -81,7 +82,10 @@ func TestEnrollPlacesKeyAndConfig(t *testing.T) {
 	if string(b) != saJSON {
 		t.Fatalf("sa.json 内容不一致: %q", b)
 	}
-	if fi, _ := os.Stat(saPath); fi.Mode().Perm() != 0o600 {
+	// Windows に POSIX 権限ビットは無い（Chmod は読取専用属性のみ）。置き場所
+	// （%USERPROFILE% / %LOCALAPPDATA%Temp 配下）の継承 ACL が本人限定なので、
+	// 権限ビットの検証は unix のみ。
+	if fi, _ := os.Stat(saPath); runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
 		t.Fatalf("sa.json 権限が %v（0600 のはず）", fi.Mode().Perm())
 	}
 
@@ -187,7 +191,7 @@ func TestEnrollAppendsSecondCloud(t *testing.T) {
 	}
 	// 既存 primary クラウド proj-a（sa.json も既存）。
 	if err := os.WriteFile(filepath.Join(dir, "config.json"),
-		[]byte(`{"pc_id":"custom-herdr","gcp_project":"proj-a","cloud_relay_url":"wss://a","google_application_credentials":"`+filepath.Join(dir, "sa.json")+`"}`), 0o600); err != nil {
+		[]byte(`{"pc_id":"custom-herdr","gcp_project":"proj-a","cloud_relay_url":"wss://a","google_application_credentials":`+jsonString(filepath.Join(dir, "sa.json"))+`}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "sa.json"), []byte(`{"type":"service_account"}`), 0o600); err != nil {
@@ -346,4 +350,11 @@ func TestFakeEnrollServerContract(t *testing.T) {
 	if got := post("GOOD0001"); got != 401 {
 		t.Fatalf("消費済コードが 401 でない: %d", got)
 	}
+}
+
+// jsonString は s を JSON 文字列リテラルにする（Windows パスの \ を JSON に
+// 生で埋めると "\U" 等の不正エスケープで config が壊れる）。
+func jsonString(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
 }

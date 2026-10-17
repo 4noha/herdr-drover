@@ -6,9 +6,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/4noha/herdr-drover/internal/testtmp"
 )
 
 // ============ 実 herdr 隔離サーバ harness（鉄則: 合成で緑にしない） ============
@@ -41,7 +44,7 @@ func startHerdr(t *testing.T) (*testServer, *Client) {
 	if err != nil {
 		t.Skip("herdr not installed; skipping real-server test")
 	}
-	dir, err := os.MkdirTemp("/tmp", "hd")
+	dir, err := os.MkdirTemp(testtmp.Root(), "hd")
 	if err != nil {
 		t.Fatalf("mkdtemp: %v", err)
 	}
@@ -238,15 +241,40 @@ func TestPaneLifecycle(t *testing.T) {
 func TestAgentStart(t *testing.T) {
 	_, c := startHerdr(t)
 
-	ag, err := c.AgentStart("hdapitest", []string{"/bin/sleep", "30"}, &AgentStartOptions{Cwd: "/private/tmp"})
+	argv, cwd := []string{"/bin/sleep", "30"}, "/private/tmp"
+	if runtime.GOOS == "windows" {
+		// 0.9.x の agent.start 非互換 → fallback は herdr に agent と検出される
+		// argv が要る（検出は前景プロセス名基準）。cmd.exe を claude.exe として
+		// 複製（MS 署名のまま＝Smart App Control を通る）。
+		cwd = t.TempDir()
+		fake := filepath.Join(cwd, "claude.exe")
+		b, err := os.ReadFile(os.Getenv("COMSPEC"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(fake, b, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		argv = []string{fake, "/Q", "/D"}
+	}
+	ag, err := c.AgentStart("hdapitest", argv, &AgentStartOptions{Cwd: cwd})
 	if err != nil {
 		t.Fatalf("agent.start: %v", err)
+	}
+	if runtime.GOOS == "windows" {
+		// Windows は cwd に使われている dir を消せない＝TempDir 削除（LIFO で後）より
+		// 先に pane（cmd.exe）を終わらせる。
+		t.Cleanup(func() {
+			_ = c.WorkspaceClose(ag.WorkspaceID)
+			time.Sleep(time.Second)
+		})
 	}
 	if ag.Name != "hdapitest" || ag.PaneID == "" || ag.TerminalID == "" {
 		t.Fatalf("unexpected agent: %+v", ag)
 	}
-	// cwd は起動 pane に反映される（実測済の受理フィールド）
-	if ag.Cwd != "/private/tmp" {
+	// cwd は起動 pane に反映される（実測済の受理フィールド。Windows 0.9.5 は
+	// 末尾 \ 付きで返る＝Clean で比較）
+	if filepath.Clean(ag.Cwd) != filepath.Clean(cwd) {
 		t.Fatalf("agent cwd not applied: %+v", ag)
 	}
 
@@ -293,6 +321,10 @@ func TestSocketPathResolution(t *testing.T) {
 		t.Fatalf("env should win over default: %q", got)
 	}
 	t.Setenv("HERDR_SOCKET_PATH", "")
+	// 既定は OS 依存（Windows は %APPDATA%herdr 系＝dial_windows_test.go が網羅）。
+	if runtime.GOOS == "windows" {
+		return
+	}
 	home, _ := os.UserHomeDir()
 	want := filepath.Join(home, ".config", "herdr", "herdr.sock")
 	if got := ResolveSocketPath(""); got != want {

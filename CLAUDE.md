@@ -79,6 +79,17 @@ cwd 自動 attach／新 Tab 起動を提供する。Python 版 claude-master(cm)
 - `tab.move` は同一 WS の reorder 専用＝WS 間移動は `pane.move` が唯一。
 - workspace label は重複可＝識別子にしない（workspace_id を使う）。
 
+## herdr 0.9.x（Windows 正式版）で変わった trap（詳細 SPEC.md §5.2）
+
+- `ping` の capabilities に整数が混ざる（型固定で decode すると Ping 全滅）。
+- `agent.start` は「既存 pane で既知 kind を起動」に変わった（任意 argv 不可）。
+- `agent.rename` / `report_agent_session` は**前景が agent と検出された pane**
+  でないと効かない（rename は `agent_not_found`、session は ok なのに黙って捨てる）。
+- `events.subscribe` は過去 event を再送しない（live から）。
+- Windows: socket は named pipe・pane cwd は末尾 `\` 付き・パス区切りは
+  `filepath.Separator`（"/" 固定の比較は Windows で全滅する）。新規ビルドの
+  未署名 exe は Smart App Control に弾かれ得る（テストの偽 agent は cmd.exe 複製）。
+
 ## ビルド / テスト / デプロイ
 
 ```sh

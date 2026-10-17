@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -132,7 +133,10 @@ func TestEnrollSlavePlacesSaLessConfigAndSecret(t *testing.T) {
 	if sf.PC != gotPC {
 		t.Fatalf("slave.json pc=%q が POST pc=%q と不一致", sf.PC, gotPC)
 	}
-	if fi, _ := os.Stat(slavePath); fi.Mode().Perm() != 0o600 {
+	// Windows に POSIX 権限ビットは無い（Chmod は読取専用属性のみ）。置き場所
+	// （%USERPROFILE% / %LOCALAPPDATA%Temp 配下）の継承 ACL が本人限定なので、
+	// 権限ビットの検証は unix のみ。
+	if fi, _ := os.Stat(slavePath); runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
 		t.Fatalf("slave.json 権限が %v（0600 のはず）", fi.Mode().Perm())
 	}
 

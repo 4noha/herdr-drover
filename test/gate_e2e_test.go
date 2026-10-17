@@ -23,6 +23,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/4noha/herdr-drover/internal/testtmp"
 )
 
 // startHangingSocket は accept するが一切応答しない unix socket を立てる。
@@ -32,7 +34,7 @@ import (
 func startHangingSocket(t *testing.T) string {
 	t.Helper()
 	// 短い /tmp dir（sun_path 104B 制約は client 側 dial にも効く）
-	dir, err := os.MkdirTemp("/tmp", "hd")
+	dir, err := os.MkdirTemp(testtmp.Root(), "hd")
 	if err != nil {
 		t.Fatalf("mkdtemp: %v", err)
 	}

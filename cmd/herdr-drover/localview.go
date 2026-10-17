@@ -1,5 +1,3 @@
-//go:build unix
-
 package main
 
 // localview.go — 自動 min ローカルビューア（observe / control 自動切替）。
@@ -35,7 +33,7 @@ package main
 // grid 行は pane.get の scroll.viewport_rows（非ロック時に真の App サイズ）。桁は
 // API 非公開のため control には起動元端末の実桁を渡す（外部が両次元で小さい
 // 一般ケースは完全 fit・混在次元のみ幅方向で余白/クリップ＝後述の残課題）。
-// SIGWINCH で mode を再評価し respawn（observe 中は gridRows も再取得＝メインを
+// 端末サイズ変化（unix=SIGWINCH／Windows=ポーリング・tty_*.go）で mode を再評価し respawn（observe 中は gridRows も再取得＝メインを
 // 途中でリサイズした場合の threshold 追随）。入力は両モードとも ndjson API の
 // pane.send_text（byte-perfect・input.go の実測決定木の primary）で注入する。
 //
@@ -52,15 +50,12 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"os/signal"
 	"strconv"
 	"sync"
-	"syscall"
 	"unicode/utf8"
 
 	"github.com/4noha/herdr-drover/internal/bridge"
 	"github.com/4noha/herdr-drover/internal/herdrapi"
-	"golang.org/x/sys/unix"
 )
 
 // runViewer は attachOrReport の TTY 分岐が使うビューア seam。既定は
@@ -96,9 +91,8 @@ func runLocalView(api *herdrapi.Client, paneID, herdrBin string, in, out, msg *o
 	_, _ = io.WriteString(out, "\x1b[?1049h")
 	defer func() { _, _ = io.WriteString(out, "\x1b[?25h\x1b[?1049l") }()
 
-	winch := make(chan os.Signal, 1)
-	signal.Notify(winch, syscall.SIGWINCH)
-	defer signal.Stop(winch)
+	winch, stopWinch := notifyResize(outFD)
+	defer stopWinch()
 
 	detach := make(chan struct{})
 	go readStdinLoop(in, api, paneID, detach, msg)
@@ -150,50 +144,6 @@ func runLocalView(api *herdrapi.Client, paneID, herdrBin string, in, out, msg *o
 			return nil
 		}
 	}
-}
-
-// enterRaw は fd を cfmakeraw 相当の raw mode にし、復元用の旧 termios を返す。
-func enterRaw(fd int) (*unix.Termios, error) {
-	old, err := unix.IoctlGetTermios(fd, getTermiosReq)
-	if err != nil {
-		return nil, err
-	}
-	raw := makeRawTermios(*old)
-	if err := unix.IoctlSetTermios(fd, setTermiosReq, &raw); err != nil {
-		return nil, err
-	}
-	return old, nil
-}
-
-func restoreRaw(fd int, old *unix.Termios) {
-	if old != nil {
-		_ = unix.IoctlSetTermios(fd, setTermiosReq, old)
-	}
-}
-
-// makeRawTermios は cfmakeraw(3) 相当のフラグ操作。x/sys/unix の定数は各 OS で
-// 正しい型（darwin=uint64 / linux=uint32 のフラグ）へ解決されるため OS-split
-// 不要（get/set の ioctl 要求番号だけ localview_ioctl_{darwin,linux}.go）。
-func makeRawTermios(t unix.Termios) unix.Termios {
-	t.Iflag &^= unix.IGNBRK | unix.BRKINT | unix.PARMRK | unix.ISTRIP |
-		unix.INLCR | unix.IGNCR | unix.ICRNL | unix.IXON
-	t.Oflag &^= unix.OPOST
-	t.Lflag &^= unix.ECHO | unix.ECHONL | unix.ICANON | unix.ISIG | unix.IEXTEN
-	t.Cflag &^= unix.CSIZE | unix.PARENB
-	t.Cflag |= unix.CS8
-	t.Cc[unix.VMIN] = 1
-	t.Cc[unix.VTIME] = 0
-	return t
-}
-
-// termSize は fd の端末サイズ（行・桁）。取得不能や 0 は 24x80 へ fallback
-// （observe は 1 桁級の異常サイズだとクリップ画面しか返さないため）。
-func termSize(fd int) (rows, cols int) {
-	ws, err := unix.IoctlGetWinsize(fd, unix.TIOCGWINSZ)
-	if err != nil || ws.Row == 0 || ws.Col == 0 {
-		return 24, 80
-	}
-	return int(ws.Row), int(ws.Col)
 }
 
 // drainSignals は保留中の同一シグナルを吸う（連続 SIGWINCH で respawn を

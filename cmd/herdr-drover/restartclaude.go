@@ -347,18 +347,9 @@ func moveTabTo(api *herdrapi.Client, tabID string, index int) error {
 // （silent に無名のままにしない）。
 func renameClaudePaneTo(api *herdrapi.Client, paneID, preferred string) (string, error) {
 	if preferred != "" {
-		raw, err := api.Call("agent.rename", struct {
-			Target string `json:"target"`
-			Name   string `json:"name"`
-		}{paneID, preferred})
+		ag, err := api.AgentRename(paneID, preferred)
 		if err == nil {
-			var out struct {
-				Agent herdrapi.AgentInfo `json:"agent"`
-			}
-			if err := json.Unmarshal(raw, &out); err != nil {
-				return "", fmt.Errorf("agent_info decode: %w", err)
-			}
-			return out.Agent.Name, nil
+			return ag.Name, nil
 		}
 		var apiErr *herdrapi.APIError
 		if !errors.As(err, &apiErr) || apiErr.Code != "agent_name_taken" {

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/4noha/herdr-drover/internal/fsutil"
 	"github.com/4noha/herdr-drover/internal/herdrapi"
 )
 
@@ -308,7 +309,7 @@ func writeConfigBytesAtomic(path string, b []byte) error {
 		os.Remove(tmp)
 		return err
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := fsutil.ReplaceFile(tmp, path); err != nil {
 		os.Remove(tmp)
 		return err
 	}

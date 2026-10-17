@@ -33,6 +33,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/4noha/herdr-drover/internal/fsutil"
 )
 
 // launchdLabel は launchd job のラベル（plist ファイル名も <label>.plist）。
@@ -271,7 +273,7 @@ func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 		os.Remove(tmp)
 		return err
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := fsutil.ReplaceFile(tmp, path); err != nil {
 		os.Remove(tmp)
 		return err
 	}

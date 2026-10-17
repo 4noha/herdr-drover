@@ -7,7 +7,8 @@
 
 ## 前提
 
-- macOS / Linux（Windows は out-of-scope）
+- macOS / Linux。Windows 11 は herdr >= 0.8.2（正式版）で対応（常駐化は
+  `scripts/windows/install-task.ps1`・ssh-forward は対象外）
 - **herdr >= 0.7.4**（`brew install herdr` 等）＋既定サーバが起動できること
 - **claude**（Claude Code CLI）が PATH にあること
 - ソースビルドする場合は **Go 1.25+**（Homebrew Go）

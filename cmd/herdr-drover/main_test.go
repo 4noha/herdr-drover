@@ -243,9 +243,11 @@ func TestWarnConfig(t *testing.T) {
 }
 
 func TestVerifyHerdrProtocol(t *testing.T) {
-	// 実測値（v0.7.4=protocol16）は警告なし・exact-match
-	if ws := verifyHerdr(&herdrapi.PongInfo{Version: "0.7.4", Protocol: knownProtocol}); len(ws) != 0 {
-		t.Fatalf("既知 protocol で警告: %v", ws)
+	// 実測値（v0.7.4=protocol16・v0.9.5=protocol22）は警告なし・exact-match
+	for _, p := range []herdrapi.PongInfo{{Version: "0.7.4", Protocol: 16}, {Version: "0.9.5", Protocol: 22}} {
+		if ws := verifyHerdr(&p); len(ws) != 0 {
+			t.Fatalf("既知 protocol で警告: %v", ws)
+		}
 	}
 	ws := verifyHerdr(&herdrapi.PongInfo{Version: "9.9.9", Protocol: 17})
 	if len(ws) != 1 || !strings.Contains(ws[0], "17") {

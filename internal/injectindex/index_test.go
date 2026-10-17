@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -191,7 +192,10 @@ func TestPersistFilePermission(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if perm := fi.Mode().Perm(); perm != 0o600 {
+	// Windows に POSIX 権限ビットは無い（Chmod は読取専用属性のみ）。置き場所
+	// （%USERPROFILE% / %LOCALAPPDATA%Temp 配下）の継承 ACL が本人限定なので、
+	// 権限ビットの検証は unix のみ。
+	if perm := fi.Mode().Perm(); runtime.GOOS != "windows" && perm != 0o600 {
 		t.Errorf("perm=%o want 0600", perm)
 	}
 }

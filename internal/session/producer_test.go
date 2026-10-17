@@ -26,6 +26,7 @@ import (
 
 	"github.com/4noha/drover-cloud/state"
 	"github.com/4noha/herdr-drover/internal/herdrapi"
+	"github.com/4noha/herdr-drover/internal/testtmp"
 )
 
 // *state.Client が StateClient 契約を満たすことをコンパイル時に固定
@@ -137,7 +138,7 @@ func startHerdr(t *testing.T) (*testServer, *herdrapi.Client) {
 	if err != nil {
 		t.Skip("herdr not installed; skipping real-server test")
 	}
-	dir, err := os.MkdirTemp("/tmp", "hd")
+	dir, err := os.MkdirTemp(testtmp.Root(), "hd")
 	if err != nil {
 		t.Fatalf("mkdtemp: %v", err)
 	}

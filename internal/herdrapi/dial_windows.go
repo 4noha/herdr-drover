@@ -25,10 +25,21 @@ func dialHerdr(path string, timeout time.Duration) (net.Conn, error) {
 	return winio.DialPipeContext(ctx, `\??\pipe\`+path)
 }
 
-// defaultSocketPath は既定の socket パス（Windows: %APPDATA%\herdr\herdr.sock）。
+// defaultSocketPath は herdr（Windows）の設定 dir 解決順に合わせた既定 socket パス:
+// XDG_CONFIG_HOME > %APPDATA% > %USERPROFILE%\AppData\Roaming > HOME/.config
+// （Windows でも XDG_CONFIG_HOME が最優先＝隔離サーバのテストもこれで分離する）。
 func defaultSocketPath() string {
+	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+		return filepath.Join(xdg, "herdr", "herdr.sock")
+	}
 	if ad := os.Getenv("APPDATA"); ad != "" {
 		return filepath.Join(ad, "herdr", "herdr.sock")
 	}
-	return "herdr.sock"
+	if profile := os.Getenv("USERPROFILE"); profile != "" {
+		return filepath.Join(profile, "AppData", "Roaming", "herdr", "herdr.sock")
+	}
+	if home := os.Getenv("HOME"); home != "" {
+		return filepath.Join(home, ".config", "herdr", "herdr.sock")
+	}
+	return filepath.Join(os.TempDir(), "herdr", "herdr.sock")
 }

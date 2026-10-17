@@ -6,10 +6,12 @@ package wsmap
 // （隔離サーバ harness がそちらに在る）。
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -156,14 +158,14 @@ func TestParseLoudErrors(t *testing.T) {
 
 func TestParseValid(t *testing.T) {
 	m, err := Parse([]byte(`{
-	  "exact": {"/w/proj": "a", "~/x": "b"},
-	  "rules": [{"prefix": "/w", "workspace": "c"}],
+	  "exact": {` + jsonKey("/w/proj") + `: "a", "~/x": "b"},
+	  "rules": [{"prefix": ` + jsonKey("/w") + `, "workspace": "c"}],
 	  "default": "d"
 	}`))
 	if err != nil {
 		t.Fatalf("正常スキーマで Parse 失敗: %v", err)
 	}
-	if m.Exact["/w/proj"] != "a" || m.Exact["~/x"] != "b" ||
+	if m.Exact[absKey("/w/proj")] != "a" || m.Exact["~/x"] != "b" ||
 		len(m.Rules) != 1 || m.Rules[0].Workspace != "c" || m.Default != "d" {
 		t.Fatalf("Parse 結果が想定外: %+v", m)
 	}
@@ -205,8 +207,8 @@ func TestLoadBrokenFileLoudWithPath(t *testing.T) {
 func TestSaveLoadRoundTrip(t *testing.T) {
 	setTestHome(t, t.TempDir())
 	orig := &Map{
-		Exact:   map[string]string{"/w/proj": "a", "~/works/x": "b"},
-		Rules:   []Rule{{Prefix: "~/works", Workspace: "c"}, {Prefix: "/opt", Workspace: "d"}},
+		Exact:   map[string]string{absKey("/w/proj"): "a", "~/works/x": "b"},
+		Rules:   []Rule{{Prefix: "~/works", Workspace: "c"}, {Prefix: absKey("/opt"), Workspace: "d"}},
 		Default: "e",
 	}
 	if err := orig.Save(); err != nil {
@@ -252,7 +254,7 @@ func TestUpdateConcurrentWritersKeepAllKeys(t *testing.T) {
 				if m.Exact == nil {
 					m.Exact = map[string]string{}
 				}
-				m.Exact[fmt.Sprintf("/k%d", i)] = "v"
+				m.Exact[absKey(fmt.Sprintf("/k%d", i))] = "v"
 				return true, nil
 			})
 		}(i)
@@ -277,7 +279,7 @@ func TestUpdateConcurrentWritersKeepAllKeys(t *testing.T) {
 func TestUpdateNoSaveOnUnchangedOrError(t *testing.T) {
 	home := t.TempDir()
 	setTestHome(t, home)
-	seed := `{"exact":{"/a":"x"}}`
+	seed := `{"exact":{` + jsonKey("/a") + `:"x"}}`
 	dir := filepath.Join(home, ".herdr-drover")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
@@ -287,7 +289,7 @@ func TestUpdateNoSaveOnUnchangedOrError(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := Update(func(m *Map) (bool, error) {
-		m.Exact["/a"] = "mutated-but-unchanged" // changed=false なら破棄される
+		m.Exact[absKey("/a")] = "mutated-but-unchanged" // changed=false なら破棄される
 		return false, nil
 	}); err != nil {
 		t.Fatal(err)
@@ -297,7 +299,7 @@ func TestUpdateNoSaveOnUnchangedOrError(t *testing.T) {
 	}
 	wantErr := fmt.Errorf("boom")
 	if err := Update(func(m *Map) (bool, error) {
-		m.Exact["/a"] = "mutated-then-error"
+		m.Exact[absKey("/a")] = "mutated-then-error"
 		return true, wantErr
 	}); err == nil || !strings.Contains(err.Error(), "boom") {
 		t.Fatalf("mutate エラーが返らない: %v", err)
@@ -305,4 +307,19 @@ func TestUpdateNoSaveOnUnchangedOrError(t *testing.T) {
 	if b, _ := os.ReadFile(p); string(b) != seed {
 		t.Fatalf("mutate エラーなのに書き換わった: %s", b)
 	}
+}
+
+// absKey はテスト用の絶対パス表記を OS に合わせる（Windows の絶対パスは
+// ドライブ必須＝"/w/proj" は Parse が正しく拒否する）。"/w/proj" → "C:wproj"。
+func absKey(p string) string {
+	if runtime.GOOS == "windows" {
+		return "C:" + filepath.FromSlash(p)
+	}
+	return p
+}
+
+// jsonKey は absKey を JSON 文字列リテラルにする（Windows の  をエスケープ）。
+func jsonKey(p string) string {
+	b, _ := json.Marshal(absKey(p))
+	return string(b)
 }

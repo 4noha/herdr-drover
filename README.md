@@ -457,6 +457,9 @@ e2e gate（`test/`）で検証している。稼働版 v0.5.0（`mac-studio-herd
 ## Requirements
 
 - macOS / Linux, herdr >= 0.7.4, Go 1.25+（ソースビルド時）
+- Windows 11, herdr >= 0.8.2（Windows 正式版。実測は 0.9.5）。Web/スマホ閲覧・↗窓（リモート
+  pane 注入）・ローカルビューアが動く。ssh-forward は対象外。常駐化は
+  `scripts/windows/install-task.ps1`（install.sh は対象外）。herdr 0.9.x の契約差は SPEC.md §5.2
 - クラウド同期を使う場合: GCP プロジェクト（Cloud Run relay + Firestore）。
   クラウドサーバは独立リポジトリ **[drover-cloud](https://github.com/4noha/drover-cloud)**
   を 1 回デプロイして全 PC で共有する（一から立てる手順は

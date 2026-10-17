@@ -31,6 +31,7 @@ import (
 
 	"github.com/4noha/drover-cloud/state"
 	"github.com/4noha/herdr-drover/internal/herdrapi"
+	"github.com/4noha/herdr-drover/internal/testtmp"
 )
 
 // projectID はエミュレータ内の隔離プロジェクト（demo- prefix はエミュレータ
@@ -133,7 +134,7 @@ func startHerdr(t *testing.T, extraEnv ...string) (*testServer, *herdrapi.Client
 	if err != nil {
 		t.Skip("herdr not installed; skipping real-server e2e")
 	}
-	dir, err := os.MkdirTemp("/tmp", "hd")
+	dir, err := os.MkdirTemp(testtmp.Root(), "hd")
 	if err != nil {
 		t.Fatalf("mkdtemp: %v", err)
 	}

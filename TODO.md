@@ -30,6 +30,40 @@ v0.5.30 で**判定を経過時間ベースへ**変更し、**実 websocket 越�
 > できない* の記述は**すべて解消済み**（PR #1 merge・`e9bab96` で release に windows 資産。
 > Windows 機の self-update 成功を 7/25 15:52 の Ack で実確認）。
 
+### 2026-10-17: herdr Windows 正式版（0.9.5）への移植（branch `feat/windows-official`・未コミット）
+
+herdr は **0.8.2 で Windows GA**、現行 **0.9.5（protocol 22）**。この Windows 機
+（desktop-djb9pfr）の herdr を 7/21 preview → **0.9.5 stable** へ更新（公式
+install.ps1 を `-LocalPackagePath` で実行・zip は GitHub digest と sha256 一致を確認。
+`Programs\Herdr\bin` は release への junction になった）。0.9.x の契約差は **SPEC.md §5.2**。
+
+**製品の修正**（いずれも実 herdr 0.9.5 で再現→修正→実テスト緑。旧コード FAIL 確認済み）:
+1. 🔴 `ping` decode 失敗＝**0.9.x では daemon が起動できない**（capabilities に整数）。
+   ⚠ **macOS fleet が herdr 0.9 へ上げた瞬間に同じく全滅する**＝fleet の herdr 更新より
+   先にこの修正を配ること。
+2. 🔴 `agent.rename` が生成直後の pane で `agent_not_found`（0.9.x は agent 検出済み
+   pane のみ）＝**シムの新 Tab 命名・restart の再命名が失敗**。検出待ち再試行
+   （`herdrapi.AgentRename`）。これも 0.9 共通＝macOS にも効く。
+3. 🔴 Windows で wsmap の **prefix ルールが一切一致しなかった**（区切り "/" 固定）。
+4. Windows で tmp→rename の置換が reader/並行 writer と衝突して `Access is denied`
+   （`agent.pid` 等 6 箇所）→ `internal/fsutil.ReplaceFile`（Windows のみ短期再試行）。
+5. **↗窓（attach）とローカルビューアを Windows へ移植**（端末差は `tty_windows.go`：
+   コンソール VT 入出力モード＋サイズのポーリング）。`remoteInjectSupported` ゲートを撤去。
+   実 e2e: `TestLocalViewWindowsRealHerdr`（pane 内で viewer→別 pane。打鍵・VT 描画・
+   Ctrl+C 非死・detach。raw mode を外すと Ctrl+C で viewer が死んで FAIL することを確認）。
+
+**検証できていないこと**:
+- ↗窓 の **relay 越し e2e は Windows で未実施**（Firestore emulator＝gcloud/Java が
+  この機に無い）。Windows 固有部（tty seam）は localview e2e で、ネットワーク部は
+  OS 共通コード。**実機（この PC）へのデプロイはまだ**（↗窓 が初めて有効になる）。
+- BUG-6 の注入 pane 復活は POSIX シェル前提＝Windows では何もしない側に倒れる。
+
+**残（Windows のテスト赤・全て harness 側）**: `cmd/herdr-drover` の実 herdr テスト約
+40 本が **sh スクリプトの偽 claude/codex**（Windows では実行不可 "not a valid Win32
+application"）に依存。偽 agent を Windows で作る方式（cmd.exe 複製は argv が変わる・
+新規 go build の stub は SAC に弾かれ得る）を決めて移植する必要がある。
+`test/`・`internal/session`・`internal/commands` のテストは `!windows` のまま。
+
 ### 2026-10-16: MCP Phase 2（画面取得/入力/中断・last_seen）実装・未デプロイ
 
 `drover-cloud-mcp-design.md` Phase 2。ブランチ `feat/mcp-phase2`（本リポジトリ）＋

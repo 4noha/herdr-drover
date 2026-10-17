@@ -1,9 +1,6 @@
-//go:build unix
-
 package main
 
-// 被テスト対象 attach.go が //go:build unix（Windows は attach viewer 非対応＝
-// platform_windows.go のスタブ）のため、本テストも unix 限定。
+// attach.go は全 OS 共通（端末差は tty_{unix,windows}.go）＝本テストも全 OS で走る。
 
 import (
 	"context"

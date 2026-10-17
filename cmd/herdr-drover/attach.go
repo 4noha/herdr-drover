@@ -1,5 +1,3 @@
-//go:build unix
-
 package main
 
 // attach — リモート pane 注入の viewer client（Phase 3・↗窓相当）。reconcile が
@@ -592,11 +590,10 @@ func attachOnce(ctx context.Context, st *state.Client, relayURL, injSid, remoteP
 	rows, cols := termSize(int(out.Fd()))
 	_, _ = conn.Write(resizeMagic(rows, cols))
 
-	winch := make(chan os.Signal, 1)
-	signal.Notify(winch, syscall.SIGWINCH)
-	defer signal.Stop(winch)
+	winch, stopWinch := notifyResize(int(out.Fd()))
+	defer stopWinch()
 
-	// SIGWINCH: 最新サイズを RESIZE 再送（bridge が observe respawn＝新 full frame）。
+	// サイズ変化（SIGWINCH／Windows はポーリング）: 最新サイズを RESIZE 再送（bridge が observe respawn＝新 full frame）。
 	go func() {
 		for {
 			select {

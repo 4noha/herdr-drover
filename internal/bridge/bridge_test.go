@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/4noha/herdr-drover/internal/herdrapi"
+	"github.com/4noha/herdr-drover/internal/testtmp"
 )
 
 // ============ 実 herdr 隔離サーバ（確定レシピのコピー） ============
@@ -52,7 +53,7 @@ func startHerdr(t *testing.T) (*testServer, *herdrapi.Client) {
 	if err != nil {
 		t.Skip("herdr not installed; skipping real-server test")
 	}
-	dir, err := os.MkdirTemp("/tmp", "hd")
+	dir, err := os.MkdirTemp(testtmp.Root(), "hd")
 	if err != nil {
 		t.Fatalf("mkdtemp: %v", err)
 	}

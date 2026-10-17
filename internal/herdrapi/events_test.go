@@ -76,11 +76,7 @@ func TestSubscribeReconnectsAfterServerRestart(t *testing.T) {
 	go func() { _ = c.Subscribe(ctx, []string{"pane.created"}, ch) }()
 
 	// 1 本目のサーバで event が届くところまで確立
-	ws1, err := c.WorkspaceCreate()
-	if err != nil {
-		t.Fatalf("workspace.create #1: %v", err)
-	}
-	awaitPaneCreated(t, ch, ws1.RootPane.PaneID, 15*time.Second)
+	ws1 := createUntilPaneCreated(t, c, ch, 15*time.Second)
 
 	// サーバ再起動（graceful stop は session.json を隔離 XDG に永続化する。
 	// 復元 pane は event を出さない実測なので、待つのは新規 pane のみ）
@@ -88,16 +84,49 @@ func TestSubscribeReconnectsAfterServerRestart(t *testing.T) {
 	s.startProcess()
 
 	// 新サーバで新規 pane → 再購読済みの同じ ch に届く
-	ws2, err := c.WorkspaceCreate()
-	if err != nil {
-		t.Fatalf("workspace.create #2: %v", err)
-	}
+	ws2 := createUntilPaneCreated(t, c, ch, 30*time.Second)
 	if ws2.RootPane.PaneID == ws1.RootPane.PaneID {
 		// 復元で w1 が埋まる前提が崩れたら（=同一 id）本テストの識別が
 		// 成立しないので前提ごと失敗させる（黙って偽緑にしない）
 		t.Fatalf("pane id collision across restart: %s", ws2.RootPane.PaneID)
 	}
-	awaitPaneCreated(t, ch, ws2.RootPane.PaneID, 30*time.Second)
+}
+
+// createUntilPaneCreated は workspace を作り、その root pane の pane_created が
+// ch に届くまで作り直す（届いた回の WorkspaceCreated を返す）。
+// ⚠herdr 0.9.0 から新規購読は**過去 event を再送せず live から始まる**
+// （0.7.4 は購読ごとにバックログを再送していた＝events.go 参照）。購読確立前に
+// 作った pane の event は来ないので、1 回作って待つだけだと購読確立との競争になる。
+func createUntilPaneCreated(t *testing.T, c *Client, ch <-chan Event, timeout time.Duration) *WorkspaceCreated {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		ws, err := c.WorkspaceCreate()
+		if err != nil && time.Now().After(deadline) {
+			t.Fatalf("workspace.create: %v", err)
+		}
+		if err == nil {
+			wait := time.After(2 * time.Second)
+			for {
+				select {
+				case ev := <-ch:
+					if ev.Name != "pane_created" {
+						continue
+					}
+					if p, perr := ev.Pane(); perr == nil && p != nil && p.PaneID == ws.RootPane.PaneID {
+						return ws
+					}
+					continue
+				case <-wait:
+				}
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timeout waiting for pane_created（購読が確立しない）")
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
 }
 
 // TestSubscribeInvalidNameIsPermanentError は購読名不正が即 error で戻ること

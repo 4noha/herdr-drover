@@ -446,18 +446,9 @@ func nameClaudePane(api *herdrapi.Client, paneID string) (*herdrapi.AgentInfo, e
 func nameAgentPane(api *herdrapi.Client, agent, paneID string) (*herdrapi.AgentInfo, error) {
 	for i := 1; i <= maxClaudeAgents; i++ {
 		name := agentid.Encode(agent, i)
-		raw, err := api.Call("agent.rename", struct {
-			Target string `json:"target"`
-			Name   string `json:"name"`
-		}{paneID, name})
+		ag, err := api.AgentRename(paneID, name)
 		if err == nil {
-			var out struct {
-				Agent herdrapi.AgentInfo `json:"agent"`
-			}
-			if err := json.Unmarshal(raw, &out); err != nil {
-				return nil, fmt.Errorf("agent_info decode: %w", err)
-			}
-			return &out.Agent, nil
+			return ag, nil
 		}
 		var apiErr *herdrapi.APIError
 		if errors.As(err, &apiErr) && apiErr.Code == "agent_name_taken" {

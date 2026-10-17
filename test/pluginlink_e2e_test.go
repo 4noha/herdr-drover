@@ -52,6 +52,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/4noha/herdr-drover/internal/testtmp"
 )
 
 const pluginID = "4noha.drover"
@@ -165,7 +167,7 @@ func TestE2EPluginLinkGate(t *testing.T) {
 	// pidfile（$HOME/.herdr-drover/agent.pid）を fake（自 PID）へ向ける。
 	// hook 子プロセスが server env を継承することは実測済み（冒頭コメント）＝
 	// 本テスト自体がその継承の回帰検知にもなる。---
-	hookHome, err := os.MkdirTemp("/tmp", "hdh")
+	hookHome, err := os.MkdirTemp(testtmp.Root(), "hdh")
 	if err != nil {
 		t.Fatalf("mkdtemp: %v", err)
 	}

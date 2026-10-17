@@ -33,6 +33,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/4noha/herdr-drover/internal/fsutil"
 )
 
 // Entry は 1 注入 pane。Pending=true は「reconcile が layout.apply で pane を
@@ -249,7 +251,7 @@ func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 		os.Remove(tmp)
 		return err
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := fsutil.ReplaceFile(tmp, path); err != nil {
 		os.Remove(tmp)
 		return err
 	}

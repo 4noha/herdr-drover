@@ -53,12 +53,12 @@ func restartSelf() error {
 	return exec.Command("launchctl", "kickstart", "-k", dom+"/"+launchdLabel).Run()
 }
 
-// knownProtocol は実測で挙動検証済みの herdr ndjson protocol
-// （v0.7.4 の ping 応答＝herdrapi パッケージの採取値）。
+// knownProtocols は実測で挙動検証済みの herdr ndjson protocol
+// （16=v0.7.4・macOS fleet／22=v0.9.5・Windows 正式版。差分は SPEC.md §5.2）。
 // DESIGN の hidden CLI リスク対応: 未知 protocol は起動拒否ではなく
 // **警告して継続**（herdr 側の後方互換に期待しつつ、挙動差の一次容疑者を
 // ログに残す）。exact-match 比較のみ＝ヒューリスティック判定はしない。
-const knownProtocol = 16
+var knownProtocols = map[int]bool{16: true, 22: true}
 
 func cmdAgent(stdout, stderr io.Writer) error {
 	lg := log.New(stderr, "", log.LstdFlags)
@@ -276,10 +276,9 @@ func runOneCloud(ctx context.Context, cfg Config, cl Cloud, primary bool, hcli *
 	// slave は他 PC のセッションを注入しない（オーナーの私物セッションが共用 PC
 	// へ漏れる直接原因＝この goroutine を起こさないことで構造的に断つ）。master
 	// は従来どおり primary クラウドのみ注入（scConcrete は master で非 nil）。
-	// remoteInjectSupported は OS 依存（platform_{unix,windows}.go）。Windows は
-	// 注入 pane 内の attach viewer（cmdAttach）が非対応＝注入すると即死→再生成の
-	// スラッシングになるため常に無効化する（producer/Web 閲覧は下で動く）。
-	if remoteInjectSupported && cfg.Role != "slave" && primary && cl.RelayURL != "" {
+	// Windows も対象（herdr 0.8.2〜 の Windows 正式版で attach viewer を移植＝
+	// 端末差は tty_windows.go。以前は OS ゲートで常に無効だった）。
+	if cfg.Role != "slave" && primary && cl.RelayURL != "" {
 		// injectRemote=false でも goroutine は起こす（既存の注入 pane を撤去するため。
 		// 撤去後は desired=∅ を保つだけで新規注入はしない＝BUG-2）。
 		go runRemoteInject(ctx, hcli, scConcrete, cl, idx, lg, cfg.MirrorAgents, cfg.InjectRemotePanes, restartSelf)
@@ -288,8 +287,6 @@ func runOneCloud(ctx context.Context, cfg Config, cl Cloud, primary bool, hcli *
 		} else {
 			lg.Printf("%sリモート pane 注入 無効（DROVER_INJECT_REMOTE=off・既存注入は撤去・primary）", tag)
 		}
-	} else if !remoteInjectSupported && primary && cl.RelayURL != "" {
-		lg.Printf("%sリモート pane 注入は Windows 非対応のため無効（producer/Web 閲覧のみ）", tag)
 	}
 
 	// 遠隔命令制御線。DoRestart/DoUpdate/DoExit はプロセス単位（どのクラウドの
@@ -454,8 +451,8 @@ func runOneCloud(ctx context.Context, cfg Config, cl Cloud, primary bool, hcli *
 // 差異があれば警告文を返す（純関数＝単体テスト対象）。
 func verifyHerdr(pong *herdrapi.PongInfo) []string {
 	var ws []string
-	if pong.Protocol != knownProtocol {
-		ws = append(ws, fmt.Sprintf("⚠ 未検証の herdr protocol=%d（検証済は %d・version=%s）。継続するが挙動差に注意（DESIGN: hidden CLI リスク）", pong.Protocol, knownProtocol, pong.Version))
+	if !knownProtocols[pong.Protocol] {
+		ws = append(ws, fmt.Sprintf("⚠ 未検証の herdr protocol=%d（検証済は 16/22・version=%s）。継続するが挙動差に注意（DESIGN: hidden CLI リスク）", pong.Protocol, pong.Version))
 	}
 	return ws
 }

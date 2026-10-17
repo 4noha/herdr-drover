@@ -18,11 +18,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/4noha/herdr-drover/internal/herdrapi"
+	"github.com/4noha/herdr-drover/internal/testtmp"
 )
 
 // installStubClaude は一時 dir に stub claude（marker echo + sleep の sh
@@ -271,7 +273,7 @@ func TestClaudeShimAutoStartsServer(t *testing.T) {
 	// 短い /tmp dir（sun_path 104B 制約）＋ XDG 隔離（実 session.json 不可侵）。
 	// このテストはシム自身が server を spawn するため、t.Setenv した env を
 	// 子プロセスへ継承させる（ensureHerdrServer は cmd.Env=nil＝継承）。
-	dir, err := os.MkdirTemp("/tmp", "hd")
+	dir, err := os.MkdirTemp(testtmp.Root(), "hd")
 	if err != nil {
 		t.Fatalf("mkdtemp: %v", err)
 	}
@@ -401,7 +403,18 @@ func TestStdinIsTTYRealDevices(t *testing.T) {
 		t.Fatalf("pipe で stdinIsTTY が true")
 	}
 
-	slave := openPtySlaveForTest(t)
+	var slave *os.File
+	if runtime.GOOS == "windows" {
+		// Windows の TTY 真ケース＝コンソール入力ハンドル（pty は無い）。
+		c, err := os.OpenFile("CONIN$", os.O_RDWR, 0)
+		if err != nil {
+			t.Skipf("コンソール未接続のため TTY 真ケースは検証不可: %v", err)
+		}
+		defer c.Close()
+		slave = c
+	} else {
+		slave = openPtySlaveForTest(t)
+	}
 	swapStdin(t, slave)
 	if !stdinIsTTY() {
 		t.Fatalf("実 pty slave で stdinIsTTY が false（TTY 真ケース退行）")
@@ -430,9 +443,7 @@ func TestClaudeShimSymlinkCwdNoDup(t *testing.T) {
 		t.Fatalf("mkdir real: %v", err)
 	}
 	link := filepath.Join(base, "link")
-	if err := os.Symlink(real, link); err != nil {
-		t.Fatalf("symlink: %v", err)
-	}
+	symlinkOrSkip(t, real, link)
 	t.Chdir(link) // PWD=link（論理パス）で os.Getwd が link を返す状態を再現
 
 	api := herdrapi.New(sock)
@@ -775,9 +786,7 @@ func TestLookupAgentBinSkipsShimItself(t *testing.T) {
 		t.Fatalf("シム作成: %v", err)
 	}
 	shimLink := filepath.Join(shimDir, "codex")
-	if err := os.Symlink(selfBin, shimLink); err != nil {
-		t.Fatalf("symlink: %v", err)
-	}
+	symlinkOrSkip(t, selfBin, shimLink)
 
 	// 自分自身をシム本体に見せかける。
 	orig := selfExecutable
@@ -807,5 +816,18 @@ func TestLookupAgentBinSkipsShimItself(t *testing.T) {
 		t.Fatal("シムしか無いのに解決に成功した")
 	} else if !strings.Contains(err.Error(), "シム自身") {
 		t.Fatalf("除外理由が報告されていない: %v", err)
+	}
+}
+
+// symlinkOrSkip は symlink を作る。Windows は開発者モード／管理者権限が無いと
+// 作れない（"A required privilege is not held by the client"）＝その環境では
+// symlink 経路自体が発生しないので Skip（unix の失敗は Fatal のまま）。
+func symlinkOrSkip(t *testing.T, oldname, newname string) {
+	t.Helper()
+	if err := os.Symlink(oldname, newname); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("symlink を作れない（開発者モード/管理者が必要）: %v", err)
+		}
+		t.Fatalf("symlink: %v", err)
 	}
 }

@@ -12,6 +12,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -124,7 +125,10 @@ func TestHandleImageEnabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat: %v", err)
 	}
-	if fi.Mode().Perm() != 0o600 {
+	// Windows に POSIX 権限ビットは無い（Chmod は読取専用属性のみ）。置き場所
+	// （%USERPROFILE% / %LOCALAPPDATA%Temp 配下）の継承 ACL が本人限定なので、
+	// 権限ビットの検証は unix のみ。
+	if runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
 		t.Fatalf("一時ファイルの権限が %v（0600 であること＝同一マシンの他人に読ませない）", fi.Mode().Perm())
 	}
 	b, err := os.ReadFile(got)

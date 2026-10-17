@@ -1,5 +1,3 @@
-//go:build unix
-
 package main
 
 // attachlog — ↗窓 viewer（cmdAttach）の接続ライフサイクルを永続ログに残す。

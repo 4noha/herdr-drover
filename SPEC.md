@@ -618,6 +618,29 @@ workspace.close  workspace.create  workspace.focus  workspace.list  workspace.re
 | pane の消滅と reconcile | reconcile は **Firestore snapshot 駆動**。ローカル pane の消滅を契機にしない（後述 §7） |
 | 注入 pane の `cwd` | herdr が同一 workspace の既存 pane 値を**便宜継承する**＝偽値。ルール書込経路で拾うと wsmap が汚染される |
 
+### 5.2 herdr 0.9.x（protocol 22・Windows 正式版）で変わった契約
+
+Windows は herdr **0.8.2 で GA**（stable channel）。以下は **Windows 版 0.9.5 の
+隔離サーバで実測**（`internal/herdrapi/compat_windows_test.go`・2026-10-17）。
+macOS fleet は 0.7.4 のまま＝**両方で動く**ように実装している。
+バンドル schema は `herdr api schema --output <file>` で取れる（使用 28 メソッドは
+全て存続・リクエスト形は互換）。
+
+| 事項 | 0.7.4 | 0.9.5（実測） | drover の対処 |
+|---|---|---|---|
+| `ping` の `capabilities` | 値は全て bool | **整数が混ざる**（`endpoint_protocol_generation:1`） | `map[string]bool` だと decode 失敗＝**Ping 常時エラー＝daemon 起動不能・シムが server 不在と誤判定**。値型を固定せず `PongInfo.Capability()` で引く |
+| `agent.start` | 任意 argv＋cwd で新 pane | **既存 pane で既知 kind を起動**（`name`/`kind`/`pane_id` 必須・argv/cwd 不可） | 製品は未使用（layout.apply）。テスト用 `AgentStart` は `missing field \`kind\`` を exact に見て layout.apply＋rename へ fallback |
+| `agent.rename` の target | 任意 pane | **agent と認識された pane のみ**（それ以外は `agent_not_found`） | 生成直後は前景検出まで約 1 秒＝`AgentRename` が `agent_not_found` の間だけ最大 10 秒再試行（シム・restart の命名） |
+| `pane.report_agent_session` | 許可 `(source, agent)` なら反映 | **前景が当該 agent と検出された pane でないと黙って捨てる**（シェル／別プロセス前景の pane では `ok` なのに `agent_session` が付かない） | 製品は herdr 自身の integration が報告する値を読むだけ＝影響なし。テストは偽 agent を前景に置いて報告する |
+| `events.subscribe` | 購読ごとに過去 event を再送 | **live から始まる**（再送なし） | 製品は event を nudge＋周期 poll backstop で扱う＝影響なし。テストは「作って待つ」を購読確立まで繰り返す |
+| pane の `cwd`（Windows） | — | **末尾 `\` 付き**（`C:\…\001\`） | 比較は `filepath.Clean` 後 |
+| socket（Windows） | — | named pipe。pipe 名＝socket パス文字列。既定パスは `XDG_CONFIG_HOME` > `%APPDATA%` 系の `herdr\herdr.sock` | `dial_windows.go` |
+| 既定シェル（Windows） | — | pwsh があれば pwsh、無ければ Windows PowerShell | BUG-6 の復活経路（シェル名表＋sh quote）は Windows では**触らない側に倒れる**（未対応・下記） |
+
+⚠ **Windows で未対応のまま**: BUG-6 の注入 pane 復活（`reviveInjectPane`）は
+POSIX シェル前提（`injShellNames` に powershell/pwsh/cmd が無い＝**何もしない**側に倒れる）。
+ssh-forward は Windows out-of-scope（スタブ）。
+
 ---
 
 ## 6. 設定

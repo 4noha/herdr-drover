@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/4noha/herdr-drover/internal/fsutil"
 )
 
 // pidfilePath は ~/.herdr-drover/agent.pid を返す。
@@ -47,7 +49,7 @@ func writePidfile(path string, pid int) error {
 		os.Remove(tmp)
 		return err
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := fsutil.ReplaceFile(tmp, path); err != nil {
 		os.Remove(tmp) // rename 失敗時の tmp 残骸を掃除（best-effort）
 		return err
 	}

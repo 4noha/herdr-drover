@@ -3,10 +3,8 @@
 package main
 
 // platform_windows.go — platform_unix.go の対の Windows 実装＋Windows で
-// out-of-scope な機能（attach / ssh-forward / ローカル direct-attach viewer）
-// のスタブ。web/スマホ閲覧に必要な agent/producer 経路を Windows で成立させる
-// のが目的で、TTY 直接アタッチ系は意図的にスタブ（DESIGN の Windows
-// out-of-scope）。
+// out-of-scope な機能（ssh-forward）のスタブ。attach（↗窓）とローカル
+// ビューアは herdr Windows 正式版（0.8.2〜）で移植済み＝端末差は tty_windows.go。
 
 import (
 	"context"
@@ -18,14 +16,7 @@ import (
 	"syscall"
 
 	"golang.org/x/sys/windows"
-
-	"github.com/4noha/herdr-drover/internal/herdrapi"
 )
-
-// remoteInjectSupported: Windows は注入 pane 内の attach viewer（cmdAttach）が
-// 非対応＝リモート pane 注入は即死→再生成のスラッシングになるため常に無効。
-// producer（自 PC セッションの publish）と Web ターミナル閲覧は影響なく動く。
-const remoteInjectSupported = false
 
 // --- platform_unix.go と対の OS 依存ヘルパ（Windows 実装） ---
 
@@ -113,11 +104,6 @@ func errWindowsUnsupported(feature string) error {
 	return fmt.Errorf("%s は Windows では非対応（macOS/Linux 専用。web/スマホ閲覧は agent で利用可）", feature)
 }
 
-// cmdAttach（attach.go・//go:build unix の代替）: リモート pane 注入 viewer。
-func cmdAttach(args []string, stdout, stderr io.Writer) error {
-	return errWindowsUnsupported("attach（リモート pane 注入 viewer）")
-}
-
 // cmdSSHForward（sshforward.go の代替）: owner ssh-agent の一時転送。
 func cmdSSHForward(args []string, stdout, stderr io.Writer) error {
 	return errWindowsUnsupported("ssh-forward（SSH エージェント転送）")
@@ -130,8 +116,3 @@ func isSSHForwardSid(sid string) bool { return false }
 // handleSSHForwardWake（sshforward.go のメソッドの代替）: isSSHForwardSid が
 // 常に false なので実際には呼ばれない。webterm.go のコンパイルのために定義。
 func (w *webTerm) handleSSHForwardWake(ctx context.Context, afSid string) {}
-
-// runViewer（localview.go の var の代替）: ローカル direct-attach ビューア。
-var runViewer = func(api *herdrapi.Client, paneID string) error {
-	return errWindowsUnsupported("ローカルビューア（direct attach）")
-}
