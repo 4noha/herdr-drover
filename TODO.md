@@ -52,10 +52,34 @@ install.ps1 を `-LocalPackagePath` で実行・zip は GitHub digest と sha256
    実 e2e: `TestLocalViewWindowsRealHerdr`（pane 内で viewer→別 pane。打鍵・VT 描画・
    Ctrl+C 非死・detach。raw mode を外すと Ctrl+C で viewer が死んで FAIL することを確認）。
 
+**✅ この PC へ配置済み（2026-10-18 01:10・`deploy-local-build.ps1 -Version v0.5.41`）**:
+- 配置前の daemon は**9/15 頃から停止していた**（稼働 exe が SAC にブロック＋旧版は
+  0.9.5 で Ping 不能）。新ビルドは SAC 待ちなしで起動し、`herdr ok: version=0.9.5
+  protocol=22`・クラウド開始・エラー 0。退避は `bin/herdr-drover.exe.prev-20261018-011047`。
+- **↗窓 が Windows で初めて実稼働**: reconcile が他 PC の 56 セッションを `w2` に注入し、
+  attach が**実 relay 越しに数 MB のフレームを受信**（attach.log `received=5862756B` 等）。
+  relay 越し e2e の代わりの実地確認（テスト化はまだ＝Firestore emulator が無い）。
+- ⚠ **保留中だった遠隔 `update-all` が起動直後に実行され、この PC の Claude Code が
+  2.1.220 → 2.1.302 に更新された**。自己更新は「既に最新 v0.5.41」で skip（配布タグを
+  stamp した理由そのもの）。その後 daemon は設計どおり exit し、5 分周期のタスクが再起動する。
+
+- 🔴 **自己修復が daemon を戻さなかった（修正済み・scripts/windows）**: `start-agent.ps1` は
+  「`herdr-drover` という名前のプロセスがあれば稼働中」と判定していたが、↗窓 の attach client も
+  同名（`herdr-drover.exe attach …`）＝注入 pane がある限り**daemon が死んでも永久に戻さない**。
+  update-all 後の設計どおりの exit から 7 分以上戻らないことを実測。コマンドラインが `agent` で
+  終わるものだけを daemon とみなすよう修正（`deploy-local-build.ps1` の停止・起動確認も同様）。
+  この PC の `~/.herdr-drover/bin/start-agent.ps1` も差し替え済み（旧は `.prev-20261018`）。
+- 遠隔命令キューに 10/16 の v0.5.41 配信で積まれた `update-all` が 3 件あり、起動のたびに 1 件ずつ
+  消費→exit した（ループではない。Ack は正常に記録されていた）。
+- ⚠ **この PC は ephemeral port が枯渇している（drover 起因ではない）**: TIME_WAIT 約 1.8 万。
+  うち 7,621 件は**ある Cloudflare IPv6 1 宛てに動的ポート全域（49152–65527）を占有したまま
+  失効しない**（uptime 32 日。所有プロセスは不明＝既に終了）。drover の relay（Google）宛ては
+  数百で設計どおり。影響: daemon が「クラウド開始」に進めない・localhost を使うテスト 4 本が
+  `Only one usage of each socket address` で落ちる。**解消には再起動（またはネットワーク
+  スタックのリセット）が要る**＝ユーザー操作。
+
 **検証できていないこと**:
-- ↗窓 の **relay 越し e2e は Windows で未実施**（Firestore emulator＝gcloud/Java が
-  この機に無い）。Windows 固有部（tty seam）は localview e2e で、ネットワーク部は
-  OS 共通コード。**実機（この PC）へのデプロイはまだ**（↗窓 が初めて有効になる）。
+- ↗窓 の relay 越し e2e テスト（Firestore emulator＝gcloud/Java がこの機に無い）。
 - BUG-6 の注入 pane 復活は POSIX シェル前提＝Windows では何もしない側に倒れる。
 
 **Windows のテスト赤の解消（2026-10-17・別セッション・未コミット）**: `go test ./cmd/herdr-drover`
@@ -83,8 +107,9 @@ install.ps1 を `-LocalPackagePath` で実行・zip は GitHub digest と sha256
      Windows の全 pane を「直接起動でない」で skip**していた → `.exe` を落として判定（unix は
      exact のまま。`TestIsDirectInvocationExeSuffix`）。
   2. 🔴 シムの `pathCandidates`/`lookupAgentBin`（と `resolveClaudeBin`）が unix の実行ビットで
-     判定＝**Windows では `claude.exe` を一切見つけられずシムが常に失敗** → `agentExeName`/
-     `isExecFile`（platform_*.go）。`.cmd/.ps1` ラッパは前景が別プロセスで検出に載らない＝候補外。
+     判定＝**Windows では `claude.exe` を一切見つけられずシムが常に失敗** → `agentExeNames`/
+     `isExecFile`（platform_*.go）。⚠当初「`.cmd` は検出に載らない＝候補外」としたのは誤り（下記で否定）
+     → 2026-10-18 に `.exe`→`.cmd` の順で探すよう修正済み。
      実機の `~/.local/bin/claude.exe` を解決→herdr が claude と検出することを
      `TestInstalledAgentsAreDetectedByHerdr` で実測（PATH を隠さない実行で PASS）。
   3. 🔴 シムの cwd 一致 attach が**Windows で一度も成立せず毎回新 Tab**（herdr の pane cwd は末尾
@@ -128,9 +153,10 @@ install.ps1 を `-LocalPackagePath` で実行・zip は GitHub digest と sha256
   （この PC に実機なし・偽 agent で検出のみ）。InstallSpec/UpdaterSpec/ModelSpec は新 agent に
   載せていない（実バイナリ未確認＝推測しない）。ValidSessionRef は 512B 一律（herdr は path
   kind 4096B＋絶対パス必須・制御文字は C1 も拒否）＝差は未解消。
-- **派生 TODO**: シムの Windows バイナリ探索が `<name>.exe` のみ＝**npm 導入（`codex.cmd`・
-  cursor の `cursor-agent.cmd`）の agent をシムが見つけられない**（platform_windows.go の
-  「`.cmd` は検出に載らない」根拠は上記で否定済み）。InstallSpec の Windows 名も要再設計。
+- ✅ **（2026-10-18 修正）** シムの Windows バイナリ探索が `<name>.exe` のみ＝npm 導入（`codex.cmd`・
+  cursor の `cursor-agent.cmd`）の agent を見つけられなかった → 同一 dir 内で `.exe`→`.cmd`
+  の順に探す（`agentExeNames`・回帰 `TestLookupAgentBinFindsNpmCmdShim`／旧コード FAIL 確認）。
+  npm が同時に置く拡張子なし（sh 用）と `.ps1` は起動できないので候補外。
 
 **残**: `test/`・`internal/session`・`internal/commands` のテストは `!windows` のまま。
 `reconcile_test.go`/`reconcilelive_test.go`/`attachrefresh_unix_test.go` も `unix` 限定（BUG-6

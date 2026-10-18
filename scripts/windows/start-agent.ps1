@@ -23,13 +23,17 @@ $pidFile  = Join-Path $logDir 'agent.pid'
 # ⚠ ここを飛ばして Start-Process すると `-RedirectStandardError` が
 # **稼働中 daemon のログを切り詰める**（死因の証拠ごと消える）。周期起動では
 # 毎 tick でそれが起きるので、多重起動の抑止は pidfile ロック任せにしない。
-if (Test-Path $pidFile) {
-    $agentPid = (Get-Content $pidFile -TotalCount 1).Trim()
-    $proc = Get-Process -Id $agentPid -ErrorAction SilentlyContinue
-    if ($proc -and $proc.ProcessName -eq 'herdr-drover') { exit 0 }
+#
+# ⚠ **プロセス名だけで判定しない**: ↗窓（注入 pane）の attach client も
+# 同じ herdr-drover.exe（`herdr-drover.exe attach <pc> <sid>`）で、注入 pane が
+# ある限り常駐する。名前判定だと daemon が死んでも「稼働中」と誤認して**永久に
+# 復帰させない**（2026-10-18 実測: update-all 後の設計どおりの exit から 7 分以上
+# 戻らなかった）。コマンドラインが `agent` で終わるものだけを daemon とみなす。
+function Get-DroverAgent {
+    Get-CimInstance Win32_Process -Filter "Name='herdr-drover.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -match '\sagent\s*$' }
 }
-# pidfile が無い/古い場合の保険（CLI 実行中の誤検知で 1 tick 見送る程度は許容）。
-if (Get-Process -Name herdr-drover -ErrorAction SilentlyContinue) { exit 0 }
+if (Get-DroverAgent) { exit 0 }
 
 if (-not (Test-Path $drover)) { exit 0 }  # 未インストール＝何もしない
 

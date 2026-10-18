@@ -605,13 +605,15 @@ func pathCandidates(name string) []string {
 		if dir == "" {
 			dir = "."
 		}
-		p := filepath.Join(dir, agentExeName(name))
-		fi, err := os.Stat(p)
-		if err != nil || !isExecFile(fi) {
-			continue
-		}
-		if abs, err := filepath.Abs(p); err == nil {
-			out = append(out, abs)
+		for _, fn := range agentExeNames(name) {
+			p := filepath.Join(dir, fn)
+			fi, err := os.Stat(p)
+			if err != nil || !isExecFile(fi) {
+				continue
+			}
+			if abs, err := filepath.Abs(p); err == nil {
+				out = append(out, abs)
+			}
 		}
 	}
 	return out
@@ -648,13 +650,15 @@ func lookupAgentBin(agent string) (string, error) {
 	}
 	if home, err := os.UserHomeDir(); err == nil {
 		for _, wk := range sp.WellKnownPaths {
-			p := filepath.Join(home, agentExeName(strings.TrimPrefix(wk, "~/")))
-			if fi, serr := os.Stat(p); serr == nil && !fi.IsDir() {
-				if self != "" && sameFile(p, self) {
-					skippedSelf = true
-					continue
+			for _, fn := range agentExeNames(strings.TrimPrefix(wk, "~/")) {
+				p := filepath.Join(home, fn)
+				if fi, serr := os.Stat(p); serr == nil && !fi.IsDir() {
+					if self != "" && sameFile(p, self) {
+						skippedSelf = true
+						continue
+					}
+					return p, nil
 				}
-				return p, nil
 			}
 		}
 	}

@@ -43,6 +43,14 @@ $built    = Join-Path $RepoDir 'bin\herdr-drover.exe'
 
 function Say($m) { Write-Output ("[deploy] " + $m) }
 
+# Get-DroverAgent は daemon（`herdr-drover.exe agent`）だけを返す。プロセス名では
+# 判定しない＝↗窓 の attach client（`herdr-drover.exe attach …`）も同名で常駐する
+# （名前判定だと daemon が起動しなくても「起動した」と誤認する）。
+function Get-DroverAgent {
+    Get-CimInstance Win32_Process -Filter "Name='herdr-drover.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -match '\sagent\s*$' }
+}
+
 # 起動確認に渡す引数（副作用が無く即 exit 0 する呼び出し）。
 $ProbeArgLine = 'version'
 
@@ -112,15 +120,14 @@ if ($DryRun) {
 }
 
 # --- 3. 自 daemon だけ停止（裸の kill は恒久禁止）---------------------------
-if (Test-Path $pidPath) {
-    $agentPid = [int](Get-Content $pidPath -TotalCount 1).Trim()
-    $proc = Get-Process -Id $agentPid -ErrorAction SilentlyContinue
-    if ($proc -and $proc.ProcessName -eq 'herdr-drover') {
-        Say "停止: pid $agentPid"
-        Stop-Process -Id $agentPid -Force
-        Start-Sleep -Seconds 2
-    } else { Say "停止不要（pid $agentPid は不在＝stale pidfile）" }
-}
+$running = @(Get-DroverAgent)
+if ($running.Count -gt 0) {
+    foreach ($a in $running) {
+        Say "停止: pid $($a.ProcessId)（attach client には触れない）"
+        Stop-Process -Id $a.ProcessId -Force
+    }
+    Start-Sleep -Seconds 2
+} else { Say "停止不要（daemon は不在）" }
 
 # --- 4. 退避 rename → 配置（ロールバック点を残す）---------------------------
 $retired = Join-Path $binDir ("herdr-drover.exe.prev-" + (Get-Date -Format 'yyyyMMdd-HHmmss'))
@@ -134,8 +141,7 @@ Say "タスク実行: $TaskName（起動待ち）"
 $up = $false
 for ($i = 0; $i -lt 20; $i++) {
     Start-Sleep -Seconds 3
-    $p = Get-Process -Name herdr-drover -ErrorAction SilentlyContinue
-    if ($p) { $up = $true; break }
+    if (Get-DroverAgent) { $up = $true; break }
 }
 if (-not $up) {
     Say "🔴 起動しない → ロールバックする"
@@ -145,7 +151,7 @@ if (-not $up) {
     throw "新バイナリで daemon が起動しなかったため退避版へ戻した（$retired → $dst）。"
 }
 
-Say "起動: pid $((Get-Process -Name herdr-drover | Select-Object -First 1).Id)"
+Say "起動: pid $((Get-DroverAgent | Select-Object -First 1).ProcessId)"
 Start-Sleep -Seconds 5
 Say "--- 起動ログ ---"
 Get-Content $logPath -TotalCount 6 | ForEach-Object { "        $_" }

@@ -73,9 +73,9 @@ func setDetachedProc(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 }
 
-// agentExeName はエージェントの名前（InstallSpec の BinNames / WellKnownPaths）を
-// ディスク上のファイル名にする。unix はそのまま。
-func agentExeName(name string) string { return name }
+// agentExeNames はエージェントの名前（InstallSpec の BinNames / WellKnownPaths）を
+// ディスク上のファイル名候補（同一 dir 内の優先順）にする。unix はそのまま。
+func agentExeNames(name string) []string { return []string{name} }
 
 // isExecFile は fi が実行可能な通常ファイルか（unix は実行ビットで判定）。
 func isExecFile(fi os.FileInfo) bool { return !fi.IsDir() && fi.Mode().Perm()&0o111 != 0 }
