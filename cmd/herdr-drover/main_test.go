@@ -151,6 +151,7 @@ func clearDroverEnv(t *testing.T) {
 	for _, k := range []string{
 		"GCP_PROJECT", "CLOUD_RELAY_URL", "GOOGLE_APPLICATION_CREDENTIALS",
 		"PC_ID", "HERDR_SOCKET_PATH", "DROVER_TICK", "DROVER_IDLE",
+		"DROVER_FIRST_BYTE_IDLE",
 		"FIRESTORE_EMULATOR_HOST", "HERDR_ROLE",
 	} {
 		t.Setenv(k, "")
@@ -172,6 +173,10 @@ func TestResolveConfigDefaults(t *testing.T) {
 		// bridge.Run が 0 を DefaultIdle に解決する契約）。
 		t.Fatalf("idle 既定: got %s want 0（bridge 既定へ委譲）", cfg.Idle)
 	}
+	if cfg.FirstByteIdle != 0 {
+		// 0=「bridge 既定 5s（BUG-8 対策値）に委譲」。Idle と同じ契約。
+		t.Fatalf("first_byte_idle 既定: got %s want 0（bridge 既定へ委譲）", cfg.FirstByteIdle)
+	}
 	if !strings.HasSuffix(cfg.PCID, "-herdr") {
 		t.Fatalf("PC_ID 既定に -herdr サフィックスが無い: %q", cfg.PCID)
 	}
@@ -192,6 +197,7 @@ func TestResolveConfigEnvOverrides(t *testing.T) {
 	t.Setenv("HERDR_SOCKET_PATH", "/tmp/hx.sock")
 	t.Setenv("DROVER_TICK", "750ms")
 	t.Setenv("DROVER_IDLE", "3s")
+	t.Setenv("DROVER_FIRST_BYTE_IDLE", "10s")
 	cfg, err := resolveConfig()
 	if err != nil {
 		t.Fatalf("resolveConfig: %v", err)
@@ -199,7 +205,7 @@ func TestResolveConfigEnvOverrides(t *testing.T) {
 	if cfg.Project != "proj-x" || cfg.RelayURL != "wss://relay.example/session" ||
 		cfg.Credentials != "/tmp/sa.json" || cfg.PCID != "custom-herdr" ||
 		cfg.SocketPath != "/tmp/hx.sock" || cfg.Tick != 750*time.Millisecond ||
-		cfg.Idle != 3*time.Second {
+		cfg.Idle != 3*time.Second || cfg.FirstByteIdle != 10*time.Second {
 		t.Fatalf("env 上書きが反映されていない: %+v", cfg)
 	}
 }
@@ -222,6 +228,18 @@ func TestResolveConfigBadIdle(t *testing.T) {
 		t.Setenv("DROVER_IDLE", bad)
 		if _, err := resolveConfig(); err == nil {
 			t.Fatalf("DROVER_IDLE=%q でエラーにならない", bad)
+		}
+	}
+}
+
+// DROVER_FIRST_BYTE_IDLE の負値/0 も DROVER_IDLE と同じ理由で拒否する
+// （計測・調整用の knob であって「初回データ未着チェックの無効化」ではない）。
+func TestResolveConfigBadFirstByteIdle(t *testing.T) {
+	clearDroverEnv(t)
+	for _, bad := range []string{"abc", "-1s", "0s"} {
+		t.Setenv("DROVER_FIRST_BYTE_IDLE", bad)
+		if _, err := resolveConfig(); err == nil {
+			t.Fatalf("DROVER_FIRST_BYTE_IDLE=%q でエラーにならない", bad)
 		}
 	}
 }

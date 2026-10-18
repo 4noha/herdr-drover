@@ -31,7 +31,11 @@ type Config struct {
 	SocketPath  string        // HERDR_SOCKET_PATH（解決は herdrapi.ResolveSocketPath と同一規則）
 	Tick        time.Duration // DROVER_TICK（既定 5s）
 	Idle        time.Duration // DROVER_IDLE（Web ターミナル quiescence 自切断。0=bridge 既定 30s）
-	Role        string        // HERDR_ROLE（"slave"=共用 PC・SA レス relay 経由。既定 ""=master）
+	// FirstByteIdle は DROVER_FIRST_BYTE_IDLE（Web ターミナルの「初回データ未着」
+	// 自切断猶予。0=bridge 既定 5s＝BUG-8 対策値）。既定を動かす根拠（relay 往復が
+	// 5s を超える実測）がまだ無いので env 未設定なら挙動を変えない＝計測用の knob。
+	FirstByteIdle time.Duration
+	Role          string // HERDR_ROLE（"slave"=共用 PC・SA レス relay 経由。既定 ""=master）
 	// MirrorAgents は DROVER_MIRROR_AGENTS（リモート session の agent_status を注入
 	// pane(↗窓) に転記して herdr に agent 検出させるか）。既定 false=opt-in。
 	MirrorAgents bool
@@ -145,6 +149,19 @@ func resolveConfig() (Config, error) {
 			return cfg, fmt.Errorf("DROVER_IDLE は正の期間であること（quiescence 無効化は不可＝near-$0 設計）: %q", v)
 		}
 		cfg.Idle = d
+	}
+	// DROVER_FIRST_BYTE_IDLE は「初回データ未着」自切断の猶予（BUG-8）。
+	// 未設定=0 は bridge 既定 5s のまま＝挙動不変。DROVER_IDLE と同じ理由で
+	// 0 以下は許さない（無効化する knob ではなく、計測・調整用の knob）。
+	if v := os.Getenv("DROVER_FIRST_BYTE_IDLE"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return cfg, fmt.Errorf("DROVER_FIRST_BYTE_IDLE が不正（Go duration 形式。例 10s）: %q: %w", v, err)
+		}
+		if d <= 0 {
+			return cfg, fmt.Errorf("DROVER_FIRST_BYTE_IDLE は正の期間であること: %q", v)
+		}
+		cfg.FirstByteIdle = d
 	}
 	// DROVER_MIRROR_AGENTS: リモート session の agent_status/window_name を注入
 	// pane(↗窓) に pane.report_agent で転記し、herdr に agent として検出させるか

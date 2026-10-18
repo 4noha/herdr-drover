@@ -29,6 +29,8 @@ package main
 //     表示（App は locked＝縮んだ grid を上書きしない）。ロックは「ローカルが
 //     小さい側＝メインが余白で全部見える」ときだけ張る＝ロックが有害な
 //     「メイン < ローカル」では張らない（observe）＝旧 attach 固定の弊害を回避。
+//   - ただし対象 pane が busy（agent_status=working）なら上記を無視し常に
+//     observe（2026-10-13 実機再現で確定。詳細は pickStreamMode のコメント）。
 //
 // grid 行は pane.get の scroll.viewport_rows（非ロック時に真の App サイズ）。桁は
 // API 非公開のため control には起動元端末の実桁を渡す（外部が両次元で小さい
@@ -52,6 +54,7 @@ import (
 	"os/exec"
 	"strconv"
 	"sync"
+	"time"
 	"unicode/utf8"
 
 	"github.com/4noha/herdr-drover/internal/bridge"
@@ -102,12 +105,20 @@ func runLocalView(api *herdrapi.Client, paneID, herdrBin string, in, out, msg *o
 	gridRows := paneGridRows(api, paneID)
 
 	rows, cols := termSize(outFD)
-	mode := pickStreamMode(rows, gridRows)
+	mode := pickStreamMode(rows, gridRows, paneIsBusy(api, paneID))
 	gen, err := spawnStreamGen(herdrBin, mode, paneID, api.SocketPath, rows, cols, out)
 	if err != nil {
 		return fmt.Errorf("%s 起動失敗: %w", mode, err)
 	}
 	defer func() { gen.stop() }()
+
+	// firstFrameTimeout の監視。ready は最初のフレームが来た時点で局所変数を
+	// nil にして select から外す（close 済み channel は毎回即座に受信可能に
+	// なるため、消費後も case に残すと無限ループする＝必ず nil 化すること）。
+	timeoutTimer := time.NewTimer(firstFrameTimeout)
+	defer timeoutTimer.Stop()
+	timeoutC := timeoutTimer.C
+	readyC := gen.ready
 
 	for {
 		select {
@@ -125,12 +136,32 @@ func runLocalView(api *herdrapi.Client, paneID, herdrBin string, in, out, msg *o
 			// 解除）してから新ローカルサイズで mode を再評価し respawn。
 			gen.stop()
 			rows, cols = termSize(outFD)
-			mode = pickStreamMode(rows, gridRows)
+			mode = pickStreamMode(rows, gridRows, paneIsBusy(api, paneID))
 			var e error
 			gen, e = spawnStreamGen(herdrBin, mode, paneID, api.SocketPath, rows, cols, out)
 			if e != nil {
 				return fmt.Errorf("%s respawn 失敗: %w", mode, e)
 			}
+			timeoutTimer.Stop()
+			timeoutTimer = time.NewTimer(firstFrameTimeout)
+			timeoutC = timeoutTimer.C
+			readyC = gen.ready
+		case <-readyC:
+			// 最初のフレームが来た＝このまま無言でも「idle な pane の沈黙」と
+			// 区別できないので、以後は firstFrameTimeout を見張らない。
+			timeoutTimer.Stop()
+			timeoutC = nil
+			readyC = nil
+		case <-timeoutC:
+			// 2026-10-16 実機再現: 同 cwd への同時 attach で herdr サーバ側が
+			// 応答を返さなくなり、黒画面のまま無期限に固着するバグへの対処
+			// （herdr 本体はソース非公開の外部依存で直せない＝無言で待ち続け
+			// ないことだけをこちら側の責務として保証する）。
+			gen.stop()
+			return fmt.Errorf("%s から %s 応答が無いためタイムアウトしました"+
+				"（同じ pane に別のビューアが同時 attach している等で herdr サーバ側が"+
+				"応答不能になっている可能性があります。少し待ってから再試行してください）",
+				mode, firstFrameTimeout)
 		case <-gen.done:
 			// observe が自然終了＝pane 消滅／server 停止。stderr に理由があれば
 			// 復帰後（alt-screen を抜けた後）に見せる。
@@ -170,7 +201,20 @@ const (
 // 実寸へ縮小＋ロック＝ローカルで下部入力まで見える／メインは余白）。それ以外は
 // observe（ロック非取得＝リサイズ権限を App に残す／ローカルが大きければ余白）。
 // gridRows<=0（grid 不明）は安全側の observe＝旧挙動と同じでロックを張らない。
-func pickStreamMode(localRows, gridRows int) string {
+//
+// ⚠busy==true（対象 pane の agent_status=working）は control を**使わない**
+// （2026-10-13 ユーザー報告・実機再現で確定）。control は「App が自分の
+// レイアウトサイズへ resize する権利」を奪ってローカル実寸へ固定する＝
+// 作業中（能動的に描画中）の App へこれを強制すると、App 自身の resize 処理と
+// 並行出力がぶつかり、local 側は黒画面＋カーソル位置崩壊、herdr 側は対象 pane の
+// agent_status が unknown に固着（detach 後も自己回復せず）という二重の破損を
+// 実機で確認した。idle な pane への単発 control・idle pane への observe+control
+// 同時 attach はいずれも実測で無害＝busy という条件単体が引き金。安全側へ
+// フェイルする＝busy なら grid 比較を無視して常に observe。
+func pickStreamMode(localRows, gridRows int, busy bool) string {
+	if busy {
+		return streamObserve
+	}
 	if gridRows > 0 && localRows < gridRows {
 		return streamControl
 	}
@@ -187,13 +231,34 @@ func paneGridRows(api *herdrapi.Client, paneID string) int {
 	return 0
 }
 
+// paneIsBusy は対象 pane の agent_status=="working" か（取得不能は false＝
+// 安全側ではなく「busy と確定できない」の意味。false でも gridRows 比較で
+// control になり得るが、それは従来どおりの挙動＝新規の退行ではない）。
+func paneIsBusy(api *herdrapi.Client, paneID string) bool {
+	p, err := api.PaneGet(paneID)
+	return err == nil && p.AgentStatus == "working"
+}
+
+// firstFrameTimeout: spawn から最初の terminal.frame が来るまでの上限
+// （2026-10-16 実機再現で確定。別セッションからの報告: 同 cwd への同時 attach
+// で herdr 側が応答を返さなくなり、control 側は`herdr-client.log`に開始ログ
+// だけが残って以降 handshake 成功ログすら出ないまま 5 分以上 0%CPU で固着
+// ＝herdr サーバ側のハング。herdr はソースを vendor できない外部依存なので
+// 原因そのものは直せないが、**無言で無期限に待ち続けない**ことは herdr-drover
+// 側の責務＝タイムアウトで打ち切ってエラー表示する）。
+// var（const でなく）にしてあるのは localview_test.go が短縮してタイムアウト
+// 経路を機械検証するため。
+var firstFrameTimeout = 20 * time.Second
+
 // obsGen は observe/control サブプロセス 1 世代。frame writer goroutine が stdout
 // の ndjson terminal.frame の ANSI バイトをローカル out へ直書きする。
 type obsGen struct {
-	cmd    *exec.Cmd
-	done   chan struct{} // frame writer goroutine の終了（stdout EOF / 子プロセス死）
-	once   sync.Once
-	stderr *capBuf
+	cmd       *exec.Cmd
+	done      chan struct{} // frame writer goroutine の終了（stdout EOF / 子プロセス死）
+	ready     chan struct{} // 最初の terminal.frame 書込みが成功した時点で close
+	once      sync.Once
+	readyOnce sync.Once
+	stderr    *capBuf
 	// stdinKeep は control モードでのみ非 nil。control は stdin EOF で自動 Detach
 	// （ロック解除）するため、書込端を開いたまま保持して EOF させない。stop で閉じる。
 	stdinKeep *os.File
@@ -236,7 +301,7 @@ func spawnStreamGen(herdrBin, mode, paneID, socketPath string, rows, cols int, o
 		}
 		return nil, err
 	}
-	g := &obsGen{cmd: cmd, done: make(chan struct{}), stderr: sb, stdinKeep: stdinKeep}
+	g := &obsGen{cmd: cmd, done: make(chan struct{}), ready: make(chan struct{}), stderr: sb, stdinKeep: stdinKeep}
 	go func() {
 		defer close(g.done)
 		// フレームは端末実寸級（〜100 行）でも数十 KB／ローカル socket ゆえ
@@ -256,6 +321,10 @@ func spawnStreamGen(herdrBin, mode, paneID, socketPath string, rows, cols int, o
 					if _, werr := out.Write(env.Bytes); werr != nil {
 						return
 					}
+					// 最初の 1 フレームが書けた時点で ready＝firstFrameTimeout の
+					// 監視対象から外れる（以後フレームが途絶えても idle な pane の
+					// 正常な沈黙と区別できないので、ここでは見張らない）。
+					g.readyOnce.Do(func() { close(g.ready) })
 				}
 				// terminal.closed 等は無視＝この後 stdout EOF で done が閉じ、
 				// runLocalView が「セッション終了」として畳む。

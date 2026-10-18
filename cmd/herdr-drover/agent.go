@@ -256,6 +256,9 @@ func runOneCloud(ctx context.Context, cfg Config, cl Cloud, primary bool, hcli *
 	var wt *webTerm
 	if cl.RelayURL != "" {
 		wt = newWebTerm(cl.RelayURL, cfg.Idle, st, hcli, lg)
+		// 初回データ未着の自切断猶予（DROVER_FIRST_BYTE_IDLE・既定 0=bridge
+		// 既定 5s＝BUG-8 対策値のまま）。imagePaste と同じく生成後に代入する knob。
+		wt.firstByteIdle = cfg.FirstByteIdle
 		// 画像貼付（DROVER_WEB_IMAGE_PASTE・既定 off）。slave では config が
 		// 強制 false にしている＝ここは解決済みの値をそのまま渡すだけ。
 		wt.imagePaste = cfg.WebImagePaste

@@ -189,7 +189,7 @@ func resolveInstallEnv(fileCfg map[string]string) ([]envKV, error) {
 		}
 	}
 	env = append(env, envKV{"PC_ID", pcid})
-	for _, key := range []string{"HERDR_SOCKET_PATH", "DROVER_TICK", "DROVER_IDLE"} {
+	for _, key := range []string{"HERDR_SOCKET_PATH", "DROVER_TICK", "DROVER_IDLE", "DROVER_FIRST_BYTE_IDLE"} {
 		if v := get(key); v != "" {
 			env = append(env, envKV{key, v})
 		}
