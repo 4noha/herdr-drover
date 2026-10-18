@@ -668,11 +668,11 @@ macOS fleet は 0.7.4 のまま＝**両方で動く**ように実装している
 | `herdr server stop`（Windows） | — | pane のプロセスツリーを**確実には畳まない**（親の消えた OpenConsole＋pane プロセスが残る） | テストは自 spawn の herdr の子孫を回収（`herdrtree_windows_test.go`） |
 | 既定シェル pane への入力（Windows） | — | powershell は前景に居てもプロンプト表示まで約 1.5 秒入力を捨てる | テストは前景＋プロンプト表示を待って送る（`waitShellReady`） |
 | socket（Windows） | — | named pipe。pipe 名＝socket パス文字列。既定パスは `XDG_CONFIG_HOME` > `%APPDATA%` 系の `herdr\herdr.sock` | `dial_windows.go` |
-| 既定シェル（Windows） | — | pwsh があれば pwsh、無ければ Windows PowerShell | BUG-6 の復活経路（シェル名表＋sh quote）は Windows では**触らない側に倒れる**（未対応・下記） |
+| 既定シェル（Windows） | — | pwsh があれば pwsh、無ければ Windows PowerShell。process_info の名前は `.exe` 付き（`powershell.exe`/`pwsh.exe`/`cmd.exe`） | BUG-6 の復活はシェル別の引用でコマンド行を打ち込む（`injCommandLine`: PowerShell は `& '…'`・cmd は `"…"`） |
+| シェル配下の前景（Windows） | — | シェルの子として起動した**エージェントでない**プロセスは前景に出ない（前景はシェルのまま） | 復活後の attach client は前景に見えない＝シェルの子孫を OS から直接見て argv exact で判定（`injClientRunning`/`shellChildArgvs`）。見ないと生存確認のたびに実行中の attach へ打ち込み直す |
 
-⚠ **Windows で未対応のまま**: BUG-6 の注入 pane 復活（`reviveInjectPane`）は
-POSIX シェル前提（`injShellNames` に powershell/pwsh/cmd が無い＝**何もしない**側に倒れる）。
-ssh-forward は Windows out-of-scope（スタブ）。
+⚠ **Windows で未対応のまま**: ssh-forward（out-of-scope・スタブ）。cmd を既定シェルにした環境で
+attach の exe パスに `"` か `%` を含む場合は復活を見送る（cmd で安全に引用できない＝ログに理由）。
 
 ---
 

@@ -80,7 +80,14 @@ install.ps1 を `-LocalPackagePath` で実行・zip は GitHub digest と sha256
 
 **検証できていないこと**:
 - ↗窓 の relay 越し e2e テスト（Firestore emulator＝gcloud/Java がこの機に無い）。
-- BUG-6 の注入 pane 復活は POSIX シェル前提＝Windows では何もしない側に倒れる。
+- ✅ **（2026-10-18 修正）BUG-6 の注入 pane 復活が Windows で効かなかった**: 再起動後、この PC の
+  ↗窓 56 枚が素の PowerShell で戻り、`前景=[powershell.exe]＝触らない` で全滅したまま
+  だった（POSIX シェル専用だった）。シェル名表に powershell/pwsh/cmd（`.exe` 付きの実名）を
+  足し、シェル別の引用で打ち込む（`injCommandLine`）。さらに Windows の herdr は**シェルの子の
+  非 agent を前景に出さない**ので、復活後の client をシェルの子孫から直接確かめる
+  （`injClientRunning`/`shellChildArgvs`）＝打ち込み直しの thrash を防ぐ。実 herdr 0.9.5 で
+  PowerShell・cmd の両方を検証（`reconcilelive_windows_test.go`・空白と ' を含む exe パス・
+  2 回目の確認で再投入しないこと。旧コードで FAIL 確認済み）。
 
 **Windows のテスト赤の解消（2026-10-17・別セッション・未コミット）**: `go test ./cmd/herdr-drover`
 が **Windows 実 herdr 0.9.5 で全緑**（198 PASS・SKIP 5 は全て環境由来＝下記）。

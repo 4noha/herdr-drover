@@ -64,8 +64,13 @@ var (
 	// injShellNames は「client が終わって残ったシェル」を exact-match で見分ける表。
 	// ヒューリスティックにしない: ここに無い前景は**触らない**（ユーザーが自分で
 	// 何か動かしている pane に勝手にコマンドを打たないため）。
+	//
+	// Windows の名前は herdr 0.9.5 の process_info が返す実名（`.exe` 付き・実測）。
+	// 以前は POSIX シェルだけで、再起動後に素の PowerShell で戻った ↗窓 56 枚を
+	// 「触らない」と見送り続けた（2026-10-18 この PC で実発生）。
 	injShellNames = map[string]bool{
 		"sh": true, "bash": true, "zsh": true, "dash": true, "fish": true, "ksh": true,
+		"powershell.exe": true, "pwsh.exe": true, "cmd.exe": true,
 	}
 	// injLivenessEvery は 1 pane あたりの生存確認の最短間隔。毎 tick 全 pane に
 	// process_info を投げると ndjson 接続が増える（1 接続=1 リクエスト）ので間引く。
@@ -100,6 +105,27 @@ func injClientAlive(fps []herdrapi.PaneProcess, selfExe, pc, sid string) bool {
 	return false
 }
 
+// injClientRunning は attach client が pane で動いているか。前景に居る（unix・
+// 注入時に argv 直接実行した pane）か、前景シェルの子孫に居る（Windows で復活
+// させた pane＝herdr が前景をシェルのまま報告する・shellChildArgvs 参照）か。
+// どちらも argv exact-match（別 pc/sid の client と取り違えない）。
+func injClientRunning(fps []herdrapi.PaneProcess, selfExe, pc, sid string) bool {
+	if injClientAlive(fps, selfExe, pc, sid) {
+		return true
+	}
+	for _, fp := range fps {
+		if !injShellNames[strings.TrimPrefix(fp.Name, "-")] {
+			continue
+		}
+		for _, argv := range shellChildArgvs(fp.PID) {
+			if injClientAlive([]herdrapi.PaneProcess{{Argv: argv}}, selfExe, pc, sid) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // injForegroundShell は前景が**シェルだけ**なら その名前 を返す（復活してよい
 // 状態）。前景が空、または表に無いプロセスが混ざっていれば ""＝触らない。
 func injForegroundShell(fps []herdrapi.PaneProcess) string {
@@ -120,16 +146,46 @@ func injForegroundShell(fps []herdrapi.PaneProcess) string {
 // shQuote は argv 要素を sh の単一引用で包む（パスに空白があっても壊さない）。
 func shQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
 
+// injCommandLine は shell（injForegroundShell の戻り値）に打ち込む argv のコマンド行。
+//   - PowerShell / pwsh: `& 'exe' 'arg' …`。単一引用は文字通り（中の引用符は 2 個重ねる）、
+//     先頭が引用文字列だと式として評価されるので呼び出し演算子 & が要る。
+//   - cmd: 各要素を "…" で囲む。cmd には " を含む値の確実な表記が無く、% は引用内でも
+//     展開される＝どちらかを含む argv は**推測で崩さずエラー**にする（呼び手がログ）。
+//   - それ以外（POSIX シェル）: sh の単一引用。
+func injCommandLine(shell string, argv []string) (string, error) {
+	q := make([]string, len(argv))
+	switch shell {
+	case "powershell.exe", "pwsh.exe":
+		for i, a := range argv {
+			q[i] = "'" + strings.ReplaceAll(a, "'", "''") + "'"
+		}
+		return "& " + strings.Join(q, " "), nil
+	case "cmd.exe":
+		for i, a := range argv {
+			if strings.ContainsAny(a, `"%`) {
+				return "", fmt.Errorf("cmd では安全に引用できない文字（\" か %%）を含む引数: %q", a)
+			}
+			q[i] = `"` + a + `"`
+		}
+		return strings.Join(q, " "), nil
+	default:
+		for i, a := range argv {
+			q[i] = shQuote(a)
+		}
+		return strings.Join(q, " "), nil
+	}
+}
+
 // reviveInjectPane は残ったシェルに attach client のコマンド行を打ち込んで
 // 復活させる。**pane を作り直さない**（pane_id / Tab / 配置が変わらない＝
 // ユーザーの窓が消えない）。pane.run は wire API に無い（schema 実測）ので
 // send_text + send_keys("enter") を使う＝手作業と同じ経路。
-func reviveInjectPane(api *herdrapi.Client, paneID string, argv []string) error {
-	q := make([]string, len(argv))
-	for i, a := range argv {
-		q[i] = shQuote(a)
+func reviveInjectPane(api *herdrapi.Client, paneID, shell string, argv []string) error {
+	line, err := injCommandLine(shell, argv)
+	if err != nil {
+		return err
 	}
-	if err := api.PaneSendText(paneID, strings.Join(q, " ")); err != nil {
+	if err := api.PaneSendText(paneID, line); err != nil {
 		return err
 	}
 	return api.PaneSendKeys(paneID, "enter")
@@ -147,7 +203,7 @@ func ensureInjectClient(api *herdrapi.Client, paneID, selfExe, pc, sid string, l
 		lg.Printf("[reconcile] process_info 失敗 pane=%s（生存判定 skip・次周に再試行）: %v", paneID, err)
 		return
 	}
-	if injClientAlive(info.ForegroundProcesses, selfExe, pc, sid) {
+	if injClientRunning(info.ForegroundProcesses, selfExe, pc, sid) {
 		return
 	}
 	sh := injForegroundShell(info.ForegroundProcesses)
@@ -160,7 +216,7 @@ func ensureInjectClient(api *herdrapi.Client, paneID, selfExe, pc, sid string, l
 		return
 	}
 	argv := []string{selfExe, "attach", pc, sid}
-	if rerr := reviveInjectPane(api, paneID, argv); rerr != nil {
+	if rerr := reviveInjectPane(api, paneID, sh, argv); rerr != nil {
 		lg.Printf("[reconcile] REVIVE 失敗 %s/%s pane=%s（次の窓で再試行）: %v", pc, sid, paneID, rerr)
 		return
 	}

@@ -79,3 +79,7 @@ func agentExeNames(name string) []string { return []string{name} }
 
 // isExecFile は fi が実行可能な通常ファイルか（unix は実行ビットで判定）。
 func isExecFile(fi os.FileInfo) bool { return !fi.IsDir() && fi.Mode().Perm()&0o111 != 0 }
+
+// shellChildArgvs は shell プロセス配下の子孫の argv を返す。unix の herdr は
+// シェル配下で起動した前景プロセスを process_info にそのまま出す（実測）＝不要。
+func shellChildArgvs(shellPID int) [][]string { return nil }
