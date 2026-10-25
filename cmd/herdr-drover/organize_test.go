@@ -636,14 +636,19 @@ func TestOrganizeCaptureRealHerdrRoundTrip(t *testing.T) {
 	dirA := orgPhysDir(t) // w1: 既存 exact "old" を上書き
 	dirB := orgPhysDir(t) // w2: 新規
 	dirC := orgPhysDir(t) // w1 と w2 に散在＝曖昧 skip
-	dirD := orgPhysDir(t) // w2: シム命名（agent.start name=claude・検出なし）＝(a) 経路
+	dirD := orgPhysDir(t) // w2: シム命名（name=claude）＝(a) 経路
 
 	orgLayoutApply(t, api, w1, "a", orgPaneNode(dirA, claude))
 	orgLayoutApply(t, api, w2, "b", orgPaneNode(dirB, claude))
 	orgLayoutApply(t, api, w1, "c1", orgPaneNode(dirC, claude))
 	orgLayoutApply(t, api, w2, "c2", orgPaneNode(dirC, claude))
-	if _, err := api.AgentStart("claude", []string{"/bin/sleep", "300"}, &herdrapi.AgentStartOptions{Cwd: dirD, WorkspaceID: w2}); err != nil {
-		t.Fatalf("agent.start named claude: %v", err)
+	// シム命名 pane。⚠herdr 0.9.x では「名前だけ付いて検出されていない pane」は
+	// 作れない（agent.rename は検出前の pane に agent_not_found を返す実測）＝
+	// 0.7.4 で旧 agent.start が作れた「(a) のみ」の状態は再現不能。検出済み pane に
+	// シムと同じ手順（layout.apply→検出待ち rename）で名前を付け、(a) の名前が
+	// capture に乗ることを確かめる（(b) 検出とも矛盾しない＝conflict にならない）。
+	if _, err := api.LaunchAgent("claude", []string{claude}, &herdrapi.LaunchAgentOptions{Cwd: dirD, WorkspaceID: w2}); err != nil {
+		t.Fatalf("LaunchAgent named claude: %v", err)
 	}
 	orgWaitClaudeDetected(t, api, dirA, dirB, dirC)
 	orgWaitFor(t, 10*time.Second, "named agent 出現", func() bool {
@@ -733,10 +738,13 @@ func TestLearnMovesRealEventsAndBacklogDedup(t *testing.T) {
 	dirA := orgPhysDir(t)
 	dirB := orgPhysDir(t)
 
-	// --- Phase A: 購読前の移動＋pane 消滅 → バックログは stale＝学習しない ---
-	// herdr は新規購読のたびに過去 event を再送する（実測）。旧実装が event を
-	// 鵜呑みにすると dirA→dst を誤学習する。ライブ照合（pane 消滅＝現況取得
-	// 不能）で捨てることを実イベントで検証する。
+	// --- Phase A: 購読前の移動＋pane 消滅 → 学習しない ---
+	// herdr 0.7.4 は新規購読のたびに過去 event を再送し、旧実装が鵜呑みにすると
+	// dirA→dst を誤学習した（ライブ照合＝pane 消滅で捨てる防御で対処）。
+	// 0.9.5 は購読前の event を再送しない（実測）ので、この経路の event はそもそも
+	// 届かない。⚠よって実 herdr 0.9.x では「stale 再送を捨てる防御」は踏まれない
+	// （防御コード自体は 0.7.4 互換のため残す）。ここでは購読確立を待ってから、
+	// 購読前の移動が学習されていないことだけを確かめる。
 	orgLayoutApply(t, api, w1, "la", orgPaneNode(dirA, claude))
 	orgWaitClaudeDetected(t, api, dirA)
 	pA := orgFindPaneByCwd(orgPanes(t, api), dirA)
@@ -759,9 +767,10 @@ func TestLearnMovesRealEventsAndBacklogDedup(t *testing.T) {
 	defer cancel()
 	go func() { _ = runLearnLoop(ctx, api, lg) }()
 
-	// stale バックログが処理された（skip ログ）ことを確認してから無学習を検証
-	orgWaitFor(t, 15*time.Second, "stale バックログの skip 処理", func() bool {
-		return strings.Contains(buf.String(), "現況取得不能")
+	// 購読確立（ログ）を待ってから無学習を検証。0.9.x は確立前の移動を取りこぼす
+	// ので、Phase B の移動もこの後に行う（確立前に動かすと学習されず偽 FAIL）。
+	orgWaitFor(t, 15*time.Second, "learn の購読確立", func() bool {
+		return strings.Contains(buf.String(), "pane.moved の購読を確立")
 	})
 	m, err := wsmap.Load()
 	if err != nil {
@@ -816,6 +825,11 @@ func TestLearnRestartDoesNotResurrectDeletedRule(t *testing.T) {
 	buf1 := &orgSyncBuf{}
 	ctx1, cancel1 := context.WithCancel(context.Background())
 	go func() { _ = runLearnLoop(ctx1, api, log.New(buf1, "", 0)) }()
+	// 0.9.x は購読確立前の移動を再送しない＝確立を待ってから動かす（待たないと
+	// pane 検出待ちの時間に偶然救われるだけの race になる）。
+	orgWaitFor(t, 15*time.Second, "loop#1 の購読確立", func() bool {
+		return strings.Contains(buf1.String(), "pane.moved の購読を確立")
+	})
 	orgLayoutApply(t, api, w1, "lb", orgPaneNode(dirB, claude))
 	orgWaitClaudeDetected(t, api, dirB)
 	pB := orgFindPaneByCwd(orgPanes(t, api), dirB)
@@ -832,10 +846,16 @@ func TestLearnRestartDoesNotResurrectDeletedRule(t *testing.T) {
 	orgWriteRules(t, home, `{}`)
 
 	// --- loop#2（daemon 再起動相当）: dirB のバックログ再送が来ても再学習しない ---
+	// ⚠herdr 0.9.x は購読前 event を再送しない（実測）ので、実 herdr 0.9.x では
+	// 再送そのものが来ず、この検証は「防御が踏まれずとも復活しない」の確認に
+	// とどまる（再送を捨てる防御は 0.7.4 互換のため残している）。
 	buf2 := &orgSyncBuf{}
 	ctx2, cancel2 := context.WithCancel(context.Background())
 	defer cancel2()
 	go func() { _ = runLearnLoop(ctx2, api, log.New(buf2, "", 0)) }()
+	orgWaitFor(t, 15*time.Second, "loop#2 の購読確立", func() bool {
+		return strings.Contains(buf2.String(), "pane.moved の購読を確立")
+	})
 	// 「バックログを処理し終えた」ことは後続 live イベントの処理完了で機械
 	// 判定する（Subscribe は同一接続で順序保存＝dirC の学習が見えた時点で
 	// dirB のバックログは処理済み）。

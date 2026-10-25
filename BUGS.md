@@ -703,3 +703,56 @@ env 未設定なら `bridge.DefaultFirstByteIdle`（5s）のまま＝**本番の
 `TestResolveConfigEnvOverrides`（`DROVER_FIRST_BYTE_IDLE=10s` の反映）・
 `TestResolveConfigBadFirstByteIdle`（不正値/0 以下を拒否）。gofmt/build/vet/test
 全緑（`go test ./... -count=1`）。
+
+---
+
+## BUG-12【P0】herdr 0.9.5 で daemon とシムが起動しない（ping の decode 失敗）（2026-10-25）
+
+### ✅ 解決（2026-10-25・`internal/herdrapi/types.go`／**未 release**）
+`PongInfo.UnmarshalJSON` で capabilities の bool 値だけを拾い、他の型は捨てる
+（bool に捏造しない）。capabilities は情報として保持するだけで分岐に使っていない。
+
+### 症状
+再起動後に daemon が起動直後 exit 1 を繰り返す（launchd `runs = 186`）。`claude` シムは
+「herdr server が 10s 以内に応答しない」と表示して起動しない（server 自体は応答している）。
+
+### 真因（確定）
+herdr 0.9.5 の ping が `capabilities` に数値（`endpoint_protocol_generation:1`）を含む。
+`map[string]bool` の decode が `cannot unmarshal number into Go struct field
+PongInfo.capabilities of type bool` で失敗。herdr は brew で 10/25 04:24 に 0.9.5 化済みで、
+server が 0.9.5 で起動し直した再起動を機に顕在化した。
+
+### テスト
+`internal/herdrapi/pong_test.go`（実 0.9.5 の ping 原文を固定。**旧型で実機と同一の
+エラー文で FAIL を確認済み**）。
+
+---
+
+## BUG-13【P1】herdr 0.9.5 でシム・restart-agent-session・update-all が命名で失敗する（2026-10-25）
+
+### ✅ 解決（2026-10-25・`internal/herdrapi/agentlaunch.go`／**未 release**）
+`agent.rename` を `RenameWithDetectWait`（`agent_not_found` の exact-match のみ上限
+15 秒で待つ）経由にした。旧 `agent.start{name,argv}` 相当は `LaunchAgent`
+（layout.apply＋検出待ち rename）に置き換え、廃止 API のラッパ `AgentStart` は削除。
+購読は `SubscribeReady` で確立を通知し、learn ループは確立をログに出す。
+
+### 真因（確定・実測）
+0.9.5 は agent 検出が前景プロセス名ベースの非同期処理になり、生成直後の pane への
+`agent.rename` が `agent_not_found`（本物の claude で約 0.76 秒後に通る）。あわせて
+`agent.start` の意味変更・購読前 event の再送廃止・`herdr:*` 予約ソースの扱いが
+テスト基盤を壊していた（CLAUDE.md「herdr 0.9.5 で変わったこと」）。
+
+### 踏まないようにしたこと
+- **購読前 event の再送に頼っていた race**: learn・events のテストは再送が race を
+  覆っていた。確立を待ってから動く形に直した（3 回連続で安定を確認）。
+- **再送を捨てる防御**（learn の snapshot 照合）は 0.7.4 互換のため残したが、
+  実 herdr 0.9.x のテストでは**踏まれない**（再送が来ない）。
+- **「名前だけ付いて検出されていない pane」**は 0.9.x では作れない（命名に検出が必須）。
+  organize の (a) 経路は検出済み pane への命名で検証している。
+
+### テスト（実 herdr 0.9.5・`go test ./... -count=1` 全緑）
+`internal/herdrapi/agentlaunch_test.go`（検出待ちの純関数 4 件＋`TestLaunchAgent`／
+検出されない argv で loud に失敗）、events の確立待ち 2 件、organize capture/learn、
+restart の skip 文言（codex で再構成）、e2e picker・間借り正規化。
+⚠ Firestore エミュレータ（Java 21+）を要する 15 件はこの機で skip＝0.9.5 では未検証。
+

@@ -25,12 +25,14 @@ const (
 // ＝命名の非対称に注意（types.go Event 参照）。
 //
 // ⚠受信側の必須規律（実測に基づく）:
-//   - **herdr は新規購読のたびに、当該サーバ稼働中に起きた過去 event の
-//     バックログを再送する**（実測: 同一 pane_created/pane_updated が購読の
-//     たびに再着。サーバ起動時の session 復元で生えた pane は再送に現れ
-//     ない）。再接続でも同じ＝event は「差分の権威」ではなく nudge として
-//     扱い、pane.list との突合せ・dedupe を呼び手が行うこと
-//     （DESIGN: 周期 poll backstop 常設）。
+//   - **購読前の event の扱いは herdr の版で違う**（どちらも実測）:
+//     0.7.4 は新規購読のたびに、当該サーバ稼働中に起きた過去 event の
+//     バックログを再送した。**0.9.5 は再送しない**（購読確立より前の event は
+//     届かない。2026-10-25・隔離サーバで、pane 作成→1.5s 後に購読→6s 待っても
+//     pane_created 0 件）。よって呼び手は (1) 再送が来ても壊れないよう
+//     pane.list との突合せ・dedupe を行い（0.7.4 互換）、(2) 再送に頼らず
+//     「購読が張れてから動く」ために SubscribeReady の ready を待つこと。
+//     event は「差分の権威」ではなく nudge（DESIGN: 周期 poll backstop 常設）。
 //   - 接続維持性（実測・v0.7.4・本 Mac）: keepalive/ping の類は一切流れず、
 //     **完全無通信 384 秒（6 分 24 秒）放置後も同一接続のまま後続 event が
 //     即配信された**（隔離サーバ・AF_UNIX。サーバ側 idle 切断は少なくとも
@@ -41,9 +43,20 @@ const (
 // 呼び手は十分なバッファを持つか消費を止めないこと。ch は close しない
 // （所有権は呼び手）。
 func (c *Client) Subscribe(ctx context.Context, events []string, ch chan<- Event) error {
+	return c.SubscribeReady(ctx, events, ch, nil)
+}
+
+// SubscribeReady は Subscribe と同じだが、購読が**確立するたび**（初回と、切断後の
+// 再購読のたび）に ready へ 1 つ通知する。送出は非ブロッキング（受け手が詰まって
+// いれば落とす）なので、ready は容量 1 以上で作り、確立を待つ箇所で読むこと。
+// ready が nil なら通知しない（＝Subscribe）。
+//
+// 用途: herdr 0.9.x は購読前の event を再送しないので、「購読を張る → 確立を
+// 待つ → 状態を変える／観測する」の順にしないと、その間の event を取りこぼす。
+func (c *Client) SubscribeReady(ctx context.Context, events []string, ch chan<- Event, ready chan<- struct{}) error {
 	backoff := subscribeBackoffMin
 	for {
-		established, err := c.subscribeOnce(ctx, events, ch)
+		established, err := c.subscribeOnce(ctx, events, ch, ready)
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -73,7 +86,7 @@ func (c *Client) Subscribe(ctx context.Context, events []string, ch chan<- Event
 // subscribeOnce は 1 本の購読接続を張り、切断まで event を ch へ流す。
 // established は subscription_started 受領まで到達したか（backoff リセット
 // 判定用）。
-func (c *Client) subscribeOnce(ctx context.Context, events []string, ch chan<- Event) (established bool, err error) {
+func (c *Client) subscribeOnce(ctx context.Context, events []string, ch chan<- Event, ready chan<- struct{}) (established bool, err error) {
 	type subscription struct {
 		Type string `json:"type"`
 	}
@@ -136,6 +149,14 @@ func (c *Client) subscribeOnce(ctx context.Context, events []string, ch chan<- E
 	// 流れない実測＝read deadline を置くと idle で誤切断する）。
 	if err := conn.SetDeadline(time.Time{}); err != nil {
 		return true, err
+	}
+	// subscription_started を受けた＝以後の event は届く。確立を通知する
+	// （非ブロッキング。SubscribeReady 参照）。
+	if ready != nil {
+		select {
+		case ready <- struct{}{}:
+		default:
+		}
 	}
 	for {
 		line, err := r.ReadBytes('\n')

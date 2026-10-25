@@ -7,6 +7,16 @@ import (
 	"time"
 )
 
+// awaitReady は SubscribeReady の確立通知を待つ。
+func awaitReady(t *testing.T, ready <-chan struct{}, timeout time.Duration, what string) {
+	t.Helper()
+	select {
+	case <-ready:
+	case <-time.After(timeout):
+		t.Fatalf("%s が %s 以内に確立しない", what, timeout)
+	}
+}
+
 // awaitPaneCreated は ch から目当ての pane_created が来るまで読む。
 // herdr は購読ごとに過去 event のバックログを再送する（実測）ので、無関係な
 // event は読み捨てて pane_id の exact-match だけを待つ。
@@ -41,11 +51,13 @@ func TestSubscribeReceivesPaneCreated(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	ch := make(chan Event, 64)
+	ready := make(chan struct{}, 1)
 	subDone := make(chan error, 1)
-	go func() { subDone <- c.Subscribe(ctx, []string{"pane.created", "pane.closed"}, ch) }()
+	go func() { subDone <- c.SubscribeReady(ctx, []string{"pane.created", "pane.closed"}, ch, ready) }()
 
-	// 購読確立を待たずに作ってよい: herdr はバックログ再送するので、購読が
-	// 後から張られても pane_created は届く（実測）＝ここに race はない。
+	// 購読確立を待ってから作る。0.7.4 は購読前の event も再送したので待たなくても
+	// 届いたが、0.9.5 は再送しない（実測）＝待たないと pane_created を取りこぼす。
+	awaitReady(t, ready, 15*time.Second, "初回購読")
 	ws, err := c.WorkspaceCreate()
 	if err != nil {
 		t.Fatalf("workspace.create: %v", err)
@@ -73,9 +85,11 @@ func TestSubscribeReconnectsAfterServerRestart(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	ch := make(chan Event, 64)
-	go func() { _ = c.Subscribe(ctx, []string{"pane.created"}, ch) }()
+	ready := make(chan struct{}, 1)
+	go func() { _ = c.SubscribeReady(ctx, []string{"pane.created"}, ch, ready) }()
 
 	// 1 本目のサーバで event が届くところまで確立
+	awaitReady(t, ready, 15*time.Second, "初回購読")
 	ws1, err := c.WorkspaceCreate()
 	if err != nil {
 		t.Fatalf("workspace.create #1: %v", err)
@@ -87,7 +101,9 @@ func TestSubscribeReconnectsAfterServerRestart(t *testing.T) {
 	s.stop()
 	s.startProcess()
 
-	// 新サーバで新規 pane → 再購読済みの同じ ch に届く
+	// 新サーバで**再購読が確立してから**新規 pane → 同じ ch に届く。
+	// 再確立の通知が来ること自体が「切断＝窓死亡にならない」の物証。
+	awaitReady(t, ready, 30*time.Second, "再購読")
 	ws2, err := c.WorkspaceCreate()
 	if err != nil {
 		t.Fatalf("workspace.create #2: %v", err)

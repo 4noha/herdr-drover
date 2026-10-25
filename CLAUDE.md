@@ -79,6 +79,31 @@ cwd 自動 attach／新 Tab 起動を提供する。Python 版 claude-master(cm)
 - `tab.move` は同一 WS の reorder 専用＝WS 間移動は `pane.move` が唯一。
 - workspace label は重複可＝識別子にしない（workspace_id を使う）。
 
+## herdr 0.9.5 で変わったこと（実測 2026-10-25・隔離 server）
+
+0.7.4 の trap はおおむね有効。次の差分は drover の動作に直結する（BUGS.md BUG-12/13）。
+
+- `ping` の `capabilities` に **bool 以外が混ざる**（`endpoint_protocol_generation`
+  が数値）＝型を決め打ちで decode すると daemon もシムも起動不能になる。
+- **agent 検出は前景プロセス名ベースの非同期処理**。layout.apply 直後の
+  `agent.rename` は `agent_not_found`、本物の claude で約 0.8 秒後に通る＝
+  `herdrapi.RenameWithDetectWait` を使う。`exec sleep` の stub は前景が sleep に
+  置換されて**永久に検出されない**（stub は exec しない sh にする）。
+- `agent.start` は **別 API**（既存の対話シェル pane に kind の正規実行体を起動。
+  必須 `name`/`kind`/`pane_id`）。旧「name+argv で新 pane」は無い＝
+  `herdrapi.LaunchAgent`（layout.apply＋検出待ち rename）で代替。
+- **購読前の event を再送しない**（0.7.4 は再送した）＝「購読→確立を待つ→動く」の
+  順にする（`herdrapi.SubscribeReady`）。
+- `herdr:*` は herdr 自身の統合の**予約ソース**。session は **herdr が検出済みの
+  pane** にしか載らない（素シェルへの種別偽装では付かない）。opencode は検出済みでも
+  外部からの `report_agent_session` では載らない。
+- `layout.apply` の `tab_id` と `workspace_id` は**排他**（両方で `invalid_target`）。
+  workspace ゼロの server で workspace 未指定は `no active workspace`。
+- 隔離 server は **`XDG_CONFIG_HOME` も必ず分ける**。`HERDR_SOCKET_PATH` だけだと
+  実機の `~/.config/herdr/session.json` を**復元して pane を生やす**（実際に踏んだ）。
+- 公式スキーマは `herdr api schema --json`（102 メソッド・protocol 22）で取れる＝
+  API 契約の一次情報。
+
 ## ビルド / テスト / デプロイ
 
 ```sh

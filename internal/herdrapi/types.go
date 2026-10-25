@@ -298,14 +298,6 @@ type WorkspaceCreated struct {
 	RootPane  PaneInfo      `json:"root_pane"`
 }
 
-// AgentStarted は agent.start の応答（type:"agent_started"）。
-// 実採取: {"type":"agent_started","agent":{...AgentInfo...},"argv":["sleep","5"]}
-type AgentStarted struct {
-	Type  string    `json:"type"`
-	Agent AgentInfo `json:"agent"`
-	Argv  []string  `json:"argv"`
-}
-
 // Event は events.subscribe が流す 1 行。
 // 実採取: {"data":{"pane":{...},"type":"pane_created"},"event":"pane_created"}
 //

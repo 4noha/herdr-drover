@@ -279,34 +279,6 @@ func (c *Client) PaneRead(paneID, source string) (*PaneReadInfo, error) {
 	return &out.Read, nil
 }
 
-// AgentStartOptions は agent.start の任意パラメータ（実測で受理・反映を
-// 確認したフィールドのみ。cwd は起動 pane の cwd に反映されることを実測）。
-type AgentStartOptions struct {
-	Cwd         string `json:"cwd,omitempty"`
-	WorkspaceID string `json:"workspace_id,omitempty"`
-}
-
-// AgentStart は名前付き agent を新 pane で起動する。name と argv は必須
-// （実測: 欠くと "missing field `argv`" 等）。
-// result: {"type":"agent_started","agent":{...},"argv":[...]}
-func (c *Client) AgentStart(name string, argv []string, opts *AgentStartOptions) (*AgentInfo, error) {
-	params := struct {
-		Name        string   `json:"name"`
-		Argv        []string `json:"argv"`
-		Cwd         string   `json:"cwd,omitempty"`
-		WorkspaceID string   `json:"workspace_id,omitempty"`
-	}{Name: name, Argv: argv}
-	if opts != nil {
-		params.Cwd = opts.Cwd
-		params.WorkspaceID = opts.WorkspaceID
-	}
-	var out AgentStarted
-	if err := c.call("agent.start", params, &out); err != nil {
-		return nil, err
-	}
-	return &out.Agent, nil
-}
-
 // ReportMetadata は pane.report_metadata で設定する値。少なくとも 1 つの
 // metadata フィールドが必要（実測: 空だと invalid_metadata_request
 // "missing metadata field to set or clear"）。
