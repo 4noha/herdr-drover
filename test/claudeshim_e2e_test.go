@@ -179,7 +179,7 @@ func physicalDir(t *testing.T) string {
 func installStubClaudeAt(t *testing.T, dir, marker string) string {
 	t.Helper()
 	stub := filepath.Join(dir, "claude")
-	script := "#!/bin/sh\necho " + marker + "\nexec sleep 300\n"
+	script := "#!/bin/sh\necho " + marker + "\nsleep 300\n"
 	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
 		t.Fatalf("stub claude 作成: %v", err)
 	}

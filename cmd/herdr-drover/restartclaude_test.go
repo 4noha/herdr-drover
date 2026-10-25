@@ -278,7 +278,7 @@ func TestSummarizeRestart(t *testing.T) {
 func writeStubClaude(t *testing.T) string {
 	t.Helper()
 	stub := filepath.Join(t.TempDir(), "claude")
-	if err := os.WriteFile(stub, []byte("#!/bin/sh\nexec sleep 300\n"), 0o755); err != nil {
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\nsleep 300\n"), 0o755); err != nil {
 		t.Fatalf("stub 作成: %v", err)
 	}
 	return stub
@@ -293,7 +293,7 @@ func writeResumeRejectingStub(t *testing.T) string {
 		"for a in \"$@\"; do\n" +
 		"  if [ \"$a\" = \"--resume\" ]; then echo 'No conversation found' >&2; exit 1; fi\n" +
 		"done\n" +
-		"exec sleep 300\n"
+		"sleep 300\n"
 	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
 		t.Fatalf("stub 作成: %v", err)
 	}

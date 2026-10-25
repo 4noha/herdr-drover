@@ -139,7 +139,7 @@ func TestArgvGateUsesTargetAgentKind(t *testing.T) {
 	// 実体名が codex の stub（argv ゲートは basename を見る）。
 	dir := t.TempDir()
 	stub := filepath.Join(dir, "codex")
-	if err := os.WriteFile(stub, []byte("#!/bin/sh\nexec sleep 300\n"), 0o755); err != nil {
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\nsleep 300\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	wsID, err := currentWorkspaceID(api)
@@ -188,7 +188,7 @@ func TestRestartSkipsPanesWithoutResumeRef(t *testing.T) {
 	api := herdrapi.New(sock)
 	dir := t.TempDir()
 	stub := filepath.Join(dir, "codex")
-	if err := os.WriteFile(stub, []byte("#!/bin/sh\nexec sleep 300\n"), 0o755); err != nil {
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\nsleep 300\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	wsID, err := currentWorkspaceID(api)
@@ -237,7 +237,7 @@ func TestRestartAllowsResumeIncapableAgents(t *testing.T) {
 	api := herdrapi.New(sock)
 	dir := t.TempDir()
 	stub := filepath.Join(dir, "gemini")
-	if err := os.WriteFile(stub, []byte("#!/bin/sh\nexec sleep 300\n"), 0o755); err != nil {
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\nsleep 300\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	wsID, err := currentWorkspaceID(api)

@@ -32,7 +32,7 @@ func writeUpdatableStub(t *testing.T, dir, from, to string) (bin, verFile string
 		"  --version) cat \"$VF\"; echo; exit 0 ;;\n" +
 		"  update) echo \"updated to " + to + "\"; printf %s '" + to + "' > \"$VF\"; exit 0 ;;\n" +
 		"esac\n" +
-		"exec sleep 300\n"
+		"sleep 300\n"
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
 		t.Fatalf("stub 作成: %v", err)
 	}
@@ -224,7 +224,7 @@ func TestUpdateClaudeDoesNotRestartWhenUpdateFails(t *testing.T) {
 		"  --version) echo '2.1.214'; exit 0 ;;\n" +
 		"  update) echo 'network unreachable' >&2; exit 1 ;;\n" +
 		"esac\n" +
-		"exec sleep 300\n"
+		"sleep 300\n"
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
 		t.Fatalf("stub 作成: %v", err)
 	}
