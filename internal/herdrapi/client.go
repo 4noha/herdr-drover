@@ -148,9 +148,18 @@ func (c *Client) call(method string, params, out any) error {
 // DESIGN の hidden CLI リスク対応: agent 起動時に version を実測し、
 // 未検証 version へは警告する用途の一次情報源。
 func (c *Client) Ping() (*PongInfo, error) {
-	var out PongInfo
-	if err := c.call("ping", nil, &out); err != nil {
+	var raw json.RawMessage
+	if err := c.call("ping", nil, &raw); err != nil {
 		return nil, err
+	}
+	return decodePong(raw)
+}
+
+// decodePong は ping 応答の result を PongInfo に読む（テスト可能にするため切り出し）。
+func decodePong(raw []byte) (*PongInfo, error) {
+	var out PongInfo
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("herdr decode ping result: %w", err)
 	}
 	return &out, nil
 }
