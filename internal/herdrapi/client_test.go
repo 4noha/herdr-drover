@@ -234,36 +234,6 @@ func TestPaneLifecycle(t *testing.T) {
 	}
 }
 
-// TestAgentStart は agent.start → agent.list 反映（reconcile の注入経路）。
-func TestAgentStart(t *testing.T) {
-	_, c := startHerdr(t)
-
-	ag, err := c.AgentStart("hdapitest", []string{"/bin/sleep", "30"}, &AgentStartOptions{Cwd: "/private/tmp"})
-	if err != nil {
-		t.Fatalf("agent.start: %v", err)
-	}
-	if ag.Name != "hdapitest" || ag.PaneID == "" || ag.TerminalID == "" {
-		t.Fatalf("unexpected agent: %+v", ag)
-	}
-	// cwd は起動 pane に反映される（実測済の受理フィールド）
-	if ag.Cwd != "/private/tmp" {
-		t.Fatalf("agent cwd not applied: %+v", ag)
-	}
-
-	waitFor(t, 5*time.Second, "agent in agent.list", func() (bool, error) {
-		agents, err := c.AgentList()
-		if err != nil {
-			return false, err
-		}
-		for _, a := range agents {
-			if a.Name == "hdapitest" && a.PaneID == ag.PaneID {
-				return true, nil
-			}
-		}
-		return false, fmt.Errorf("agent not in list (%d agents)", len(agents))
-	})
-}
-
 // TestErrorMapping は {"error":{code,message}} が *APIError に exact-match で
 // 落ちること（ヒューリスティックでない分岐の土台）。
 func TestErrorMapping(t *testing.T) {

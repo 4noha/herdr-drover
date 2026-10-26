@@ -276,6 +276,33 @@ func (h *connHolder) kickWake() {
 	}
 }
 
+// forwardInput は r（pane 入力）を読み続け、端末応答を除いてから write（現接続への
+// 転送）へ渡す。r が error を返したら戻る（pane close で stdin が閉じる）。
+//
+// ⚠端末応答を除かないと、herdr が返した応答（`ESC[?62;22c` 等）がキー入力と同じ道で
+// リモートへ届き、リモートのシェルに打ち込まれる（BUG-14・termreply.go）。除いた応答は
+// onDrop へ渡す（silent にしない）。応答だけだった Read は write しない＝未接続中に
+// 「ユーザーが操作したい合図」（connHolder.write の再接続 wake）を誤って立てない。
+func forwardInput(r io.Reader, write func([]byte) error, onDrop func([][]byte)) {
+	var f termReplyFilter
+	buf := make([]byte, 4096)
+	for {
+		n, rerr := r.Read(buf)
+		if n > 0 {
+			out, dropped := f.Filter(buf[:n])
+			if len(dropped) > 0 && onDrop != nil {
+				onDrop(dropped)
+			}
+			if len(out) > 0 {
+				_ = write(out)
+			}
+		}
+		if rerr != nil {
+			return
+		}
+	}
+}
+
 // write は現接続へ書く。inputWriteTimeout 超過は無期限ブロックの回避策として
 // conn を close する（close 後の Write はエラーで即返るため、以後の write 呼出
 // がここで再ブロックすることはない）。attachOnce 側の pumpFrames が conn の
@@ -424,18 +451,18 @@ func cmdAttach(args []string, stdout, stderr io.Writer) error {
 	// 後から holder.wake を代入すると data race になる。
 	wakeCh := make(chan struct{}, 1)
 	holder := &connHolder{wake: wakeCh, lg: lg}
-	go func() {
-		buf := make([]byte, 4096)
-		for {
-			n, rerr := os.Stdin.Read(buf)
-			if n > 0 {
-				_ = holder.write(buf[:n])
-			}
-			if rerr != nil {
-				return
-			}
+	// 端末応答の除去は記録する（初回と、以後は 1 分に 1 回まで＝↗窓 が再接続のたびに
+	// 応答を受けても attach.log を埋めない）。stdin reader goroutine だけが触る。
+	var dropTotal int
+	var dropLogged time.Time
+	onDrop := func(d [][]byte) {
+		dropTotal += len(d)
+		if dropLogged.IsZero() || time.Since(dropLogged) >= time.Minute {
+			lg.Printf("端末応答を入力から除去（リモートへ送らない）: 今回 %q／累計 %d 件", d, dropTotal)
+			dropLogged = time.Now()
 		}
-	}()
+	}
+	go forwardInput(os.Stdin, holder.write, onDrop)
 
 	go watchLifecycle(ctx, holder, wakeCh, nil, nil, nil, func(reason string) {
 		fmt.Fprintf(out, "\r\n↗ %s: %s — 再接続します\r\n", remotePC, reason)

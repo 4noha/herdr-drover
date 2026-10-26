@@ -26,8 +26,9 @@ package main
 //     への exact-match のみ）。注入 pane は最優先で除外。権威同士が矛盾する
 //     pane は機械確定不能＝対象外＋報告（推測で動かさない）。以前はここだけが
 //     独自に 2 系統 OR を持ち、restart/update 側（シム命名のみ）と非対称だった。
-//   - herdr の events は新規購読のたびに過去 event のバックログを再送する
-//     （実測）＝learn は event を鵜呑みにせず、**購読前 pane 配置 snapshot**
+//   - herdr 0.7.4 の events は新規購読のたびに過去 event のバックログを再送した
+//     （実測。0.9.5 は再送しない＝herdrapi.SubscribeReady 参照。どちらでも
+//     壊れないよう防御は残す）＝learn は event を鵜呑みにせず、**購読前 pane 配置 snapshot**
 //     （処理済み event で逐次更新）と**ライブ状態**の 2 重 exact 照合で
 //     stale を捨てる（誤学習 dedup。ライブ照合だけでは「pane がまだ移動先に
 //     居る」再送を新規移動と区別できず、削除済みルールが daemon 再起動で
@@ -919,8 +920,9 @@ type paneLoc struct {
 // 戻らない。購読の再接続・バックログ再送は herdrapi.Subscribe の実測仕様＝
 // handleLearnEvent が snapshot 照合＋ライブ状態照合で stale を捨てる。
 func runLearnLoop(ctx context.Context, api *herdrapi.Client, lg *log.Logger) error {
-	// バックログ照合 snapshot: 購読前の pane 配置。herdr は新規購読のたびに
-	// サーバ稼働中の全 event を再送する（実測）ため、「event の移動後配置が
+	// バックログ照合 snapshot: 購読前の pane 配置。herdr 0.7.4 は新規購読のたびに
+	// サーバ稼働中の全 event を再送した（実測。0.9.5 は再送しないが、再送が
+	// 戻っても誤学習しないよう防御は残す）ため、「event の移動後配置が
 	// snapshot に既にあった配置と exact 一致」なら過去の移動の再送＝学習
 	// しない。ライブ照合（PaneGet）だけでは「pane がまだ移動先に居る」再送を
 	// 新規移動と区別できず、ユーザーが削除したルールが daemon 再起動のたびに
@@ -937,12 +939,17 @@ func runLearnLoop(ctx context.Context, api *herdrapi.Client, lg *log.Logger) err
 		snap[p.PaneID] = paneLoc{p.WorkspaceID, p.Cwd}
 	}
 	ch := make(chan herdrapi.Event, 64)
+	ready := make(chan struct{}, 1)
 	done := make(chan error, 1)
-	go func() { done <- api.Subscribe(ctx, []string{"pane.moved"}, ch) }()
+	go func() { done <- api.SubscribeReady(ctx, []string{"pane.moved"}, ch, ready) }()
 	for {
 		select {
 		case err := <-done:
 			return err
+		case <-ready:
+			// 確立（初回・再購読のたび）を残す。herdr 0.9.x は購読前の移動を再送
+			// しない＝この行より前の移動は学習されない（silent にしない・鉄則⑤）。
+			lg.Printf("learn: pane.moved の購読を確立（以後の Tab 移動を学習）")
 		case ev := <-ch:
 			handleLearnEvent(api, ev, snap, lg)
 		}

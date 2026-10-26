@@ -278,7 +278,7 @@ func TestSummarizeRestart(t *testing.T) {
 func writeStubClaude(t *testing.T) string {
 	t.Helper()
 	stub := filepath.Join(t.TempDir(), "claude")
-	if err := os.WriteFile(stub, []byte("#!/bin/sh\nexec sleep 300\n"), 0o755); err != nil {
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\nsleep 300\n"), 0o755); err != nil {
 		t.Fatalf("stub 作成: %v", err)
 	}
 	return stub
@@ -293,7 +293,7 @@ func writeResumeRejectingStub(t *testing.T) string {
 		"for a in \"$@\"; do\n" +
 		"  if [ \"$a\" = \"--resume\" ]; then echo 'No conversation found' >&2; exit 1; fi\n" +
 		"done\n" +
-		"exec sleep 300\n"
+		"sleep 300\n"
 	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
 		t.Fatalf("stub 作成: %v", err)
 	}
@@ -843,31 +843,55 @@ func reportTestSession(t *testing.T, api *herdrapi.Client, pane, agent, ref stri
 // でもあり、どちらも「メッセージに種別名を焼く」ことが原因。
 //
 // 旧コード（固定文字列）ではこのテストは FAIL する。
+//
+// ⚠herdr 0.9.x で組み方を変えた（実測 2026-10-25）:
+//   - `herdr:*` は herdr 自身の統合の予約ソース（公式文書 add-herdr-support）で、
+//     **herdr が前景プロセスから agent を検出済みの pane** にしか session を載せない。
+//     旧テストの「素シェル pane に report_agent で種別を偽装」では agent_session が
+//     付かず、ref 無し skip に落ちて目的の分岐へ届かない。
+//   - opencode は検出済み pane でも外部からの report_agent_session で session が
+//     載らない（公式統合と同じ順序・形でも不可）。claude 以外の種別という性質は
+//     同じなので **codex** で検証する（codex は検出済み pane なら載る実測）。
+//   - 「launch argv 無し（shell から起動）」は、素シェル pane で stub を
+//     send_text 起動して作る（layout.apply の command で起動すると argv が付く）。
 func TestRestartSkipMessageUsesActualAgentKind(t *testing.T) {
 	sock := startHerdrForTest(t)
 	api := herdrapi.New(sock)
 
-	// launch argv を持たない pane（＝workspace の root pane は shell）を用意し、
-	// そこに opencode の identity を報告する＝実運用の「shell から起動した」形。
 	ws, err := api.WorkspaceCreate()
 	if err != nil {
 		t.Fatalf("workspace.create: %v", err)
 	}
-	pane := ws.RootPane.PaneID
-	if err := api.ReportAgent(pane, "test-native", "opencode", "idle"); err != nil {
-		t.Fatalf("report_agent: %v", err)
+	pane := ws.RootPane.PaneID // 素シェル pane＝launch argv を持たない
+
+	// 前景名が codex になる stub（exec しない sh。exec sleep だと前景が sleep に
+	// 置換されて検出されない）。
+	stub := filepath.Join(t.TempDir(), "codex")
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\nsleep 300\n"), 0o755); err != nil {
+		t.Fatalf("stub 作成: %v", err)
 	}
-	if err := api.ReportAgentSession(pane, "herdr:opencode", "opencode",
-		"ses_0453f4bacffeVovPPMlEdXPNTj"); err != nil {
+	waitCond(t, 10*time.Second, "素シェルの起動", func() bool {
+		p, e := api.PaneGet(pane)
+		return e == nil && p != nil
+	})
+	if err := api.PaneSendText(pane, stub+"\r"); err != nil {
+		t.Fatalf("send_text: %v", err)
+	}
+	waitCond(t, 15*time.Second, "codex の検出", func() bool {
+		p, e := api.PaneGet(pane)
+		return e == nil && p != nil && p.Agent == "codex"
+	})
+	if err := api.ReportAgentSession(pane, "herdr:codex", "codex",
+		"11111111-2222-4333-8444-555555555555"); err != nil {
 		t.Fatalf("report_agent_session: %v", err)
 	}
-	waitCond(t, 15*time.Second, "opencode identity が反映", func() bool {
+	waitCond(t, 15*time.Second, "codex identity が反映", func() bool {
 		p, e := api.PaneGet(pane)
-		return e == nil && p != nil && p.Agent == "opencode" && p.AgentSession.Value != ""
+		return e == nil && p != nil && p.Agent == "codex" && p.AgentSession.Value != ""
 	})
 
 	var log bytes.Buffer
-	results, err := restartClaudePanes(api, restartOptions{SID: pane, Agent: "opencode"}, &log)
+	results, err := restartClaudePanes(api, restartOptions{SID: pane, Agent: "codex"}, &log)
 	if err != nil {
 		t.Fatalf("restartClaudePanes: %v", err)
 	}
@@ -875,10 +899,13 @@ func TestRestartSkipMessageUsesActualAgentKind(t *testing.T) {
 		t.Fatalf("results = %+v（launch argv 無しは skip のはず）", results)
 	}
 	d := results[0].Detail
-	if !strings.Contains(d, "opencode") {
+	if !strings.Contains(d, "codex") {
 		t.Errorf("skip 理由に実際の種別名が出ていない: %q", d)
 	}
 	if strings.Contains(d, "claude") {
 		t.Errorf("skip 理由に claude が焼き込まれている（別種別なのに嘘を表示する）: %q", d)
+	}
+	if !strings.Contains(d, "launch argv が無い") {
+		t.Errorf("目的の分岐（launch argv 無し）に届いていない: %q", d)
 	}
 }

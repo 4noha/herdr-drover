@@ -20,14 +20,54 @@ package herdrapi
 import "encoding/json"
 
 // PongInfo は ping の応答。
-// 実採取: {"type":"pong","version":"0.7.4","protocol":16,
+// 実採取（0.7.4）: {"type":"pong","version":"0.7.4","protocol":16,
 //
 //	"capabilities":{"live_handoff":true,"detached_server_daemon":false}}
+//
+// 実採取（0.9.5・2026-10-25）: capabilities に **bool 以外**が混ざる。
+//
+//	"capabilities":{"live_handoff":true,"detached_server_daemon":true,
+//	  "endpoint_protocol_generation":1,"surface_interest":true,
+//	  "health_check":true,"ssh_agent_registration":true}
+//
+// ⚠Capabilities を map[string]bool のまま decode すると 0.9.x で
+// `cannot unmarshal number into ... of type bool` になり、daemon もシムも
+// herdr に繋げない（BUG-12）。capabilities は**情報として保持するだけで誰も
+// 分岐に使っていない**ので、読めない値で ping 全体を失敗させない
+// （UnmarshalJSON で bool 値だけ拾い、他は捨てる。bool に捏造もしない）。
 type PongInfo struct {
 	Type         string          `json:"type"` // "pong"
 	Version      string          `json:"version"`
 	Protocol     int             `json:"protocol"`
-	Capabilities map[string]bool `json:"capabilities"`
+	Capabilities map[string]bool `json:"-"` // UnmarshalJSON が埋める（bool 値のみ）
+}
+
+// UnmarshalJSON は capabilities の bool 値だけを Capabilities に載せる。
+// object 以外（配列・数値など将来の形）や非 bool の値は黙って落とさず、
+// 呼び手が必要なら生 JSON から読めるよう捨てるだけにする（判定には使わない契約）。
+func (p *PongInfo) UnmarshalJSON(b []byte) error {
+	var aux struct {
+		Type         string          `json:"type"`
+		Version      string          `json:"version"`
+		Protocol     int             `json:"protocol"`
+		Capabilities json.RawMessage `json:"capabilities"`
+	}
+	if err := json.Unmarshal(b, &aux); err != nil {
+		return err
+	}
+	p.Type, p.Version, p.Protocol = aux.Type, aux.Version, aux.Protocol
+	p.Capabilities = map[string]bool{}
+	var obj map[string]json.RawMessage
+	if len(aux.Capabilities) == 0 || json.Unmarshal(aux.Capabilities, &obj) != nil {
+		return nil // 無い／object でない＝空の capabilities として扱う
+	}
+	for k, raw := range obj {
+		var v bool
+		if json.Unmarshal(raw, &v) == nil {
+			p.Capabilities[k] = v
+		}
+	}
+	return nil
 }
 
 // ScrollInfo は PaneInfo.Scroll。
@@ -256,14 +296,6 @@ type WorkspaceCreated struct {
 	Workspace WorkspaceInfo `json:"workspace"`
 	Tab       TabInfo       `json:"tab"`
 	RootPane  PaneInfo      `json:"root_pane"`
-}
-
-// AgentStarted は agent.start の応答（type:"agent_started"）。
-// 実採取: {"type":"agent_started","agent":{...AgentInfo...},"argv":["sleep","5"]}
-type AgentStarted struct {
-	Type  string    `json:"type"`
-	Agent AgentInfo `json:"agent"`
-	Argv  []string  `json:"argv"`
 }
 
 // Event は events.subscribe が流す 1 行。

@@ -177,6 +177,52 @@ func wsrLayoutApply(t *testing.T, api *herdrapi.Client, wsid, tabLabel, cwd stri
 	return out.Layout.TabID, out.Layout.Root.PaneID
 }
 
+// wsrBorrowedTab は「素シェル＋claude が 1 Tab に同居」（間借り）を作り、claude
+// pane に agent 名 claude を付けて返す（旧 agent.start の split＋命名の再現）。
+// 素シェル側は cwd を指定しない＝dirM と cwd が重ならない（cwd 追跡を曖昧にしない）。
+func wsrBorrowedTab(t *testing.T, api *herdrapi.Client, wsid, cwd string, argv ...string) *herdrapi.AgentInfo {
+	t.Helper()
+	raw, err := api.Call("layout.apply", map[string]any{
+		"workspace_id": wsid, "tab_label": "m", "focus": false,
+		"root": map[string]any{
+			"type": "split", "direction": "right", "ratio": 0.5,
+			"first":  map[string]any{"type": "pane"},
+			"second": map[string]any{"type": "pane", "cwd": cwd, "command": argv},
+		}})
+	if err != nil {
+		t.Fatalf("layout.apply（間借り split）ws=%s: %v", wsid, err)
+	}
+	var out struct {
+		Layout struct {
+			TabID string `json:"tab_id"`
+		} `json:"layout"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatalf("layout_apply decode: %v", err)
+	}
+	var claudePane string
+	for _, p := range wsrPanes(t, api) {
+		if p.TabID == out.Layout.TabID && p.Cwd == cwd {
+			claudePane = p.PaneID
+		}
+	}
+	if claudePane == "" {
+		t.Fatalf("間借り Tab %s に cwd=%s の pane が無い", out.Layout.TabID, cwd)
+	}
+	raw, _, err = herdrapi.RenameWithDetectWait(api.AgentRename, claudePane, "claude",
+		herdrapi.AgentDetectTimeout, herdrapi.AgentDetectPoll)
+	if err != nil {
+		t.Fatalf("agent.rename（間借り claude）: %v", err)
+	}
+	var ag struct {
+		Agent herdrapi.AgentInfo `json:"agent"`
+	}
+	if err := json.Unmarshal(raw, &ag); err != nil {
+		t.Fatalf("agent_info decode: %v", err)
+	}
+	return &ag.Agent
+}
+
 // wsrPaneMoveNewTab はユーザーの手動 Tab 移動の模擬（ファイル冒頭の注記の
 // とおり cross-workspace Tab 移動の唯一のプリミティブ）。移動後 pane を返す。
 func wsrPaneMoveNewTab(t *testing.T, api *herdrapi.Client, paneID, wsid string) wsrPane {
@@ -422,12 +468,11 @@ func TestE2EWsRulesDirectStartAndTabNormalize(t *testing.T) {
 	// organize_test の実測どおり＝ここでも wsrWaitDetected が一次確認）。
 	tabD, paneD := wsrLayoutApply(t, api, wsSrc, "d", dirD, stub)
 
-	// 旧シム型の間借り: agent.start{workspace_id} は active tab の focused pane
-	// を split する（Probe live 実測＝「既存 Tab の表示を邪魔する」機序の再現）。
-	agM, err := api.AgentStart("claude", []string{stub}, &herdrapi.AgentStartOptions{Cwd: dirM, WorkspaceID: wsSrc})
-	if err != nil {
-		t.Fatalf("agent.start（間借り再現）: %v", err)
-	}
+	// 旧シム型の間借り: 0.7.4 の agent.start{workspace_id} は active tab の focused
+	// pane を split した（Probe live 実測＝「既存 Tab の表示を邪魔する」機序）。
+	// 0.9.x の agent.start は既存 pane で起動する別 API になり split しないので、
+	// 同じ「shell と claude が 1 Tab に同居」を layout.apply の split で直接作る。
+	agM := wsrBorrowedTab(t, api, wsSrc, dirM, stub)
 	wsrWaitDetected(t, api, dirD, dirM)
 
 	// 間借りの物証: agM の Tab は 2 pane（root shell ＋ claude の同居）

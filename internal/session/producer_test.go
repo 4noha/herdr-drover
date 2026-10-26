@@ -255,10 +255,21 @@ func TestTickE2ELifecycle(t *testing.T) {
 	}
 	t.Cleanup(func() { os.RemoveAll(mbDir) })
 
-	ag, err := hc.AgentStart("hdprod", []string{"/bin/sleep", "300"},
-		&herdrapi.AgentStartOptions{Cwd: mbDir})
+	// 旧 agent.start{name,argv} は herdr 0.9.x で廃止＝LaunchAgent（layout.apply＋
+	// 検出待ち rename）で同じ観測面を作る。argv は herdr が agent と検出できる
+	// 前景名でなければならない（/bin/sleep は検出されず命名できない・実測）。
+	stubDir, err := os.MkdirTemp("/tmp", "hdprodstub")
 	if err != nil {
-		t.Fatalf("agent.start: %v", err)
+		t.Fatalf("mkdtemp: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(stubDir) })
+	stub := filepath.Join(stubDir, "claude")
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\nsleep 300\n"), 0o755); err != nil {
+		t.Fatalf("stub 作成: %v", err)
+	}
+	ag, err := hc.LaunchAgent("hdprod", []string{stub}, &herdrapi.LaunchAgentOptions{Cwd: mbDir})
+	if err != nil {
+		t.Fatalf("LaunchAgent: %v", err)
 	}
 	ws, err := hc.WorkspaceCreate()
 	if err != nil {

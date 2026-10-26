@@ -148,9 +148,18 @@ func (c *Client) call(method string, params, out any) error {
 // DESIGN の hidden CLI リスク対応: agent 起動時に version を実測し、
 // 未検証 version へは警告する用途の一次情報源。
 func (c *Client) Ping() (*PongInfo, error) {
-	var out PongInfo
-	if err := c.call("ping", nil, &out); err != nil {
+	var raw json.RawMessage
+	if err := c.call("ping", nil, &raw); err != nil {
 		return nil, err
+	}
+	return decodePong(raw)
+}
+
+// decodePong は ping 応答の result を PongInfo に読む（テスト可能にするため切り出し）。
+func decodePong(raw []byte) (*PongInfo, error) {
+	var out PongInfo
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("herdr decode ping result: %w", err)
 	}
 	return &out, nil
 }
@@ -268,34 +277,6 @@ func (c *Client) PaneRead(paneID, source string) (*PaneReadInfo, error) {
 		return nil, err
 	}
 	return &out.Read, nil
-}
-
-// AgentStartOptions は agent.start の任意パラメータ（実測で受理・反映を
-// 確認したフィールドのみ。cwd は起動 pane の cwd に反映されることを実測）。
-type AgentStartOptions struct {
-	Cwd         string `json:"cwd,omitempty"`
-	WorkspaceID string `json:"workspace_id,omitempty"`
-}
-
-// AgentStart は名前付き agent を新 pane で起動する。name と argv は必須
-// （実測: 欠くと "missing field `argv`" 等）。
-// result: {"type":"agent_started","agent":{...},"argv":[...]}
-func (c *Client) AgentStart(name string, argv []string, opts *AgentStartOptions) (*AgentInfo, error) {
-	params := struct {
-		Name        string   `json:"name"`
-		Argv        []string `json:"argv"`
-		Cwd         string   `json:"cwd,omitempty"`
-		WorkspaceID string   `json:"workspace_id,omitempty"`
-	}{Name: name, Argv: argv}
-	if opts != nil {
-		params.Cwd = opts.Cwd
-		params.WorkspaceID = opts.WorkspaceID
-	}
-	var out AgentStarted
-	if err := c.call("agent.start", params, &out); err != nil {
-		return nil, err
-	}
-	return &out.Agent, nil
 }
 
 // ReportMetadata は pane.report_metadata で設定する値。少なくとも 1 つの

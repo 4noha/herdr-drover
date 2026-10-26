@@ -112,7 +112,7 @@ func TestUpdateAllContinuesWhenOneAgentFails(t *testing.T) {
 		"  --version) echo '2.1.214'; exit 0 ;;\n" +
 		"  update) echo 'network unreachable' >&2; exit 1 ;;\n" +
 		"esac\n" +
-		"exec sleep 300\n"
+		"sleep 300\n"
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
 		t.Fatalf("stub 作成: %v", err)
 	}
