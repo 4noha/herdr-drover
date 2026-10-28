@@ -30,6 +30,24 @@ v0.5.30 で**判定を経過時間ベースへ**変更し、**実 websocket 越�
 > できない* の記述は**すべて解消済み**（PR #1 merge・`e9bab96` で release に windows 資産。
 > Windows 機の self-update 成功を 7/25 15:52 の Ack で実確認）。
 
+### 2026-10-29: Web viewer ワイヤ v2（元 pane 実サイズ observe＋履歴先送り）実装・ローカル反映済・fleet 未配信
+
+ユーザー報告「別 PC のログが表示領域以上遡れない／Web で一発描画されない」の根治。
+仕様は **SPEC §5.2**、実測根拠は SPEC §5.1 の追記 3 行（observe フレームは `2J`＋CUP
+のみ・`pane.read` text は 1000 行キャップ／ansi は可視のみ・桁は `pane.layout rect.width`）。
+
+- producer: `internal/bridge/cmwire.go`（`EvHello`＝SCROLL dy=0x7fff）・`bridge.go`
+  （`effectiveSize`/`historyPrefix`・`histSent` で 1 接続 1 回）・`history.go`（META/履歴
+  変換・純粋）・`herdrapi.PaneReadLines`。実 herdr ゲート `bridge_v2_test.go`。
+- Web（drover-cloud）: `term.js` `cmMakeMetaFilter`/`cmParseMeta`（node ゲート
+  `TestTermJSMetaFilter`）・HELLO 送出・v2 で scrollback 5000＋`resize`＋fontSize 合わせ。
+- **残課題**: (1) ↗窓 attach は v2 未対応（viewer が本物の pane＝元 pane サイズに合わせる
+  手段が要る。履歴は attach pane の scrollback に書けば herdr のスクロールで遡れる＝
+  スパイク済）。(2) fleet 配信は release（tag）が要る＝ユーザー確認後。(3) 履歴は
+  text（モノクロ）・最大 1000 行・Claude Code 系 pane はほぼ空＝「会話全文」は
+  エージェント自身の transcript から引く別機能。(4) 実ブラウザでの最終確認は Cloud Run
+  デプロイ後（headless Chrome では xterm の runtime 切替と履歴重ね書きのみ検証済）。
+
 ### 2026-10-16: MCP Phase 2（画面取得/入力/中断・last_seen）実装・未デプロイ
 
 `drover-cloud-mcp-design.md` Phase 2。ブランチ `feat/mcp-phase2`（本リポジトリ）＋

@@ -49,6 +49,17 @@ func TestCMWireTable(t *testing.T) {
 			want:   []Event{{Kind: EvResize, Rows: 24, Cols: 80}},
 		},
 		{
+			// ワイヤ v2 HELLO は SCROLL の dy=0x7fff を予約（旧 producer は
+			// SCROLL として parse-and-ignore＝入力に漏れない）。
+			name:   "SCROLL dy=HelloV2Dy は EvHello、その他 dy は EvScroll",
+			chunks: [][]byte{scrollBytes(HelloV2Dy), scrollBytes(-3), resizeBytes(500, 160)},
+			want: []Event{
+				{Kind: EvHello, Dy: HelloV2Dy},
+				{Kind: EvScroll, Dy: -3},
+				{Kind: EvResize, Rows: 500, Cols: 160},
+			},
+		},
+		{
 			name: "RESIZE 1バイトずつ分割着信（繰越し再結合）",
 			chunks: func() [][]byte {
 				b := resizeBytes(33, 100)

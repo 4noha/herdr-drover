@@ -26,6 +26,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -142,6 +143,14 @@ type Bridge struct {
 	// idleClosed は quiescence 自切断を自分で行った印（conn close 起因の
 	// read エラーを「正常切断」へ写像するため）。
 	idleClosed atomic.Bool
+	// v2 は viewer がワイヤ v2 HELLO（cmwire の EvHello）を送ったか。true なら
+	// observe は viewer 要求サイズではなく **元 pane の実サイズ**（pane.layout）
+	// で起動し、ストリーム先頭に META＋履歴（history.go）を流す。HELLO を
+	// 送らない viewer（旧 Web・↗窓 attach）は従来どおり。
+	v2 atomic.Bool
+	// histSent は META＋履歴を conn へ流したか（Bridge＝1 接続につき 1 回。
+	// observe の respawn では再送しない＝viewer の scrollback に重複しない）。
+	histSent atomic.Bool
 
 	// cur は現行 observe サブプロセス（テストの respawn／リーク検査用に
 	// mu 越しで観測する）。
@@ -305,7 +314,7 @@ func (b *Bridge) Run(ctx context.Context) error {
 				return ctx.Err()
 			}
 		}
-		proc, err := b.spawnObserve(size)
+		proc, err := b.spawnObserve(b.effectiveSize(size))
 		if err != nil {
 			// spawn 自体の失敗（herdr バイナリ不在等）も backoff リトライ
 			//（恒久エラーでも conn の idle 自切断が上限を与える）。
@@ -383,6 +392,70 @@ func (b *Bridge) Run(ctx context.Context) error {
 			return ctx.Err()
 		}
 	}
+}
+
+// effectiveSize は observe の起動サイズ。v2 viewer には元 pane の実サイズを
+// 使い、viewer 要求サイズは無視する。viewer 側が xterm を元 pane に合わせる
+// ので RESIZE 往復（＝暴走ループの種）が構造的に消える。
+//
+// サイズの出どころ（herdr 0.9.5・2026-10-29 実測）:
+//   - 行 = `pane.get` の `scroll.viewport_rows`（pty の真値。localview の
+//     control 縮小で layout より小さいことがある: 本番で layout 70 / pty 63）
+//   - 桁 = `pane.layout` の `rect.width`（本番 GUI では全幅塗り TUI の最大行幅
+//     と一致＝pty 桁。headless 隔離サーバでは pty 桁の**上界**（120≥119）に
+//     なるが、observe が広い側に外れる分は右に空き列が出るだけでクリップ
+//     しない＝安全側）。API に桁そのものは無い。
+//
+// 取得失敗時は従来どおり viewer 要求へフォールバックし、必ずログに残す。
+func (b *Bridge) effectiveSize(viewer winSize) winSize {
+	if !b.v2.Load() {
+		return viewer
+	}
+	lay, err := b.Herdr.PaneLayout(b.Sid)
+	if err != nil {
+		b.logf("v2: pane.layout 失敗（viewer 要求 %dx%d にフォールバック）: %v", viewer.cols, viewer.rows, err)
+		return viewer
+	}
+	cols, layRows := 0, 0
+	for _, p := range lay.Panes {
+		if p.PaneID == b.Sid {
+			cols, layRows = p.Rect.Width, p.Rect.Height
+		}
+	}
+	if cols <= 0 {
+		b.logf("v2: pane.layout に %s が無い（viewer 要求 %dx%d にフォールバック）", b.Sid, viewer.cols, viewer.rows)
+		return viewer
+	}
+	rows := layRows
+	if pi, err := b.Herdr.PaneGet(b.Sid); err == nil && pi.Scroll.ViewportRows > 0 {
+		rows = pi.Scroll.ViewportRows
+	} else if err != nil {
+		b.logf("v2: pane.get 失敗（行は layout の %d を使う）: %v", layRows, err)
+	}
+	s := b.clamp(rows, cols)
+	b.logf("v2: 元 pane 実サイズ %dx%d で observe（layout %dx%d・viewer 要求 %dx%d は無視）",
+		s.cols, s.rows, cols, layRows, viewer.cols, viewer.rows)
+	return s
+}
+
+// historyPrefix は META＋履歴＋hist_end を組み立てる（history.go）。履歴の
+// 取得に失敗しても META は必ず送る（viewer のモード判定を欠かさない）＝
+// 履歴だけ空になり、その事実はログに残す。
+func (b *Bridge) historyPrefix(size winSize) []byte {
+	var hist []byte
+	trunc := false
+	rd, err := b.Herdr.PaneReadLines(b.Sid, "recent", HistoryLines)
+	if err != nil {
+		b.logf("v2: 履歴取得失敗（履歴なしで続行）: %v", err)
+	} else {
+		trunc = rd.Truncated
+		hist = HistoryPayload(rd.Text, size.rows)
+		b.logf("v2: 履歴 %dB を先頭に送る（pane.read %d 行・truncated=%v・可視 %d 行は除外）",
+			len(hist), strings.Count(rd.Text, "\n"), rd.Truncated, size.rows)
+	}
+	out := MetaBegin(size.cols, size.rows, trunc)
+	out = append(out, hist...)
+	return append(out, MetaHistEnd()...)
 }
 
 func nextBackoff(d time.Duration) time.Duration {
@@ -477,6 +550,9 @@ func (b *Bridge) readConn(resizeCh chan winSize, connDone chan<- error) {
 						//（cm nav-mode 教訓）＝必ずログに残す。
 						b.logf("入力送出失敗 (%dB): %v", len(data), serr)
 					}
+				case EvHello:
+					b.v2.Store(true)
+					b.logf("viewer: ワイヤ v2 HELLO（observe は元 pane 実サイズ・先頭に履歴）")
 				case EvScroll:
 					// v1 は無視（DESIGN: herdr terminal.scroll は共有
 					// runtime 状態＝ローカル表示にも影響するため非対応）。
@@ -630,6 +706,20 @@ func (b *Bridge) spawnObserve(size winSize) (*observeProc, error) {
 
 	go func() {
 		defer close(p.done)
+		// v2: 最初の observe 世代だけ、フレームより前に META＋履歴を流す
+		// （同じ goroutine で書く＝順序保証・write deadline も同じ規律）。
+		// respawn 世代では histSent 済みなので送らない。
+		if b.v2.Load() && b.histSent.CompareAndSwap(false, true) {
+			prefix := b.historyPrefix(size)
+			if wd != nil {
+				_ = wd.SetWriteDeadline(time.Now().Add(writeTimeout))
+			}
+			if _, werr := b.Conn.Write(prefix); werr != nil {
+				p.connErr = fmt.Errorf("conn 書込失敗(META/履歴): %w", werr)
+				return
+			}
+			b.bump()
+		}
 		// フレームは 160×500 級で base64 2.1MB に達する（実測）ため、
 		// bufio.Scanner（既定 64KB 上限）ではなく ReadBytes を使う。
 		r := bufio.NewReaderSize(stdout, 64*1024)

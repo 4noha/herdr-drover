@@ -604,7 +604,9 @@ workspace.close  workspace.create  workspace.focus  workspace.list  workspace.re
 | 入力注入 | `pane.send_input`(text) は `\r` が落ちる。**`pane.send_text`**（\r 込み）か `pane.send_keys` を使う |
 | `terminal session control` | 隠し CLI（`--help` 非掲載）。attach と同じ **pane resize＋lock** |
 | `terminal session observe` | ロック非取得・観測側サイズへ仮想描画（観測 < grid は上寄せクリップ） |
-| pane grid 桁 | API 非公開（`pane.get` の `scroll.viewport_rows` は行のみ） |
+| pane grid 桁 | `pane.get` は行のみ（`scroll.viewport_rows`＝**pty の真値**。localview の control 縮小で layout より小さくなる）。桁は **`pane.layout` の `rect.width`**（0.9.5・2026-10-29 本番 5 pane で全幅塗り TUI の最大行幅と一致）。headless 隔離サーバでは pty 桁の上界（120≥119）＝observe を広く起動しても右に空き列が出るだけでクリップしない |
+| `pane.read` の履歴 | `format=text` は scrollback を含むが**サーバ側 1000 行固定キャップ**（`truncated=true`）。`format=ansi` は**可視画面のみ**。保持量は pane 次第（codex 上限到達／claude 744・124／Claude Code 自身の pane は可視未満＝実質ゼロ） |
+| `terminal session observe` のフレーム | `ESC[?2026h`＋`?25l`＋**`ESC[2J` 1 回＋絶対座標 CUP のみ**。`3J`/alt-screen/SU/SD/IL/DL/DECSTBM/LF/RI/IND を含まない（full 1＋増分 4 フレーム・300 行スクロールで実測 0）＝viewer の端末に先に書いた履歴（scrollback）を壊さない |
 | `tab.move` | **同一 WS の reorder 専用**。WS 間移動は `pane.move` が唯一 |
 | `tab.list` の `number` | **位置ではない**（w1 が tab 3 枚で number=5/21/23 の実測）。位置は並び順が権威 |
 | workspace label | **重複可**＝識別子にしない（`workspace_id` を使う） |
@@ -619,6 +621,23 @@ workspace.close  workspace.create  workspace.focus  workspace.list  workspace.re
 | 注入 pane の `cwd` | herdr が同一 workspace の既存 pane 値を**便宜継承する**＝偽値。ルール書込経路で拾うと wsmap が汚染される |
 
 ---
+
+### 5.2 Web viewer ワイヤ v2（元 pane 実サイズ observe＋履歴先送り・2026-10-29）
+
+relay は byte 透過のまま。cm ワイヤ（`internal/bridge/cmwire.go`）の上に **後方互換のまま** 重ねた拡張で、旧 Web／↗窓 attach／旧 PC の producer は一切変わらない。
+
+| 方向 | 形 | 意味 |
+|---|---|---|
+| viewer→producer | `SCROLL` フレーム（`0xff 0xfe`）の `dy=0x7fff`（`bridge.HelloV2Dy`） | **HELLO v2**。SCROLL は v1 producer が parse-and-ignore するので旧 PC に送っても入力に漏れない（0xff＋未知バイトは生入力として pane に打鍵化するため新 magic は使えない）。Web は接続のたび HELLO→従来の `RESIZE(500,160)` の順に送る |
+| producer→viewer | `ESC ] 7707 ; v=2;cols=C;rows=R;trunc=T ESC \` | **META**。observe を**元 pane の実サイズ**（桁=`pane.layout rect.width`・行=`pane.get viewport_rows`）で起動したことの宣言。viewer 要求サイズは無視（ログに残す）。取得失敗は viewer 要求へフォールバック |
+| producer→viewer | 履歴本文（`pane.read source=recent format=text lines=1000` の末尾 R 行＝可視画面を落とし LF→CRLF、非空なら R 行の CRLF パディング） | `ESC[2J` は画面上の行を**消す**のであって押し上げない＝先に全行を scrollback へ押し込むためのパディング（欠くと最後の 1 画面分が黙って消える） |
+| producer→viewer | `ESC ] 7707 ; hist_end ESC \` | 履歴の終端。以後は従来どおり observe のフレーム |
+
+- META＋履歴は **Bridge（＝1 接続）につき 1 回**（`histSent`）。observe の respawn では再送しない。
+- Web（`term.js` `cmMakeMetaFilter`）は OSC を xterm に流す前に剥がし、`v=2` で `term.options.scrollback=5000`＋`term.resize(C,R)`＋fontSize を画面高に合わせる（**クライアント内で完結。RESIZE は再送しない**＝不変条件維持）。履歴はページにつき 1 回だけ scrollback に入れ、再接続で再び届いた分は捨てる。
+- META が来ない（旧 producer）なら従来の固定 160×500 グリッドのまま。
+- 未対応: ↗窓 attach（viewer が本物の pane＝サイズを元 pane に合わせる手段が要る）。
+- 実測ゲート: `internal/bridge/bridge_v2_test.go`（実 herdr: argv＝layout 桁×pty 行・ストリーム順序・respawn 非再送・旧 viewer 無影響）、drover-cloud `web/termjs_gate_test.go TestTermJSMetaFilter`（node）。
 
 ## 6. 設定
 

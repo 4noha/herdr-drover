@@ -279,6 +279,28 @@ func (c *Client) PaneRead(paneID, source string) (*PaneReadInfo, error) {
 	return &out.Read, nil
 }
 
+// PaneReadLines は pane.read を format=text・行数上限付きで呼ぶ（scrollback
+// 取得用）。実測（herdr 0.9.5・2026-10-29）: text は scrollback を含むが
+// サーバ側で 1000 行に固定キャップ（lines を超えて指定しても Truncated=true
+// で 1000 行）。format=ansi は**可視画面しか返さない**ので履歴には使えない。
+// 保持量は pane により大きく違う（TUI の再描画様式に依存。Claude Code の
+// pane は可視画面未満のこともある）。
+func (c *Client) PaneReadLines(paneID, source string, lines int) (*PaneReadInfo, error) {
+	var out struct {
+		Read PaneReadInfo `json:"read"`
+	}
+	err := c.call("pane.read", struct {
+		PaneID string `json:"pane_id"`
+		Source string `json:"source"`
+		Format string `json:"format"`
+		Lines  int    `json:"lines"`
+	}{paneID, source, "text", lines}, &out)
+	if err != nil {
+		return nil, err
+	}
+	return &out.Read, nil
+}
+
 // ReportMetadata は pane.report_metadata で設定する値。少なくとも 1 つの
 // metadata フィールドが必要（実測: 空だと invalid_metadata_request
 // "missing metadata field to set or clear"）。

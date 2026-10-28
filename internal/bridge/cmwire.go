@@ -44,7 +44,17 @@ const (
 	// メタ情報（ImageLen/ImageExt）だけを持つ。CMWireParser.KeepImage が
 	// true のときだけ Image に payload を複製する（WebImagePaste オプトイン）。
 	EvImage
+	// EvHello は viewer の「ワイヤ v2 対応」宣言（SCROLL の dy=HelloV2Dy を
+	// 流用）。v1 producer は SCROLL を parse-and-ignore するため、旧 PC に
+	// 送っても入力に漏れない＝新 magic を増やさずに後方互換を保つ唯一の形
+	// （0xff+未知バイトは生入力として素通しされ pane に打鍵化する）。
+	EvHello
 )
+
+// HelloV2Dy は SCROLL フレームの dy をワイヤ v2 HELLO として予約する値。
+// 実スクロール要求で int16 最大値が来ることはない（Web/CLI viewer とも
+// 小さな相対値しか送らない＝cm 実コード）。
+const HelloV2Dy = 0x7fff
 
 // maxImageBytes は IMAGE payload の上限（8MiB）。cm と同じく DoS／メモリ
 // 膨張防止で、これを超える長さ宣言は「不正長」としてヘッダごと捨てて
@@ -111,10 +121,12 @@ func (p *CMWireParser) Feed(data []byte) []Event {
 			if len(p.in) < 4 {
 				return evs
 			}
-			evs = append(evs, Event{
-				Kind: EvScroll,
-				Dy:   int(int16(binary.BigEndian.Uint16(p.in[2:4]))),
-			})
+			dy := int(int16(binary.BigEndian.Uint16(p.in[2:4])))
+			kind := EvScroll
+			if dy == HelloV2Dy {
+				kind = EvHello
+			}
+			evs = append(evs, Event{Kind: kind, Dy: dy})
 			p.in = p.in[4:]
 			continue
 		}
