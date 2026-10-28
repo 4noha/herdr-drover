@@ -73,6 +73,35 @@ func TestReadStdinLoopDetach(t *testing.T) {
 	}
 }
 
+// TestReadStdinLoopDropsHerdrTermReplies は BUG-14 の localview 側（当初「未対応・
+// 要判断」としていた readStdinLoop）: 起動元端末自身が応答した端末応答
+// （`ESC[?62;22c` 等、mac-studio の素シェルに literal に残っていたもの）が
+// pane.send_text でそのまま pane に入らないことを実 herdr で検証する。
+func TestReadStdinLoopDropsHerdrTermReplies(t *testing.T) {
+	sock := startHerdrForTest(t)
+	api := herdrapi.New(sock)
+	ws, err := api.WorkspaceCreate()
+	if err != nil {
+		t.Fatalf("workspace.create: %v", err)
+	}
+	paneID := ws.RootPane.PaneID
+
+	in := herdr095Replies["DA1"] + "echo HD_LV_TR_'OK'\r"
+	readStdinLoop(strings.NewReader(in), api, paneID, make(chan struct{}, 1), io.Discard)
+
+	waitCond(t, 15*time.Second, "打鍵コマンドが実行される", func() bool {
+		rd, e := api.PaneRead(paneID, "visible")
+		return e == nil && strings.Contains(rd.Text, "HD_LV_TR_OK")
+	})
+	rd, err := api.PaneRead(paneID, "visible")
+	if err != nil {
+		t.Fatalf("pane.read: %v", err)
+	}
+	if strings.Contains(rd.Text, "62;22c") {
+		t.Fatalf("端末応答が pane の入力行に literal に残っている（BUG-14 未修正）: %q", rd.Text)
+	}
+}
+
 // TestLocalViewObserveFramesAndLockFree は実 herdr で:
 //  1. spawnObserveGen が observe（attach/control ではない）で frame を流す
 //  2. readStdinLoop の stdin→pane.send_text が pane に到達し実行される

@@ -408,14 +408,31 @@ func (g *obsGen) stderrTail() string { return g.stderr.String() }
 // readStdinLoop は raw TTY の入力を pane.send_text（ロックフリー）で注入する。
 // prefix（Ctrl-B q = detach）を applyPrefix で処理し、rune 割れは bridge の
 // SplitIncompleteRune で繰り越す（read 境界が multibyte を割っても壊さない）。
+//
+// ⚠ attach.go の forwardInput と同じ理由で termReplyFilter を通す（BUG-14）。
+// herdr 0.9.5 は pane 内のプログラムが端末へ問い合わせると応答を pane の入力として
+// 返す。ここで捨てないと、起動元端末自身が同じ問い合わせに答えたもの（重複）が
+// `ESC[?62;22c` のような列のまま pane.send_text で打ち込まれ、素シェルの入力行に
+// そのまま残る（当初 attach.go のみ直し「未対応・要判断」としていた側＝今回対応）。
 func readStdinLoop(in io.Reader, api *herdrapi.Client, paneID string, detach chan<- struct{}, msg io.Writer) {
 	buf := make([]byte, 4096)
 	var carry []byte
 	prefix := false
+	var trf termReplyFilter
+	var dropTotal int
+	var dropLogged time.Time
 	for {
 		n, rerr := in.Read(buf)
 		if n > 0 {
-			fwd, det := applyPrefix(&prefix, buf[:n])
+			filtered, dropped := trf.Filter(buf[:n])
+			if len(dropped) > 0 {
+				dropTotal += len(dropped)
+				if dropLogged.IsZero() || time.Since(dropLogged) >= time.Minute {
+					fmt.Fprintf(msg, "\r\n[端末応答 %q を入力から除去（累計 %d 件・BUG-14）]\r\n", dropped, dropTotal)
+					dropLogged = time.Now()
+				}
+			}
+			fwd, det := applyPrefix(&prefix, filtered)
 			if len(fwd) > 0 {
 				data := fwd
 				if len(carry) > 0 {

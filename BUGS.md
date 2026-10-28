@@ -784,8 +784,13 @@ mac-studio の素シェル 17 枚の入力行に `62;22c62;22c…` が最大 197
 ### 踏まないようにしたこと
 - 応答だけだった Read は write しない＝未接続中に `connHolder.write` の再接続 wake
   （「ユーザーが操作したい合図」）を誤って立てない。
-- **`localview.go` の `readStdinLoop` も同じ形**（ローカル端末の応答が pane.send_text で
-  pane に入り得る）だが、今回は attach のみ直した（未対応・要判断）。
+
+### 追記（2026-10-28）: `localview.go` 側も同じ形で対応済み
+`readStdinLoop`（ローカル端末の応答が pane.send_text で pane に入り得る経路）も
+`termReplyFilter` を通すよう修正。mac-studio のローカル pane（w2K:p5・dmm-kabu の
+codex、↗窓でも slave でもない通常 workspace）で同症状（`62;22c` が死んだ pane の
+入力行に literal に残る）を実際に確認して対応。除去は msg（stderr の診断経路）に
+初回と以後 1 分に 1 回まで記録（attach.go と同じ rate-limit）。
 
 ### テスト
 `cmd/herdr-drover/termreply_test.go`: 採取した応答 9 種の除去／打鍵 16 種の素通し／混在／
