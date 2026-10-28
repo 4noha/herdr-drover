@@ -279,6 +279,15 @@ func (c *Client) PaneRead(paneID, source string) (*PaneReadInfo, error) {
 	return &out.Read, nil
 }
 
+// PaneScroll は pane の表示スクロール位置を設定する（pane.scroll）。
+// ⚠ herdr のスクロールは共有 runtime 状態＝ローカル表示にも効く。
+func (c *Client) PaneScroll(paneID string, offsetFromBottom int) error {
+	return c.call("pane.scroll", struct {
+		PaneID string `json:"pane_id"`
+		Offset int    `json:"offset_from_bottom"`
+	}{paneID, offsetFromBottom}, nil)
+}
+
 // PaneReadLines は pane.read を format=text・行数上限付きで呼ぶ（scrollback
 // 取得用）。実測（herdr 0.9.5・2026-10-29）: text は scrollback を含むが
 // サーバ側で 1000 行に固定キャップ（lines を超えて指定しても Truncated=true

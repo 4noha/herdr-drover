@@ -135,6 +135,15 @@ type Bridge struct {
 	// ImagePasteDir は画像の一時ファイル置き場（空なら ~/.herdr-drover/paste）。
 	ImagePasteDir string
 
+	// HistoryCache は v2 の履歴スナップショットの共有キャッシュ（daemon で 1 つ。
+	// nil なら接続ごとの使い捨て＝予算超過の読取結果が次の接続に活きない）。
+	HistoryCache *HistoryCache
+	// HistoryBudget は履歴読取を初回描画の前に待つ上限（0 なら
+	// DefaultHistoryBudget）。テストから短縮する。
+	HistoryBudget time.Duration
+	// readHistory はテスト用 seam（nil なら Herdr.PaneReadLines）。
+	readHistory func() (*herdrapi.PaneReadInfo, error)
+
 	// last は最終通信時刻（UnixNano）。conn の read/write 両方向で bump。
 	last atomic.Int64
 	// gotFirst は conn から**実データを 1 バイトでも受け取ったか**。初期の
@@ -438,22 +447,42 @@ func (b *Bridge) effectiveSize(viewer winSize) winSize {
 	return s
 }
 
-// historyPrefix は META＋履歴＋hist_end を組み立てる（history.go）。履歴の
-// 取得に失敗しても META は必ず送る（viewer のモード判定を欠かさない）＝
-// 履歴だけ空になり、その事実はログに残す。
+// historyPrefix は META＋履歴＋hist_end を組み立てる（history.go）。履歴は
+// HistoryBudget 内に取れた時だけ載せる（取れなければ hist=0 で先に描画し、
+// 読取はキャッシュ側で継続＝次の接続で送る）。META は必ず送る（viewer の
+// モード判定を欠かさない）。
 func (b *Bridge) historyPrefix(size winSize) []byte {
-	var hist []byte
-	trunc := false
-	rd, err := b.Herdr.PaneReadLines(b.Sid, "recent", HistoryLines)
-	if err != nil {
-		b.logf("v2: 履歴取得失敗（履歴なしで続行）: %v", err)
-	} else {
-		trunc = rd.Truncated
-		hist = HistoryPayload(rd.Text, size.rows)
-		b.logf("v2: 履歴 %dB を先頭に送る（pane.read %d 行・truncated=%v・可視 %d 行は除外）",
-			len(hist), strings.Count(rd.Text, "\n"), rd.Truncated, size.rows)
+	cache := b.HistoryCache
+	if cache == nil {
+		cache = NewHistoryCache()
 	}
-	out := MetaBegin(size.cols, size.rows, trunc)
+	budget := b.HistoryBudget
+	if budget <= 0 {
+		budget = DefaultHistoryBudget
+	}
+	read := b.readHistory
+	if read == nil {
+		read = func() (*herdrapi.PaneReadInfo, error) {
+			return b.Herdr.PaneReadLines(b.Sid, "recent", HistoryLines)
+		}
+	}
+	scrolled := 0
+	if pi, err := b.Herdr.PaneGet(b.Sid); err == nil {
+		scrolled = pi.Scroll.OffsetFromBottom
+	}
+	var hist []byte
+	e, ok := cache.fetch(b.Sid, budget, read, b.logf)
+	if ok {
+		hist = HistoryPayload(e.text, size.rows)
+		b.logf("v2: 履歴 %dB を先頭に送る（%d 行・truncated=%v・可視 %d 行は除外・取得 %.0fs 前）",
+			len(hist), strings.Count(e.text, "\n"), e.truncated, size.rows, time.Since(e.at).Seconds())
+	} else {
+		b.logf("v2: 履歴は %s 内に取れず＝履歴なしで先に描画（読取は継続・次の接続で送る）", budget)
+	}
+	if scrolled > 0 {
+		b.logf("v2: 元 pane はローカルで %d 行遡り中（observe はその表示位置を描く）", scrolled)
+	}
+	out := MetaBegin(size.cols, size.rows, e.truncated, len(hist) > 0, scrolled)
 	out = append(out, hist...)
 	return append(out, MetaHistEnd()...)
 }
@@ -553,6 +582,14 @@ func (b *Bridge) readConn(resizeCh chan winSize, connDone chan<- error) {
 				case EvHello:
 					b.v2.Store(true)
 					b.logf("viewer: ワイヤ v2 HELLO（observe は元 pane 実サイズ・先頭に履歴）")
+				case EvScrollBottom:
+					// ［最新へ］: 元 pane の実スクロールを最下部へ（共有状態＝
+					// ローカル表示も戻る。viewer の明示操作からのみ届く）。
+					if serr := b.Herdr.PaneScroll(b.Sid, 0); serr != nil {
+						b.logf("viewer: 最新へ（pane.scroll 0）失敗: %v", serr)
+					} else {
+						b.logf("viewer: 最新へ（pane.scroll 0）")
+					}
 				case EvScroll:
 					// v1 は無視（DESIGN: herdr terminal.scroll は共有
 					// runtime 状態＝ローカル表示にも影響するため非対応）。

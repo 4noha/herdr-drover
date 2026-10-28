@@ -17,6 +17,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/4noha/herdr-drover/internal/herdrapi"
 )
 
 func helloMagic() []byte { return scrollBytes(HelloV2Dy) }
@@ -104,7 +106,7 @@ func TestBridgeV2SourceSizeAndHistoryPrefix(t *testing.T) {
 
 	// --- 3) ストリーム先頭の順序: META → 履歴（HD_HIST_1 を含む）→ hist_end → frame ---
 	buf := sink.bytesCopy()
-	metaWant := MetaBegin(cols, rows, false) // 120 行 < 1000 行上限＝truncated=0
+	metaWant := MetaBegin(cols, rows, false, true, 0) // 120 行 < 1000 行上限＝truncated=0・履歴あり・遡りなし
 	if !bytes.HasPrefix(buf, metaWant) {
 		t.Fatalf("ストリーム先頭が META でない: want=%q got=%.80q", metaWant, buf)
 	}
@@ -150,6 +152,121 @@ func TestBridgeV2SourceSizeAndHistoryPrefix(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("ctx cancel 後 10s で Run が戻らない")
 	}
+}
+
+// TestBridgeV2HistoryBudgetFallsBackThenCaches — 履歴読取が予算内に終わらなければ
+// hist=0 で先に描画し（META→frame が予算程度で届く）、読取はキャッシュ側で継続、
+// 次の接続（別 Bridge・同じキャッシュ）では hist=1 で履歴が載る。本番実測
+// （長寿命 pane で pane.read 4〜16s）の再現を seam で行う。
+func TestBridgeV2HistoryBudgetFallsBackThenCaches(t *testing.T) {
+	_, hc := startHerdr(t)
+	ws, err := hc.WorkspaceCreate()
+	if err != nil {
+		t.Fatalf("workspace.create: %v", err)
+	}
+	paneID := ws.RootPane.PaneID
+	if err := hc.PaneSendText(paneID, "for i in $(seq 1 120); do echo HD_SLOW_$i; done\r"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 15*time.Second, "HD_SLOW_120", func() (bool, error) {
+		rd, err := hc.PaneRead(paneID, "visible")
+		return err == nil && strings.Contains(rd.Text, "HD_SLOW_120"), err
+	})
+	cache := NewHistoryCache()
+	slowRead := func() (*herdrapi.PaneReadInfo, error) {
+		time.Sleep(1500 * time.Millisecond) // 本番の遅い pane.read を模す
+		return hc.PaneReadLines(paneID, "recent", HistoryLines)
+	}
+	connect := func() (*Bridge, *connSink, func()) {
+		viewerConn, bridgeConn := net.Pipe()
+		sink := newConnSink(viewerConn)
+		b := New(paneID, bridgeConn, hc)
+		b.Idle = -1
+		b.Logf = t.Logf
+		b.HistoryCache = cache
+		b.HistoryBudget = 300 * time.Millisecond
+		b.readHistory = slowRead
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() { _ = b.Run(ctx) }()
+		if _, err := viewerConn.Write(append(helloMagic(), resizeMagic(500, 160)...)); err != nil {
+			t.Fatal(err)
+		}
+		return b, sink, func() { cancel(); viewerConn.Close() }
+	}
+
+	// --- 1 接続目: 予算超過 → hist=0 で即 META＋frame ---
+	t0 := time.Now()
+	_, sink1, stop1 := connect()
+	waitFor(t, 10*time.Second, "META(hist=0)", func() (bool, error) {
+		return sink1.containsFrom(0, []byte(";hist=0;")), nil
+	})
+	waitFor(t, 10*time.Second, "frame", func() (bool, error) {
+		return sink1.containsFrom(0, []byte("\x1b[?2026h")), nil
+	})
+	if d := time.Since(t0); d > 1200*time.Millisecond {
+		t.Fatalf("予算 300ms なのに初回描画まで %s", d)
+	}
+	if sink1.textContainsFrom(0, "HD_SLOW_1\r") {
+		t.Fatalf("hist=0 なのに履歴本文が流れた")
+	}
+	stop1()
+
+	// --- 読取完了を待って 2 接続目: キャッシュから hist=1 で履歴が載る ---
+	time.Sleep(1800 * time.Millisecond)
+	_, sink2, stop2 := connect()
+	defer stop2()
+	waitFor(t, 10*time.Second, "META(hist=1)＋履歴", func() (bool, error) {
+		return sink2.containsFrom(0, []byte(";hist=1;")) &&
+			regexp.MustCompile(`(?m)^HD_SLOW_1\r$`).Match(sink2.bytesCopy()), nil
+	})
+}
+
+// TestBridgeV2ScrollBottom — viewer の［最新へ］（SCROLL dy=ScrollBottomDy）で
+// 元 pane の実スクロールが最下部へ戻る（pane.scroll 0）。
+func TestBridgeV2ScrollBottom(t *testing.T) {
+	_, hc := startHerdr(t)
+	ws, err := hc.WorkspaceCreate()
+	if err != nil {
+		t.Fatalf("workspace.create: %v", err)
+	}
+	paneID := ws.RootPane.PaneID
+	if err := hc.PaneSendText(paneID, "for i in $(seq 1 120); do echo HD_SCR_$i; done\r"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 15*time.Second, "HD_SCR_120", func() (bool, error) {
+		rd, err := hc.PaneRead(paneID, "visible")
+		return err == nil && strings.Contains(rd.Text, "HD_SCR_120"), err
+	})
+	if err := hc.PaneScroll(paneID, 5); err != nil {
+		t.Fatalf("pane.scroll 5: %v", err)
+	}
+	pi, err := hc.PaneGet(paneID)
+	if err != nil || pi.Scroll.OffsetFromBottom != 5 {
+		t.Fatalf("前提: ローカル遡り 5 行にできない: %+v %v", pi, err)
+	}
+
+	viewerConn, bridgeConn := net.Pipe()
+	defer viewerConn.Close()
+	sink := newConnSink(viewerConn)
+	b := New(paneID, bridgeConn, hc)
+	b.Idle = -1
+	b.Logf = t.Logf
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = b.Run(ctx) }()
+	if _, err := viewerConn.Write(append(helloMagic(), resizeMagic(500, 160)...)); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 15*time.Second, "META に scrolled=5", func() (bool, error) {
+		return sink.containsFrom(0, []byte(";scrolled=5")), nil
+	})
+	if _, err := viewerConn.Write(scrollBytes(ScrollBottomDy)); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 10*time.Second, "pane.scroll 0 が効く", func() (bool, error) {
+		pi, err := hc.PaneGet(paneID)
+		return err == nil && pi.Scroll.OffsetFromBottom == 0, err
+	})
 }
 
 // TestBridgeLegacyViewerGetsNoMeta — HELLO を送らない viewer（旧 Web・↗窓 attach）

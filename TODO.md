@@ -36,9 +36,11 @@ v0.5.30 で**判定を経過時間ベースへ**変更し、**実 websocket 越�
 仕様は **SPEC §5.2**、実測根拠は SPEC §5.1 の追記 3 行（observe フレームは `2J`＋CUP
 のみ・`pane.read` text は 1000 行キャップ／ansi は可視のみ・桁は `pane.layout rect.width`）。
 
-- producer: `internal/bridge/cmwire.go`（`EvHello`＝SCROLL dy=0x7fff）・`bridge.go`
-  （`effectiveSize`/`historyPrefix`・`histSent` で 1 接続 1 回）・`history.go`（META/履歴
-  変換・純粋）・`herdrapi.PaneReadLines`。実 herdr ゲート `bridge_v2_test.go`。
+- producer: `internal/bridge/cmwire.go`（`EvHello`＝SCROLL dy=0x7fff・`EvScrollBottom`＝
+  dy=0x7ffe）・`bridge.go`（`effectiveSize`/`historyPrefix`・`histSent` で 1 接続 1 回）・
+  `history.go`（META/履歴変換・`HistoryCache`＝予算 1.5s＋TTL 60s。**本番で pane.read が
+  4〜16s かかる pane がある**ため）・`herdrapi.PaneReadLines`/`PaneScroll`。実 herdr ゲート
+  `bridge_v2_test.go`（サイズ・順序・予算フォールバック→キャッシュ・最新へ・旧 viewer）。
 - Web（drover-cloud）: `term.js` `cmMakeMetaFilter`/`cmParseMeta`（node ゲート
   `TestTermJSMetaFilter`）・HELLO 送出・v2 で scrollback 5000＋`resize`＋fontSize 合わせ。
 - **残課題**: (1) ↗窓 attach は v2 未対応（viewer が本物の pane＝元 pane サイズに合わせる

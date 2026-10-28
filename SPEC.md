@@ -629,12 +629,14 @@ relay は byte 透過のまま。cm ワイヤ（`internal/bridge/cmwire.go`）�
 | 方向 | 形 | 意味 |
 |---|---|---|
 | viewer→producer | `SCROLL` フレーム（`0xff 0xfe`）の `dy=0x7fff`（`bridge.HelloV2Dy`） | **HELLO v2**。SCROLL は v1 producer が parse-and-ignore するので旧 PC に送っても入力に漏れない（0xff＋未知バイトは生入力として pane に打鍵化するため新 magic は使えない）。Web は接続のたび HELLO→従来の `RESIZE(500,160)` の順に送る |
-| producer→viewer | `ESC ] 7707 ; v=2;cols=C;rows=R;trunc=T ESC \` | **META**。observe を**元 pane の実サイズ**（桁=`pane.layout rect.width`・行=`pane.get viewport_rows`）で起動したことの宣言。viewer 要求サイズは無視（ログに残す）。取得失敗は viewer 要求へフォールバック |
+| viewer→producer | `SCROLL` の `dy=0x7ffe`（`bridge.ScrollBottomDy`） | **最新へ**。producer が `pane.scroll offset_from_bottom=0` を実行（共有状態＝ローカル表示も最下部へ戻る。Web は明示ボタン ⤓ からのみ送る。v1 producer は無視） |
+| producer→viewer | `ESC ] 7707 ; v=2;cols=C;rows=R;trunc=T;hist=H;scrolled=N ESC \` | **META**。observe を**元 pane の実サイズ**（桁=`pane.layout rect.width`・行=`pane.get viewport_rows`）で起動したことの宣言。viewer 要求サイズは無視（ログに残す）。取得失敗は viewer 要求へフォールバック。`hist`=この接続に履歴本文が続くか、`scrolled`=元 pane のローカル表示が最下部から遡っている行数（observe はその表示位置を描く） |
 | producer→viewer | 履歴本文（`pane.read source=recent format=text lines=1000` の末尾 R 行＝可視画面を落とし LF→CRLF、非空なら R 行の CRLF パディング） | `ESC[2J` は画面上の行を**消す**のであって押し上げない＝先に全行を scrollback へ押し込むためのパディング（欠くと最後の 1 画面分が黙って消える） |
 | producer→viewer | `ESC ] 7707 ; hist_end ESC \` | 履歴の終端。以後は従来どおり observe のフレーム |
 
 - META＋履歴は **Bridge（＝1 接続）につき 1 回**（`histSent`）。observe の respawn では再送しない。
-- Web（`term.js` `cmMakeMetaFilter`）は OSC を xterm に流す前に剥がし、`v=2` で `term.options.scrollback=5000`＋`term.resize(C,R)`＋fontSize を画面高に合わせる（**クライアント内で完結。RESIZE は再送しない**＝不変条件維持）。履歴はページにつき 1 回だけ scrollback に入れ、再接続で再び届いた分は捨てる。
+- **履歴読取の予算とキャッシュ**（本番実測 2026-10-29: 長寿命 pane では `pane.read` が **4〜16 秒**かかる。返る行数と無関係＝herdr 側）: 読取は `HistoryBudget`（既定 1.5s）だけ待ち、間に合わなければ `hist=0` で先に描画する。読取は daemon 共有の `HistoryCache`（pane ごと同時 1 本・TTL 60s）で継続し、次の接続（quiescence 再接続・リロード）で `hist=1` として送る。
+- Web（`term.js` `cmMakeMetaFilter`）は OSC を xterm に流す前に剥がし、`v=2` で `term.options.scrollback=5000`＋`term.resize(C,R)`＋fontSize を画面高に合わせる（**クライアント内で完結。RESIZE は再送しない**＝不変条件維持）。本文つき履歴（`hist=1`）はページにつき 1 回だけ scrollback に入れ、以降の接続で届いた分は捨てる。`hist=0` の接続は「未受領」のまま＝次の `hist=1` を受け入れ、既に画面を描いていれば `term.reset()` してから履歴→full frame の順で描き直す。`scrolled>0` はステータス欄に案内（⤓ で最新へ）。
 - META が来ない（旧 producer）なら従来の固定 160×500 グリッドのまま。
 - 未対応: ↗窓 attach（viewer が本物の pane＝サイズを元 pane に合わせる手段が要る）。
 - 実測ゲート: `internal/bridge/bridge_v2_test.go`（実 herdr: argv＝layout 桁×pty 行・ストリーム順序・respawn 非再送・旧 viewer 無影響）、drover-cloud `web/termjs_gate_test.go TestTermJSMetaFilter`（node）。
