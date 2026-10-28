@@ -106,16 +106,26 @@ func TestBridgeV2SourceSizeAndHistoryPrefix(t *testing.T) {
 
 	// --- 3) ストリーム先頭の順序: META → 履歴（HD_HIST_1 を含む）→ hist_end → frame ---
 	buf := sink.bytesCopy()
-	metaWant := MetaBegin(cols, rows, false, true, 0) // 120 行 < 1000 行上限＝truncated=0・履歴あり・遡りなし
-	if !bytes.HasPrefix(buf, metaWant) {
-		t.Fatalf("ストリーム先頭が META でない: want=%q got=%.80q", metaWant, buf)
+	// 120 行 < 1000 行上限＝truncated=0・予算内に取得＝hist=1・遡りなし。hlines は
+	// 実際に scrollback へ落ちた行数（shell のプロンプト等も含む）なので ≥1 を見る。
+	metaPrefix := fmt.Sprintf("%sv=2;cols=%d;rows=%d;trunc=0;hist=1;hlines=", metaOSC, cols, rows)
+	if !bytes.HasPrefix(buf, []byte(metaPrefix)) {
+		t.Fatalf("ストリーム先頭が META でない: want prefix=%q got=%.80q", metaPrefix, buf)
+	}
+	metaLen := bytes.Index(buf, []byte(metaST)) + len(metaST)
+	var hlines, scrolled int
+	if _, err := fmt.Sscanf(string(buf[len(metaPrefix):metaLen]), "%d;scrolled=%d", &hlines, &scrolled); err != nil || hlines < 1 || scrolled != 0 {
+		t.Fatalf("META の hlines/scrolled が不正: %q (err=%v)", buf[:metaLen], err)
 	}
 	iEnd := bytes.Index(buf, MetaHistEnd())
 	iFrame := bytes.Index(buf, []byte("\x1b[?2026h"))
 	if iEnd < 0 || iFrame < 0 || iEnd > iFrame {
 		t.Fatalf("順序異常: hist_end=%d frame=%d", iEnd, iFrame)
 	}
-	hist := string(buf[len(metaWant):iEnd])
+	hist := string(buf[metaLen:iEnd])
+	if got := strings.Count(hist, "\r\n") - rows; got != hlines {
+		t.Fatalf("hlines=%d だが履歴本文は %d 行", hlines, got)
+	}
 	if !regexp.MustCompile(`(?m)^HD_HIST_1\r$`).MatchString(hist) {
 		t.Fatalf("履歴に HD_HIST_1（scrollback 行）が無い: %.300q", hist)
 	}

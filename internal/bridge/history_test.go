@@ -11,15 +11,15 @@ import (
 )
 
 func TestMetaFraming(t *testing.T) {
-	got := string(MetaBegin(179, 70, true, true, 12))
-	if got != "\x1b]7707;v=2;cols=179;rows=70;trunc=1;hist=1;scrolled=12\x1b\\" {
+	got := string(MetaBegin(179, 70, true, true, 930, 12))
+	if got != "\x1b]7707;v=2;cols=179;rows=70;trunc=1;hist=1;hlines=930;scrolled=12\x1b\\" {
 		t.Fatalf("MetaBegin: %q", got)
 	}
 	if got := string(MetaHistEnd()); got != "\x1b]7707;hist_end\x1b\\" {
 		t.Fatalf("MetaHistEnd: %q", got)
 	}
 	// 2026 同期シムのマーカーと衝突しない
-	if bytes.Contains(MetaBegin(1, 1, false, false, 0), []byte("\x1b[?2026")) {
+	if bytes.Contains(MetaBegin(1, 1, false, false, 0, 0), []byte("\x1b[?2026")) {
 		t.Fatal("META が DECSET 2026 を含む")
 	}
 }

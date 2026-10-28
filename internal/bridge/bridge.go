@@ -471,18 +471,22 @@ func (b *Bridge) historyPrefix(size winSize) []byte {
 		scrolled = pi.Scroll.OffsetFromBottom
 	}
 	var hist []byte
+	hlines := 0
 	e, ok := cache.fetch(b.Sid, budget, read, b.logf)
 	if ok {
 		hist = HistoryPayload(e.text, size.rows)
-		b.logf("v2: 履歴 %dB を先頭に送る（%d 行・truncated=%v・可視 %d 行は除外・取得 %.0fs 前）",
-			len(hist), strings.Count(e.text, "\n"), e.truncated, size.rows, time.Since(e.at).Seconds())
+		if len(hist) > 0 {
+			hlines = strings.Count(string(hist), "\r\n") - size.rows // パディング分を除く
+		}
+		b.logf("v2: 履歴 %d 行 %dB を先頭に送る（pane.read %d 行・truncated=%v・可視 %d 行は除外・取得 %.0fs 前）",
+			hlines, len(hist), strings.Count(e.text, "\n"), e.truncated, size.rows, time.Since(e.at).Seconds())
 	} else {
 		b.logf("v2: 履歴は %s 内に取れず＝履歴なしで先に描画（読取は継続・次の接続で送る）", budget)
 	}
 	if scrolled > 0 {
 		b.logf("v2: 元 pane はローカルで %d 行遡り中（observe はその表示位置を描く）", scrolled)
 	}
-	out := MetaBegin(size.cols, size.rows, e.truncated, len(hist) > 0, scrolled)
+	out := MetaBegin(size.cols, size.rows, e.truncated, ok, hlines, scrolled)
 	out = append(out, hist...)
 	return append(out, MetaHistEnd()...)
 }

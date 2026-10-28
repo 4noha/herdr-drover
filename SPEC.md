@@ -630,7 +630,7 @@ relay は byte 透過のまま。cm ワイヤ（`internal/bridge/cmwire.go`）�
 |---|---|---|
 | viewer→producer | `SCROLL` フレーム（`0xff 0xfe`）の `dy=0x7fff`（`bridge.HelloV2Dy`） | **HELLO v2**。SCROLL は v1 producer が parse-and-ignore するので旧 PC に送っても入力に漏れない（0xff＋未知バイトは生入力として pane に打鍵化するため新 magic は使えない）。Web は接続のたび HELLO→従来の `RESIZE(500,160)` の順に送る |
 | viewer→producer | `SCROLL` の `dy=0x7ffe`（`bridge.ScrollBottomDy`） | **最新へ**。producer が `pane.scroll offset_from_bottom=0` を実行（共有状態＝ローカル表示も最下部へ戻る。Web は明示ボタン ⤓ からのみ送る。v1 producer は無視） |
-| producer→viewer | `ESC ] 7707 ; v=2;cols=C;rows=R;trunc=T;hist=H;scrolled=N ESC \` | **META**。observe を**元 pane の実サイズ**（桁=`pane.layout rect.width`・行=`pane.get viewport_rows`）で起動したことの宣言。viewer 要求サイズは無視（ログに残す）。取得失敗は viewer 要求へフォールバック。`hist`=この接続に履歴本文が続くか、`scrolled`=元 pane のローカル表示が最下部から遡っている行数（observe はその表示位置を描く） |
+| producer→viewer | `ESC ] 7707 ; v=2;cols=C;rows=R;trunc=T;hist=H;hlines=L;scrolled=N ESC \` | **META**。observe を**元 pane の実サイズ**（桁=`pane.layout rect.width`・行=`pane.get viewport_rows`）で起動したことの宣言。viewer 要求サイズは無視（ログに残す）。取得失敗は viewer 要求へフォールバック。`hist`=この接続で履歴を**取得できたか**（予算内）、`hlines`=実際に送る履歴の行数（0=scrollback が空。Claude Code 系 pane は常に 0 になり得る）、`scrolled`=元 pane のローカル表示が最下部から遡っている行数（observe はその表示位置を描く） |
 | producer→viewer | 履歴本文（`pane.read source=recent format=text lines=1000` の末尾 R 行＝可視画面を落とし LF→CRLF、非空なら R 行の CRLF パディング） | `ESC[2J` は画面上の行を**消す**のであって押し上げない＝先に全行を scrollback へ押し込むためのパディング（欠くと最後の 1 画面分が黙って消える） |
 | producer→viewer | `ESC ] 7707 ; hist_end ESC \` | 履歴の終端。以後は従来どおり observe のフレーム |
 

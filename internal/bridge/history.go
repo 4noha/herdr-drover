@@ -46,19 +46,22 @@ const (
 // MetaBegin はストリーム先頭の宣言。viewer はこれを見て v2 モードへ切り替える
 // （端末を cols×rows に合わせ scrollback を有効化）。
 //   - trunc: 履歴が herdr 側の上限で切れているか（UI の「これ以上遡れない」用）
-//   - hist: この接続で履歴本文が続くか（0 なら hist_end まで空＝viewer は
-//     「履歴受領済み」と見なさず、次の接続の履歴を受け入れる）
+//   - hist: この接続で履歴を**取得できたか**（予算内に pane.read が終わったか）。
+//     0 なら hist_end まで空で、viewer は「未受領」のまま次の接続の履歴を
+//     受け入れる。1 なら viewer はこの接続で受領済みとする（hlines=0 でも）
+//   - hlines: 実際に送る履歴の行数（0 = scrollback が空。Claude Code の pane は
+//     可視画面未満しか保持されないため常に 0 になり得る＝「遡れる履歴なし」）
 //   - scrolled: 元 pane のローカル表示が最下部から何行遡っているか
 //     （>0 なら viewer は［最新へ］の案内を出す。observe はこの表示位置を描く）
-func MetaBegin(cols, rows int, truncated, hist bool, scrolled int) []byte {
+func MetaBegin(cols, rows int, truncated, hist bool, hlines, scrolled int) []byte {
 	b2i := func(v bool) int {
 		if v {
 			return 1
 		}
 		return 0
 	}
-	return []byte(fmt.Sprintf("%sv=2;cols=%d;rows=%d;trunc=%d;hist=%d;scrolled=%d%s",
-		metaOSC, cols, rows, b2i(truncated), b2i(hist), scrolled, metaST))
+	return []byte(fmt.Sprintf("%sv=2;cols=%d;rows=%d;trunc=%d;hist=%d;hlines=%d;scrolled=%d%s",
+		metaOSC, cols, rows, b2i(truncated), b2i(hist), hlines, scrolled, metaST))
 }
 
 // MetaHistEnd は履歴区間の終端。viewer は履歴を受け取り済みなら、以降の接続では
