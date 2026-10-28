@@ -798,3 +798,52 @@ codex、↗窓でも slave でもない通常 workspace）で同症状（`62;22c
 0.9.5 の pane 内で attach と同じ入力経路を動かす（子プロセス方式）。**フィルタ未接続の
 旧挙動では 9 種すべてがリモート行きに流れて FAIL することを確認済み**。
 
+---
+
+## BUG-15【P2・herdr/codex 側・drover は無関係】codex の native resume が常に効かない（2026-10-28）
+
+### ❌ 未解決（herdr-drover では修正不能。manual `codex resume --last` を前提にする）
+
+### 症状
+herdr integration が `codex: current (v10)` でも、サーバの実再起動（live-handoff ではない
+`herdr server stop`→cold start）で codex pane は常に素シェルに戻る。実機 dmm-kabu
+（w2K:p5）でも、隔離サーバでの再現実験でも、再起動前から既に `agent_session` が
+一度も付かない（`agent="codex"` の検出だけは前景プロセス名で通る）。
+
+### 真因（確定・実測）
+1. `herdr integration install codex` が仕込む `~/.codex/hooks.json`（SessionStart）
+   と `~/.codex/herdr-agent-state.sh` は**正しく登録・起動されている**（hook_input
+   の JSON も `hook_event_name/session_id/transcript_path` が期待形そのもの）。
+2. hook は `pane.report_agent_session` を herdr の Unix socket へ送ろうとするが、
+   **codex 自身のサンドボックス（`permission_mode: default` の workspace-write）が
+   herdr の socket への `connect()` を拒否する**。hook に一時的にデバッグ出力を
+   仕込んで確認（実機で確認後、元の内容に復元済み・差分無し）:
+   ```
+   socket_path='/tmp/.../h.sock' exists=False
+   SEND_EXC=FileNotFoundError(2, 'No such file or directory')
+   ```
+   socket ファイルは実在する（同じ path に herdrapi.Client は普通に繋がる）＝
+   macOS Seatbelt がスコープ外アクセスを ENOENT に偽装する典型パターン。herdr の
+   socket は常にプロジェクトの workspace 外（`~/.config/herdr/` 配下）にあるため、
+   **どの PC・どのプロジェクトでも再現する**（隔離サーバの `/tmp` socket でも
+   本番 `~/.config/herdr/herdr.sock` でも同じ理由で失敗するはず＝実機でも
+   `agent_session` が一度も付いた例がない事実と整合）。
+3. 一度は「`~/.codex/config.toml` の `notify` が別プログラム（Computer Use の
+   `SkyComputerUseClient`）を向いている衝突」を真因と誤診断した（notify 単一枠の
+   衝突に見えた）。**誤り**: codex の herdr 統合は `notify` ではなく `hooks.json`
+   を使う別経路で、両者は無関係・衝突していない。hook は正しく発火している。
+
+### 踏まないようにしたこと
+- `layout.apply` の `command` で codex を直接 exec する検証方法は `HERDR_ENV`/
+  `HERDR_PANE_ID` 等の伝播を誤って疑わせた（実際はシェル経由でも同じ結果＝
+  env 伝播は無関係だったと判明するまで再現方法を切り替えて確かめた）。
+- サンドボックス回避（`sandbox_permissions` 等のグローバル設定変更）は**codex の
+  全セッションのサンドボックスを弱める**ため、ユーザー判断待ちで実装しなかった
+  （2026-10-28 時点ではこのまま＝manual resume を前提にする、との意思決定）。
+
+### 対処
+herdr-drover 側に取れる対処は無い（herdr の socket 経路を codex のサンドボックス
+内に持ち込む・codex 側のサンドボックス設定を緩める、のいずれも herdr/codex 側の
+変更が要る）。運用上は、codex pane が素シェルに戻ったら手動で
+`<実 codex バイナリ> resume --last` を該当 pane に送る（本件の実機対応と同じ手順）。
+
