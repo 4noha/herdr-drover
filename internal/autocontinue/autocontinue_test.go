@@ -44,6 +44,8 @@ func TestJudgeRules(t *testing.T) {
 		{"本文に secret があっても最後の一文が『続けますか？』なら続行（gts 誤検知の再現）", "VM の secret key 導出を確認しました。\n次の手順\n1. トレースを整理\n2. 鍵更新規則を確定\nいま「VM の実体」を掴んだので、ここからはオフライン解析で進められます。続けますか？", "HUMAN", nil, VerdictContinue, "rule:asks-to-continue"},
 		{"進めてよいですか？ も続行", "設計をまとめました。この方針で実装を進めてよいですか？", "HUMAN", nil, VerdictContinue, "rule:asks-to-continue"},
 		{"push してよいですか？ は不可逆＝停止", "コミットしました。origin に push してよいですか？", "CONTINUE", nil, VerdictHuman, "rule:asks-irreversible"},
+		{"区切りの宣言でも再開に電源再投入が要るなら停止（ユーザー判断 v7）", "状態を整理しました。\n次回は「電源再投入 → 状態確認」から再開します。", "CONTINUE", nil, VerdictHuman, "rule:deferral-needs-physical"},
+		{"区切りの宣言（物理操作なし）は続行", "状態を整理しました。\n次回は静的解析の続きから再開します。", "HUMAN", nil, VerdictContinue, "rule:wrapup-deferral"},
 		{"技術用語の token を含む普通の問いは判定器へ", "token の有効期限は 1h でした。どの環境で検証しますか？", "CONTINUE", nil, VerdictContinue, "llm:3/3"},
 		{"普通の選択肢提示は判定器へ→CONTINUE", "方針は 1. A 2. B 3. C です。おすすめは 2。どれにしますか？", "CONTINUE", nil, VerdictContinue, "llm:3/3"},
 		{"判定器 DONE", "すべて完了しました。", "DONE\n", nil, VerdictDone, "llm:3/3"},

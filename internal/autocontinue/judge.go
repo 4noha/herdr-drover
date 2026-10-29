@@ -32,7 +32,7 @@ type Judgement struct {
 // RulesVersion はルール層の版。ルール（正規表現・順序・最後の一文の扱い）を変えたら
 // 上げ、RULES_CHANGELOG.md に「何の事例を根拠に何を変えたか」を書く。各判定記録
 // （cases.jsonl）とログに刻まれる＝後から「どの版の判定か」を追える。
-const RulesVersion = 6
+const RulesVersion = 7
 
 // JudgeTimeout は判定器 1 回の上限（Claude Code の Stop フック既定 60s の内側）。
 const JudgeTimeout = 40 * time.Second
@@ -73,6 +73,8 @@ var (
 	rePhysicalAsk = regexp.MustCompile(`(実機|物理|電源|ケーブル|差し込|差し直|接続して|押して|置いて|つないで|繋いで|SD|USB|カード(を|の)|抜いて|挿して|刺して|装着|取り付け|取り外|本体を).*(ください|下さい|もらえ|いただけ|頂け|してから|お願い|教えて|知らせて)`)
 	// reAskReply: ユーザーに返答・報告を求める依頼（「入れた」と教えてください 等）。
 	reAskReply = regexp.MustCompile(`[」』"”](と|を)?(教えて|知らせて|返して|連絡して|報告して)(ください|下さい|ほしい|くれ)|(できたら|したら|終わったら|入れたら|挿したら|戻したら).{0,12}(教えて|知らせて|連絡)(ください|下さい)`)
+	// rePhysicalPrereq: 再開の前提がユーザーの物理操作になっている語。
+	rePhysicalPrereq = regexp.MustCompile(`電源(再投入|を入れ直|を入れ|を切|再起動|投入)|再投入|入れ直|SD|USB|ケーブル|抜いて|挿し|差し|取り付け|装着|実機を`)
 	// reDeferral: 区切り・先送りの宣言（次の作業をエージェント自身が続けてよい形）。
 	reDeferral = regexp.MustCompile(`(次回|次は|また|後で).{0,30}(再開|続き|続け|から入|から始め)|今日はここまで|ここまでで(十分|区切り)`)
 	// reUnfinished: 未完を明示する語。疑問文で終わらなければ続行。
@@ -271,8 +273,13 @@ func (j *Judge) Judge(ctx context.Context, msg, lastPrompt string, grant, contin
 	}
 	// v5: 区切りの宣言（「次回は〜から再開します」「今日はここまで」）で終わる発話は続行。
 	// 末尾の一文だけを見る（本文中の要望は対象外）。人への依頼は上で先に止めている。
-	if !q && reDeferral.MatchString(lastSentence(t)) {
-		return Judgement{Verdict: VerdictContinue, Source: "rule:wrapup-deferral", Detail: lastSentence(t)}
+	// v7: 再開の最初の手順にユーザーの物理操作（電源再投入・SD・ケーブル等）が含まれる
+	// 宣言は続行しない（エージェントだけでは再開できない＝人待ち）。判定器へも回さず停止。
+	if ls := lastSentence(t); !q && reDeferral.MatchString(ls) {
+		if rePhysicalPrereq.MatchString(ls) {
+			return Judgement{Verdict: VerdictHuman, Source: "rule:deferral-needs-physical", Detail: ls}
+		}
+		return Judgement{Verdict: VerdictContinue, Source: "rule:wrapup-deferral", Detail: ls}
 	}
 	if q {
 		ls := lastSentence(t)
