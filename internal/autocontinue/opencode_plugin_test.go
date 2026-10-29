@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestOpencodePluginRender(t *testing.T) {
@@ -247,5 +248,52 @@ func TestHookUsesLastUserMessageWithoutTranscript(t *testing.T) {
 	}
 	if res.Output == nil || res.Output.Reason != "[semi-auto 1/20] 最後まで自律的にすすめて" || !res.Grant {
 		t.Fatalf("res=%+v out=%+v", res, res.Output)
+	}
+}
+
+// ユーザー入力は 8 件のメッセージ窓から押し出されても保持される（gts でカウントが毎回
+// リセットされ上限が効かなかった不具合の回帰）。
+func TestOpencodePluginKeepsUserInputBeyondWindow(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node が無い")
+	}
+	dir := t.TempDir()
+	plugin := filepath.Join(dir, "plugin.mjs")
+	os.WriteFile(plugin, []byte(opencodeRender("/nonexistent")), 0o644)
+	hook := filepath.Join(dir, "fakehook.sh")
+	rec := filepath.Join(dir, "stdin.jsonl")
+	os.WriteFile(hook, []byte("#!/bin/sh\ncat >> '"+rec+"'; echo >> '"+rec+"'\n"), 0o755)
+	h := filepath.Join(dir, "run.mjs")
+	os.WriteFile(h, []byte(`
+import plugin from "`+plugin+`";
+const q = []; let wake = null;
+const push = (e) => { q.push(e); if (wake) { const w = wake; wake = null; w(); } };
+const it = { [Symbol.asyncIterator]() { return { next: async () => { while (!q.length) await new Promise((r) => (wake = r)); return { done: false, value: q.shift() }; } }; } };
+const api = { event: { subscribe: () => it }, session: { get: async () => ({}), prompt: async () => ({}) } };
+await plugin.setup(api);
+const bus = (type, data) => ({ type, location: { directory: "/u/p" }, data });
+const sid = "ses_x";
+push(bus("session.inbox.enqueued", { sessionID: sid, inboxID: "i1", item: { type: "user", payload: { text: "全部やって" } } }));
+push(bus("session.inbox.enqueued", { sessionID: sid, inboxID: "i2", item: { type: "user", payload: { text: "[semi-auto 1/10] つづけて" } } }));
+for (let i = 0; i < 20; i++) { // 窓 8 件を大きく超える assistant ステップ
+  push(bus("session.step.started", { sessionID: sid, assistantMessageID: "a" + i }));
+  push(bus("session.text.ended", { sessionID: sid, assistantMessageID: "a" + i, ordinal: 0, text: "step " + i }));
+}
+push(bus("session.execution.succeeded", { sessionID: sid }));
+await new Promise((r) => setTimeout(r, 400));
+`), 0o644)
+	cmd := exec.Command(node, h)
+	cmd.Env = append(os.Environ(), "HERDR_DROVER_BIN="+hook, "HERDR_DROVER_AUTO_PLUGIN_LOG="+filepath.Join(dir, "p.log"))
+	cmd.Start()
+	time.Sleep(1500 * time.Millisecond)
+	cmd.Process.Kill()
+	b, _ := os.ReadFile(rec)
+	var in Input
+	if err := json.Unmarshal([]byte(strings.TrimSpace(strings.Split(string(b), "\n")[0])), &in); err != nil {
+		t.Fatalf("hook stdin 無し/不正: %v\n%s", err, b)
+	}
+	if !in.StopHookActive || in.LastUserMessage == nil || *in.LastUserMessage != "全部やって" {
+		t.Fatalf("窓外の入力が失われた: active=%t last_user=%v", in.StopHookActive, in.LastUserMessage)
 	}
 }

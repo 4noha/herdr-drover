@@ -138,6 +138,10 @@ function makeTracker(maxMsgs = MAX_MSGS_PER_SESSION) {
   const sessions = new Map(); // sid → Map<messageID, {role, error, parts: Map<partID, text>}>
   const children = new Map(); // child sid → parent sid
   const dirs = new Map(); // sid → directory（location.directory を持つイベントから）
+  // ユーザー入力は**メッセージ窓（直近 8 件）とは別に**保持する。1 ターンのツール実行が
+  // 多いセッション（gts）では窓から押し出され、「直前の入力は自分の続行文」(stop_hook_active)
+  // も直近の人間の指示も失われ、カウントが毎回 0 に戻って上限が効かなかった（実測 2026-10-29）。
+  const users = new Map(); // sid → { lastUser, lastHuman }
   const get = (sid) => {
     let s = sessions.get(sid);
     if (!s) {
@@ -179,6 +183,7 @@ function makeTracker(maxMsgs = MAX_MSGS_PER_SESSION) {
             sessions.delete(id);
             children.delete(id);
             dirs.delete(id);
+            users.delete(id);
           }
           return;
         }
@@ -208,7 +213,12 @@ function makeTracker(maxMsgs = MAX_MSGS_PER_SESSION) {
           if (!p.sessionID || item?.type !== "user") return;
           const m = message(get(p.sessionID), "inbox:" + (p.inboxID || Math.random()));
           m.role = "user";
-          m.parts.set("text", String(item.payload?.text ?? ""));
+          const txt = String(item.payload?.text ?? "");
+          m.parts.set("text", txt);
+          const u = users.get(p.sessionID) ?? {};
+          u.lastUser = txt;
+          if (!txt.startsWith(MARK)) u.lastHuman = txt;
+          users.set(p.sessionID, u);
           return;
         }
         case "session.step.started": {
@@ -253,7 +263,14 @@ function makeTracker(maxMsgs = MAX_MSGS_PER_SESSION) {
           const keys = [...m.parts.keys()].sort((a, b) => (Number(a) || 0) - (Number(b) || 0));
           list.push({ role: m.role, error: m.error, text: keys.map((k) => m.parts.get(k)).join("\n") });
         }
-      return summarize(list);
+      const sm = summarize(list);
+      const u = users.get(sid);
+      if (u) {
+        // 窓外に押し出された入力も含めた権威ある値で上書きする。
+        sm.stopHookActive = typeof u.lastUser === "string" && u.lastUser.startsWith(MARK);
+        if (u.lastHuman !== undefined) sm.lastHuman = u.lastHuman;
+      }
+      return sm;
     },
   };
 }
