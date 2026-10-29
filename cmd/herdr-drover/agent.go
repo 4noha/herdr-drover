@@ -349,6 +349,8 @@ func runOneCloud(ctx context.Context, cfg Config, cl Cloud, primary bool, hcli *
 		}),
 		DoSendInput: newDoSendInput(hcli),
 		DoInterrupt: newDoInterrupt(hcli),
+		// セミオート続行の pane 単位 ON/OFF（Web コンソールの ⟳ ボタン。auto.go）。
+		DoSemiAuto: newDoSemiAuto(hcli, lg),
 	}
 	if wt != nil {
 		cr.DoProxy = func(_ context.Context, sid string) error {
@@ -397,6 +399,8 @@ func runOneCloud(ctx context.Context, cfg Config, cl Cloud, primary bool, hcli *
 	if cfg.ShareLocalIPs {
 		prod = prod.WithLocalIPs(localIPs)
 	}
+	// セミオート続行が ON の pane に semi_auto=true を載せる（Web の ⟳ 表示）。
+	prod = prod.WithSemiAuto(autoSemiAutoEnabled)
 
 	// タスク完了 push 通知（Web Push・任意機能）＋セッション状態 Webhook 通知
 	// （drover-cloud-mcp-design.md とは別件・owner が /api/webhook で設定。

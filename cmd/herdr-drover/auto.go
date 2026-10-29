@@ -19,6 +19,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -163,23 +164,9 @@ func autoSet(st *autocontinue.Store, on bool, args []string, w io.Writer) error 
 	if *pane == "" {
 		return fmt.Errorf("%w: pane が分からない（herdr pane 内で実行するか --pane ID か --all）", errUsage)
 	}
-	p, _, err := st.LoadPane(*pane)
-	if err != nil {
+	if _, err := autoApply(st, herdrapi.New(""), *pane, on, *phrase, *grant, w); err != nil {
 		return err
 	}
-	p.Enabled = &on
-	if *phrase != "" {
-		p.Phrase = *phrase
-	}
-	if *grant {
-		p.Grant = true
-	}
-	p.At = time.Now().Format(time.RFC3339)
-	if err := st.SavePane(*pane, p); err != nil {
-		return err
-	}
-	fmt.Fprintf(w, "auto: pane %s を enabled=%t にしました（grant=%t phrase=%q）\n", *pane, on, p.Grant, p.Phrase)
-	autoTabMark(herdrapi.New(""), *pane, on, w)
 	if on {
 		home, err := os.UserHomeDir()
 		if err == nil {
@@ -354,26 +341,56 @@ func autoToggle(st *autocontinue.Store, args []string, w io.Writer) error {
 		}
 		*pane = cur.PaneID
 	}
+	on, err := autoEnabledFor(st, *pane)
+	if err != nil {
+		return err
+	}
+	_, err = autoApply(st, api, *pane, !on, "", false, w)
+	return err
+}
+
+// autoEnabledFor は pane の有効/無効（pane 設定 > 全体既定 > 既定 OFF）。
+func autoEnabledFor(st *autocontinue.Store, pane string) (bool, error) {
 	cfg, err := st.LoadConfig()
 	if err != nil {
-		return err
+		return false, err
 	}
-	p, found, err := st.LoadPane(*pane)
+	p, found, err := st.LoadPane(pane)
 	if err != nil {
-		return err
+		return false, err
 	}
-	eff := autocontinue.Resolve(cfg, p, found)
-	on := !eff.Enabled
+	return autocontinue.Resolve(cfg, p, found).Enabled, nil
+}
+
+// autoApply は pane の ON/OFF を設定ファイルへ書き、Tab 印（⟳ ）とトーストを出す。
+// CLI（auto on/off/toggle）と遠隔命令（semi-auto）の共通実体＝どの経路でも
+// 見え方が同じになる。phrase/grant は空/false なら触らない。
+func autoApply(st *autocontinue.Store, api *herdrapi.Client, pane string, on bool, phrase string, grant bool, w io.Writer) (autocontinue.PaneSetting, error) {
+	cfg, err := st.LoadConfig()
+	if err != nil {
+		return autocontinue.PaneSetting{}, err
+	}
+	p, _, err := st.LoadPane(pane)
+	if err != nil {
+		return p, err
+	}
 	p.Enabled = &on
-	p.At = time.Now().Format(time.RFC3339)
-	if err := st.SavePane(*pane, p); err != nil {
-		return err
+	if phrase != "" {
+		p.Phrase = phrase
 	}
+	if grant {
+		p.Grant = true
+	}
+	p.At = time.Now().Format(time.RFC3339)
+	if err := st.SavePane(pane, p); err != nil {
+		return p, err
+	}
+	eff := autocontinue.Resolve(cfg, p, true)
 	state := "OFF"
 	if on {
 		state = "ON"
 	}
-	title := fmt.Sprintf("semi-auto %s: %s", state, *pane)
+	title := fmt.Sprintf("semi-auto %s: %s", state, pane)
 	body := "つづけて の自動判定を停止"
 	if on {
 		body = fmt.Sprintf("つづけて を自動入力（上限 %d 回・裁量あり %d 回）", eff.Cap, eff.GrantCap)
@@ -394,12 +411,61 @@ func autoToggle(st *autocontinue.Store, args []string, w io.Writer) error {
 		}
 	}
 	fmt.Fprintf(w, "auto: %s — %s\n", title, body)
-	_ = st.AppendLog(time.Now(), fmt.Sprintf("toggle pane=%s → %s", *pane, state))
-	autoTabMark(api, *pane, on, w)
+	_ = st.AppendLog(time.Now(), fmt.Sprintf("set pane=%s → %s (grant=%t phrase=%q)", pane, state, p.Grant, p.Phrase))
+	autoTabMark(api, pane, on, w)
 	if _, err := api.Call("notification.show", map[string]any{"title": title, "body": body}); err != nil {
 		fmt.Fprintf(w, "auto: herdr 通知に失敗（切替自体は完了）: %v\n", err)
 	}
-	return nil
+	return p, nil
+}
+
+// autoSemiAutoEnabled は producer に渡す「pane が ON か」（session doc の semi_auto）。
+// 読めない時は false（載せない）＝daemon を止めない。
+func autoSemiAutoEnabled(pane string) bool {
+	st, err := autocontinue.Open()
+	if err != nil {
+		return false
+	}
+	on, err := autoEnabledFor(st, pane)
+	return err == nil && on
+}
+
+// newDoSemiAuto は遠隔命令 semi-auto の実体。args["on"]="1"/"0"、無ければ反転。
+// 切替後は自プロセスへ nudge（SIGUSR1）して session doc の semi_auto を即反映する。
+func newDoSemiAuto(api *herdrapi.Client, lg *log.Logger) func(ctx context.Context, sid string, args map[string]string) (string, error) {
+	return func(_ context.Context, sid string, args map[string]string) (string, error) {
+		st, err := autocontinue.Open()
+		if err != nil {
+			return "", err
+		}
+		var on bool
+		switch args["on"] {
+		case "1", "true":
+			on = true
+		case "0", "false":
+			on = false
+		case "":
+			cur, err := autoEnabledFor(st, sid)
+			if err != nil {
+				return "", err
+			}
+			on = !cur
+		default:
+			return "", fmt.Errorf("on は 1/0（%q）", args["on"])
+		}
+		p, err := autoApply(st, api, sid, on, "", false, lg.Writer())
+		if err != nil {
+			return "", err
+		}
+		if err := nudgeSelf(); err != nil {
+			lg.Printf("[auto] 即時 re-scan の合図に失敗（次の周期 tick で反映）: %v", err)
+		}
+		state := "OFF"
+		if on {
+			state = "ON"
+		}
+		return fmt.Sprintf("semi-auto %s pane=%s grant=%t phrase=%q", state, sid, p.Grant, p.Phrase), nil
+	}
 }
 
 // autoTabMark は Tab ラベルに ON 印「⟳ 」を付け外しする（トーストは消えるので

@@ -241,6 +241,7 @@ Stop フック**を使う（herdr の画面監視では「止まった」は分�
 | 回数 | `stop_hook_active=false`（人間入力起点の最初の停止）で 0 にリセット。上限 裁量なし 10・裁量あり 20（config で変更可。初版 3/10 は実運用で少なかった）。上限で停止＝通常の通知が飛ぶ |
 | 裁量 | pane 設定 `--grant`、または transcript の直近の人間入力に「いけるところまで／最後まで／完成まで／自律的に／できることを…」。直近の指示が短い続行系（40 字以内・「つづけて／続けてください／すすめて」等）なら、裁量の有無に関係なく**その言い回しをそのまま**文言に使い（例 `[semi-auto 2/10] 最後まで自律的にすすめて`・`[semi-auto 1/3] 改善を続けてください`）、判定器にも「指示自体が続行要求」を渡して選択肢／計画提示を続行側へ寄せる（ログ `asked=continue`。上限は裁量なしなら 10 のまま） |
 | 文言 | 既定「つづけて」。`--phrase` で pane／全体ごとに差し替え |
+| Web | session doc に `semi_auto: true`（ON の pane だけ・`image_paste` と同じ規律）。Web コンソール: バー右の `⟳ auto` バッジ＋操作パッド 4 段目の ⟳ ボタン（遠隔命令 `semi-auto` を `on=1/0` で投入。表示は doc の onSnapshot に従い、投入中は「…」・15s 無応答で戻す）。devices 一覧は名前の後ろに ⟳ |
 | キー一発 | plugin action `auto-toggle`（`herdr-drover auto toggle`＝フォーカス pane の反転＋`notification.show` トースト）。herdr が action に `HERDR_PANE_ID`（フォーカス pane）を注入する（実測: `herdr plugin action invoke auto-toggle --plugin 4noha.drover` の context に `focused_pane_id`）。キー割当は `~/.config/herdr/config.toml` の `[[keys.command]]`（`key="ctrl+alt+a"`・`type="plugin_action"`・`command="4noha.drover.auto-toggle"`）＋`herdr server reload-config`。manifest 変更後は `herdr plugin link <repo>` で plugins.json を更新 |
 | 可視化 | 恒久表示: ON の pane の **Tab ラベルに「⟳ 」接頭辞**（`tab.rename`。OFF で外す）。トースト: `notification.show`。画面: reason の `[semi-auto n/cap]`。ログ: `~/.herdr-drover/autocontinue/autocontinue.log`（1 フック 1 行: pane/sid/active/count/grant/verdict/src/決定）。`auto status` が直近 5 行を表示 |
 | 通知抑止 | フック開始で `suppress/<pane>.json`（pending）、続行で continue、停止で削除。daemon の push/webhook notifier は**抑止中の working→idle を確定させない**（prev を working のまま保留）＝自動続行なら通知ゼロ、停止側に倒れた（マーク削除）後の tick で通常どおり 1 回。TTL 120s（kill 等で永久抑止しない） |
@@ -270,6 +271,7 @@ Firestore `commands/{pc}/q/{id}` 経由。owner 認証済み Web が投入し、
 | `restart-agent-session` | 空=全部 | エージェントセッションを会話ごと作り直す | 後 | [一般化済] |
 | `update-agent-cli` | 空=全部 | エージェント本体更新＋セッション反映 | 後 | [一般化済] |
 | `update-all` | — | 上記＋自己更新＋再起動 | **先行**（この後 exit する） | [agent 非依存] |
+| `semi-auto` | 必須 | セミオート続行（§2.6）の pane 単位 ON/OFF。`Args["on"]`=`1`/`0`（無ければ反転）。設定ファイル＋Tab 印＋トースト＋自プロセスへ SIGUSR1（即時 re-scan＝session doc の `semi_auto` を即反映） | 後 | [非依存] |
 
 **旧命令名は alias として allowlist に残す**（`restart-claude` / `update-claude` /
 `restart-agent`）。まだ更新していない PC の Web/CLI から投げられなくなるため、

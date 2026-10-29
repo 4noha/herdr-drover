@@ -661,7 +661,7 @@ func TestBuildSessions(t *testing.T) {
 	agents := []herdrapi.AgentInfo{
 		{PaneID: "w1:p2", Name: "claude", AgentStatus: "working"},
 	}
-	ss := BuildSessions(panes, agents, nil, nil, false)
+	ss := BuildSessions(panes, agents, nil, nil, false, nil)
 	if len(ss) != 3 {
 		t.Fatalf("3 sessions のはず: %v", ss)
 	}
@@ -729,7 +729,7 @@ func TestBuildSessionsExcludesInjectedPanes(t *testing.T) {
 			AgentStatus: "idle",
 		},
 	}
-	ss := BuildSessions(panes, nil, isInjected, nil, false)
+	ss := BuildSessions(panes, nil, isInjected, nil, false, nil)
 	if len(ss) != 2 {
 		t.Fatalf("除外後 2 session のはず（自 PC の本物 2 つ・注入 pane 2 種を除外）: got=%d %v", len(ss), ss)
 	}
@@ -754,7 +754,7 @@ func TestBuildSessionsWithoutIsInjectedFalltoTokenOnly(t *testing.T) {
 		{PaneID: "w9:p1", AgentStatus: "working",
 			Tokens: map[string]string{herdrapi.InjTokenPC: "other-pc", herdrapi.InjTokenSID: "w3:p2"}},
 	}
-	ss := BuildSessions(panes, nil, nil, nil, false) // isInjected=nil
+	ss := BuildSessions(panes, nil, nil, nil, false, nil) // isInjected=nil
 	if len(ss) != 1 || ss[0]["key"] != "w1:p1" {
 		t.Fatalf("nil isInjected でも token 判定は生きるべき: %v", ss)
 	}
@@ -795,7 +795,7 @@ func TestBuildSessionsCarriesAgentKind(t *testing.T) {
 		{PaneID: "w1:p1", Name: "claude-2", AgentStatus: "idle"},
 		{PaneID: "w1:p5", Name: "codex", AgentStatus: "idle"},
 	}
-	got := BuildSessions(panes, agents, nil, nil, false)
+	got := BuildSessions(panes, agents, nil, nil, false, nil)
 	by := map[string]map[string]any{}
 	for _, s := range got {
 		by[s["key"].(string)] = s
@@ -829,7 +829,7 @@ func TestBuildSessionsStillExcludesInjectedPanes(t *testing.T) {
 		{PaneID: "w1:p1", Cwd: "/a", Agent: "claude",
 			Tokens: map[string]string{herdrapi.InjTokenPC: "other-herdr"}},
 	}
-	if got := BuildSessions(panes, nil, nil, nil, false); len(got) != 0 {
+	if got := BuildSessions(panes, nil, nil, nil, false, nil); len(got) != 0 {
 		t.Fatalf("注入 pane を push した: %+v", got)
 	}
 }
@@ -841,7 +841,7 @@ func TestBuildSessionsStillExcludesInjectedPanes(t *testing.T) {
 func TestBuildSessionsImagePaste(t *testing.T) {
 	panes := []herdrapi.PaneInfo{{PaneID: "w1:p1", Cwd: "/tmp/x", AgentStatus: "idle"}}
 
-	off := BuildSessions(panes, nil, nil, nil, false)
+	off := BuildSessions(panes, nil, nil, nil, false, nil)
 	if len(off) != 1 {
 		t.Fatalf("session 数 %d", len(off))
 	}
@@ -849,11 +849,33 @@ func TestBuildSessionsImagePaste(t *testing.T) {
 		t.Fatalf("false のときは image_paste を載せない（後方互換）: %v", off[0])
 	}
 
-	on := BuildSessions(panes, nil, nil, nil, true)
+	on := BuildSessions(panes, nil, nil, nil, true, nil)
 	if len(on) != 1 {
 		t.Fatalf("session 数 %d", len(on))
 	}
 	if v, ok := on[0]["image_paste"]; !ok || v != true {
 		t.Fatalf("true のとき image_paste=true が載っていない: %v", on[0])
+	}
+}
+
+// TestBuildSessionsSemiAuto は semi_auto が **ON の pane にだけ載る**ことを見る
+// （image_paste / local_ips と同じ「載せない＝false」の後方互換規律）。
+func TestBuildSessionsSemiAuto(t *testing.T) {
+	panes := []herdrapi.PaneInfo{
+		{PaneID: "w1:p1", Cwd: "/tmp/x", AgentStatus: "idle"},
+		{PaneID: "w1:p2", Cwd: "/tmp/y", AgentStatus: "working"},
+	}
+	none := BuildSessions(panes, nil, nil, nil, false, nil)
+	for _, s := range none {
+		if _, ok := s["semi_auto"]; ok {
+			t.Fatalf("fn=nil なのに semi_auto が載っている: %v", s)
+		}
+	}
+	on := BuildSessions(panes, nil, nil, nil, false, func(id string) bool { return id == "w1:p2" })
+	if _, ok := on[0]["semi_auto"]; ok {
+		t.Fatalf("OFF の pane に semi_auto が載っている: %v", on[0])
+	}
+	if v, ok := on[1]["semi_auto"]; !ok || v != true {
+		t.Fatalf("ON の pane に semi_auto=true が無い: %v", on[1])
 	}
 }

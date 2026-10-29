@@ -367,6 +367,7 @@ func TestCommandRunnerUnwiredAcksError(t *testing.T) {
 		"read-pane":             "read-pane 未配線",
 		"send-input":            "send-input 未配線",
 		"interrupt":             "interrupt 未配線",
+		"semi-auto":             "semi-auto 未配線",
 	} {
 		id, err := st.PushCommand(ctx, pc, cmd, "w1:p1", "", "owner@example.com")
 		if err != nil {
@@ -616,5 +617,57 @@ func TestCommandRunnerScreenIOCommands(t *testing.T) {
 	c = waitCmdStatus(t, st, pc, push("interrupt", "w9:p9", map[string]string{"expires_at": future}), 8*time.Second)
 	if c.Status != "error" || !strings.Contains(c.Detail, "見つからない") {
 		t.Fatalf("interrupt(エラー sid): %+v", c)
+	}
+}
+
+// semi-auto（セミオート続行の pane 単位 ON/OFF）: sid 必須（空は error Ack・seam 不発火）、
+// args["on"] がそのまま seam へ渡り、戻りの summary が Ack detail に載る。
+func TestCommandRunnerSemiAuto(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pc := "cmd-drover-semiauto"
+	st := newState(t, pc)
+
+	var calls atomic.Int32
+	var lastSID, lastOn atomic.Value
+	cr := &CommandRunner{
+		St:      st,
+		Revoked: func(context.Context) bool { return false },
+		DoSemiAuto: func(_ context.Context, sid string, args map[string]string) (string, error) {
+			calls.Add(1)
+			lastSID.Store(sid)
+			lastOn.Store(args["on"])
+			if sid == "w9:p9" {
+				return "", fmt.Errorf("pane が見つからない")
+			}
+			return "semi-auto ON pane=" + sid, nil
+		},
+	}
+	go func() { _ = cr.Run(ctx) }()
+	time.Sleep(1500 * time.Millisecond)
+	push := func(sid string, args map[string]string) string {
+		id, err := st.PushCommandArgs(ctx, pc, "semi-auto", sid, "", "owner@example.com", "web", args)
+		if err != nil {
+			t.Fatalf("PushCommandArgs: %v", err)
+		}
+		return id
+	}
+	// sid 空 → error、seam は呼ばれない。
+	c := waitCmdStatus(t, st, pc, push("", map[string]string{"on": "1"}), 8*time.Second)
+	if c.Status != "error" || !strings.Contains(c.Detail, "sid 必須") || calls.Load() != 0 {
+		t.Fatalf("sid 空: %+v calls=%d", c, calls.Load())
+	}
+	// 正常: args["on"] が渡り、summary が detail。
+	c = waitCmdStatus(t, st, pc, push("w1:p5", map[string]string{"on": "1"}), 8*time.Second)
+	if c.Status != "done" || c.Detail != "semi-auto ON pane=w1:p5" || calls.Load() != 1 {
+		t.Fatalf("正常: %+v calls=%d", c, calls.Load())
+	}
+	if lastSID.Load() != "w1:p5" || lastOn.Load() != "1" {
+		t.Fatalf("seam 引数: sid=%v on=%v", lastSID.Load(), lastOn.Load())
+	}
+	// 失敗は error Ack に理由が残る。
+	c = waitCmdStatus(t, st, pc, push("w9:p9", nil), 8*time.Second)
+	if c.Status != "error" || !strings.Contains(c.Detail, "見つからない") {
+		t.Fatalf("失敗: %+v", c)
 	}
 }

@@ -76,3 +76,7 @@ func stdinIsTTYImpl() bool {
 func setDetachedProc(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 }
+
+// nudgeSelf は自プロセスへ SIGUSR1 を送り、producer の即時 re-scan を起こす
+// （遠隔命令 semi-auto の後に session doc の semi_auto を即反映させるため）。
+func nudgeSelf() error { return syscall.Kill(os.Getpid(), syscall.SIGUSR1) }

@@ -135,3 +135,6 @@ func (w *webTerm) handleSSHForwardWake(ctx context.Context, afSid string) {}
 var runViewer = func(api *herdrapi.Client, paneID string) error {
 	return errWindowsUnsupported("ローカルビューア（direct attach）")
 }
+
+// nudgeSelf は Windows では無効（SIGUSR1 無し＝周期 tick が拾う）。
+func nudgeSelf() error { return nil }
