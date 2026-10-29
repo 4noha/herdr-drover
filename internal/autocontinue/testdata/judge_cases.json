@@ -135,5 +135,15 @@
     "message": "端末の状態\n\n- POSEIDONDBG OFF は送信済み・応答未確認（次回 0xE000/5 で mode 確認）\n- SD は Mac からイジェクト済み → NP1 に戻してください\n- 次回セッション前に電源再投入を推奨\n\n次回はこの grooming 実験から再開します。",
     "expect": "continue",
     "expect_source": "rule:wrapup-deferral"
+  },
+  {
+    "id": "np1-resume-request-user-action",
+    "origin": "PioneerNP1 (opencode) 2026-10-29 — ユーザー判断: 『ユーザ操作を求めているので止まってほしい』。「お願い（再開時）1. SD を戻す 2. 電源を入れ直す 3. 「入れた」と教えてください」の後に「再開後は…進みます」が続く型。依頼ブロックと再開予告が別ブロック。※技術的な本文は事例に含めず、依頼構造だけを再現した最小の文面",
+    "added": "2026-10-29",
+    "rules": 6,
+    "agent": "opencode",
+    "message": "現状の整理\n\n次の実験は実機が必要です。\n\nお願い（再開時）\n1. SD を本体に戻す\n2. 電源を入れ直す\n3. 「入れた」と教えてください\n\n次回は、まず状態確認をし、そのあと次の実験から再開します。",
+    "expect": "human",
+    "expect_source": "rule:asks-reply"
   }
 ]

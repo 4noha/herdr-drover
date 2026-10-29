@@ -32,7 +32,7 @@ type Judgement struct {
 // RulesVersion はルール層の版。ルール（正規表現・順序・最後の一文の扱い）を変えたら
 // 上げ、RULES_CHANGELOG.md に「何の事例を根拠に何を変えたか」を書く。各判定記録
 // （cases.jsonl）とログに刻まれる＝後から「どの版の判定か」を追える。
-const RulesVersion = 5
+const RulesVersion = 6
 
 // JudgeTimeout は判定器 1 回の上限（Claude Code の Stop フック既定 60s の内側）。
 const JudgeTimeout = 40 * time.Second
@@ -71,6 +71,8 @@ var (
 	reIrreversibleAsk = regexp.MustCompile(`(?i)(本番|デプロイ|公開|push|リリース|削除|消し|force|上書き|送信|送って|投稿|支払|購入|課金|決済|権限|許可|承認).*(してよ|していい|してもいい|しますか|してよろしい|して大丈夫|しても大丈夫|よろしい|していただ|してもらえ|可能ですか|should I|shall I|ok to|okay to)`)
 	// rePhysicalAsk: 実機・物理操作を**人に求める**文。
 	rePhysicalAsk = regexp.MustCompile(`(実機|物理|電源|ケーブル|差し込|差し直|接続して|押して|置いて|つないで|繋いで|SD|USB|カード(を|の)|抜いて|挿して|刺して|装着|取り付け|取り外|本体を).*(ください|下さい|もらえ|いただけ|頂け|してから|お願い|教えて|知らせて)`)
+	// reAskReply: ユーザーに返答・報告を求める依頼（「入れた」と教えてください 等）。
+	reAskReply = regexp.MustCompile(`[」』"”](と|を)?(教えて|知らせて|返して|連絡して|報告して)(ください|下さい|ほしい|くれ)|(できたら|したら|終わったら|入れたら|挿したら|戻したら).{0,12}(教えて|知らせて|連絡)(ください|下さい)`)
 	// reDeferral: 区切り・先送りの宣言（次の作業をエージェント自身が続けてよい形）。
 	reDeferral = regexp.MustCompile(`(次回|次は|また|後で).{0,30}(再開|続き|続け|から入|から始め)|今日はここまで|ここまでで(十分|区切り)`)
 	// reUnfinished: 未完を明示する語。疑問文で終わらなければ続行。
@@ -108,6 +110,18 @@ func stripTrailingParens(s string) string {
 func endsWithQuestion(s string) bool {
 	t := strings.TrimRight(stripTrailingParens(s), " \t\r\n*_`」』]")
 	return strings.HasSuffix(t, "?") || strings.HasSuffix(t, "？")
+}
+
+// lastLines は末尾 n 行（空行を含めず）を 1 行に繋いだもの。
+func lastLines(s string, n int) string {
+	lines := strings.Split(stripTrailingParens(s), "\n")
+	var out []string
+	for i := len(lines) - 1; i >= 0 && len(out) < n; i-- {
+		if l := strings.TrimSpace(lines[i]); l != "" {
+			out = append([]string{l}, out...)
+		}
+	}
+	return strings.Join(out, " ")
 }
 
 // lastBlock は末尾のブロック（最後の空行より後ろ。最大 6 行・括弧書きは除く）を 1 行に
@@ -247,6 +261,13 @@ func (j *Judge) Judge(ctx context.Context, msg, lastPrompt string, grant, contin
 		return Judgement{Verdict: VerdictHuman, Source: "rule:asks-physical", Detail: tail(lb, 80)}
 	case reIrreversibleAsk.MatchString(lb):
 		return Judgement{Verdict: VerdictHuman, Source: "rule:asks-irreversible", Detail: tail(lb, 80)}
+	}
+	// v6: 「〜と教えてください／知らせてください」＝ユーザーの返答を待つ依頼が末尾 12 行に
+	// あれば、区切りの宣言より先に止める（依頼の箇条書きと「再開後は〜します」が別ブロック
+	// のとき v5 は依頼を見ずに続行しうる）。状態メモの「〜してください」は対象外（返答を
+	// 求める形だけ）。
+	if ll := lastLines(tail(msg, 1200), 12); reAskReply.MatchString(ll) {
+		return Judgement{Verdict: VerdictHuman, Source: "rule:asks-reply", Detail: tail(ll, 80)}
 	}
 	// v5: 区切りの宣言（「次回は〜から再開します」「今日はここまで」）で終わる発話は続行。
 	// 末尾の一文だけを見る（本文中の要望は対象外）。人への依頼は上で先に止めている。
