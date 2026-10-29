@@ -521,7 +521,7 @@ func TestHookReusesPlainContinueInstruction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Output == nil || res.Output.Reason != "[semi-auto 1/10] 改善を続けてください" || res.Grant || res.Cap != 3 {
+	if res.Output == nil || res.Output.Reason != "[semi-auto 1/10] 改善を続けてください" || res.Grant || res.Cap != 10 {
 		t.Fatalf("res=%+v out=%+v", res, res.Output)
 	}
 	if !strings.Contains(gotPrompt, "keep going") {
