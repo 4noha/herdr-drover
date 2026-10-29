@@ -246,7 +246,7 @@ Stop フック**を使う（herdr の画面監視では「止まった」は分�
 | 通知抑止 | フック開始で `suppress/<pane>.json`（pending）、続行で continue、停止で削除。daemon の push/webhook notifier は**抑止中の working→idle を確定させない**（prev を working のまま保留）＝自動続行なら通知ゼロ、停止側に倒れた（マーク削除）後の tick で通常どおり 1 回。TTL 120s（kill 等で永久抑止しない） |
 | 状態 | `~/.herdr-drover/autocontinue/`（`HERDR_DROVER_AUTO_DIR` で上書き＝テスト隔離）: `config.json`・`panes/`・`sessions/<agent>_<sid>.json`・`suppress/` |
 | Codex 固有 | 非管理フックは各 PC で一度 `/hooks` から trust（未 trust はスキップ＋起動時警告）。設置時に報告する。`codex exec` 用の `--dangerously-bypass-hook-trust` は使わない |
-| 未対応 | opencode（Stop フック無し。`session.idle` を受ける server プラグインから `herdr-drover stop-hook opencode` を呼び、session id→pane は herdr `agent.list` の `agent_session.value` で引き、`client.session.prompt` で投入する設計＝TODO） |
+| opencode | Stop フックが無いので **server プラグイン**（`~/.config/opencode/plugins/herdr-drover-autocontinue.js`・`auto install --agent opencode` が埋め込み JS を設置）。`session.idle` → 子セッション除外 → `session.get`/`session.messages`（root SDK＝`{path:{id}}` 形・応答 `{data}`）で最終 assistant 発話・直近の人間入力（自分の `[semi-auto` 文は除く）・`stop_hook_active`（直前の入力が自分の文）を組み、`herdr-drover stop-hook opencode` へ stdin JSON（`last_user_message` 付き）。block なら `session.prompt({path:{id},body:{parts:[{type:"text",text:reason}]}})`（完了を待たない）。最終 assistant が error（中断）なら何もしない。pane は Codex と同じく cwd で解決（共有 background service 内で走るため）。プラグインはサーバ起動時に読まれる＝`opencode reload`／service 再起動／`--standalone` の新セッションから有効。実 node でのロジック検証は `TestOpencodePluginWithNode` |
 
 実測根拠（2026-10-29・このMacの全 transcript 静的解析）: ユーザ入力中の「つづけて」系は
 Claude 1.8%・Codex 10.5%・opencode 6.2%、Codex は打つまでの待ち中央値 6 分。直前の発話は

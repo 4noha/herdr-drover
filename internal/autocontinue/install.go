@@ -1,6 +1,7 @@
 package autocontinue
 
 import (
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,15 @@ import (
 	"path/filepath"
 	"strings"
 )
+
+// opencodePlugin は opencode 用 server プラグイン（`session.idle` → stop-hook →
+// `session.prompt`）。`__HERDR_DROVER_BIN__` を設置時に bin の絶対パスへ置換する。
+//
+//go:embed opencode_plugin.js
+var opencodePlugin string
+
+// opencodePluginMarker は自分のファイルを同定する行。
+const opencodePluginMarker = "HERDR_DROVER_AUTOCONTINUE=1"
 
 // Stop フックの設置先（両エージェントとも `hooks.Stop[].hooks[]` の同じ形）。
 //
@@ -37,8 +47,74 @@ func SettingsPath(home, agent string) (string, error) {
 		return filepath.Join(home, ".claude", "settings.json"), nil
 	case "codex":
 		return filepath.Join(home, ".codex", "hooks.json"), nil
+	case "opencode":
+		// opencode は Stop フックが無い＝server プラグイン（~/.config/opencode/plugins/）。
+		cfg := os.Getenv("XDG_CONFIG_HOME")
+		if cfg == "" {
+			cfg = filepath.Join(home, ".config")
+		}
+		return filepath.Join(cfg, "opencode", "plugins", "herdr-drover-autocontinue.js"), nil
 	}
 	return "", fmt.Errorf("Stop フック未対応のエージェント: %s", agent)
+}
+
+// opencodeInstalled / opencodeInstall / opencodeUninstall はプラグインファイル版。
+func opencodeInstalled(path string) (string, bool, error) {
+	b, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	if !strings.Contains(string(b), opencodePluginMarker) {
+		return "", false, fmt.Errorf("%s は herdr-drover のファイルではない（マーカー無し）", path)
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		if i := strings.Index(line, `"/`); strings.Contains(line, "__BIN_SET__") && i >= 0 {
+			return strings.Trim(strings.TrimSpace(strings.TrimPrefix(line, "//")), " "), true, nil
+		}
+	}
+	return path, true, nil
+}
+
+func opencodeRender(bin string) string {
+	esc := strings.ReplaceAll(strings.ReplaceAll(bin, `\`, `\\`), `"`, `\"`)
+	out := strings.Replace(opencodePlugin, "__HERDR_DROVER_BIN__", esc, 1)
+	return "// __BIN_SET__ \"" + esc + "\"\n" + out
+}
+
+func opencodeInstall(path, bin string) (bool, error) {
+	want := opencodeRender(bin)
+	cur, err := os.ReadFile(path)
+	if err == nil && string(cur) == want {
+		return false, nil
+	}
+	if err == nil && !strings.Contains(string(cur), opencodePluginMarker) {
+		return false, fmt.Errorf("%s は herdr-drover のファイルではない（上書きしない）", path)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return false, err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(want), 0o644); err != nil {
+		return false, err
+	}
+	return true, os.Rename(tmp, path)
+}
+
+func opencodeUninstall(path string) (bool, error) {
+	b, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !strings.Contains(string(b), opencodePluginMarker) {
+		return false, fmt.Errorf("%s は herdr-drover のファイルではない（消さない）", path)
+	}
+	return true, os.Remove(path)
 }
 
 // hooksDoc は settings の最小ビュー（他キーは raw に温存）。
@@ -132,6 +208,9 @@ func groupHasMarker(g map[string]any, marker string) (string, bool) {
 
 // Installed は設置済みか（command も返す）。
 func Installed(path, agent string) (string, bool, error) {
+	if agent == "opencode" {
+		return opencodeInstalled(path)
+	}
 	d, err := loadHooksDoc(path)
 	if err != nil {
 		return "", false, err
@@ -151,6 +230,9 @@ func Installed(path, agent string) (string, bool, error) {
 // Install は Stop フックを追記する。既に同じ command なら何もしない（changed=false）。
 // command が違う（bin の場所が変わった等）なら差し替える。
 func Install(path, agent, bin string) (changed bool, err error) {
+	if agent == "opencode" {
+		return opencodeInstall(path, bin)
+	}
 	d, err := loadHooksDoc(path)
 	if err != nil {
 		return false, err
@@ -184,6 +266,9 @@ func Install(path, agent, bin string) (changed bool, err error) {
 
 // Uninstall は自分のエントリだけ除く（他は温存）。
 func Uninstall(path, agent string) (changed bool, err error) {
+	if agent == "opencode" {
+		return opencodeUninstall(path)
+	}
 	d, err := loadHooksDoc(path)
 	if err != nil {
 		return false, err

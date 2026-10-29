@@ -31,7 +31,7 @@ import (
 )
 
 // autoHookAgents は Stop フックを設置できるエージェント。
-var autoHookAgents = []string{"claude", "codex"}
+var autoHookAgents = []string{"claude", "codex", "opencode"}
 
 func cmdAuto(args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
@@ -227,7 +227,7 @@ func autoInstall(install bool, args []string, w io.Writer) error {
 	}
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	agent := fs.String("agent", "all", "claude|codex|all")
+	agent := fs.String("agent", "all", "claude|codex|opencode|all")
 	bin := fs.String("bin", "", "フックに焼く herdr-drover のパス（既定: ~/.herdr-drover/bin/herdr-drover か自分）")
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("%w: %v", errUsage, err)
@@ -236,10 +236,10 @@ func autoInstall(install bool, args []string, w io.Writer) error {
 	switch *agent {
 	case "all":
 		agents = autoHookAgents
-	case "claude", "codex":
+	case "claude", "codex", "opencode":
 		agents = []string{*agent}
 	default:
-		return fmt.Errorf("%w: --agent は claude|codex|all", errUsage)
+		return fmt.Errorf("%w: --agent は claude|codex|opencode|all", errUsage)
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -273,6 +273,11 @@ func autoInstall(install bool, args []string, w io.Writer) error {
 				fmt.Fprintf(w, "auto: ⚠ codex は非管理フックを各 PC で一度 trust する必要があります。"+
 					"codex を起動して `/hooks` を開き、herdr-drover の Stop フックを trust してください"+
 					"（未 trust の間はスキップされる＝起動時に警告が出ます）\n")
+			}
+			if a == "opencode" {
+				fmt.Fprintf(w, "auto: ⚠ opencode のプラグインはサーバ起動時に読み込まれます。"+
+					"background service を使っている場合は `opencode reload` か service の再起動後、"+
+					"`--standalone` のセッションは次に始めたものから有効です\n")
 			}
 		case install:
 			fmt.Fprintf(w, "auto: %s の Stop フックは設置済み（%s）\n", a, p)

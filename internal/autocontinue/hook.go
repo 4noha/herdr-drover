@@ -23,6 +23,9 @@ type Input struct {
 	HookEventName        string  `json:"hook_event_name"`
 	StopHookActive       bool    `json:"stop_hook_active"`
 	LastAssistantMessage *string `json:"last_assistant_message"`
+	// LastUserMessage は transcript が無い経路（opencode プラグイン）が渡す直近の
+	// 人間入力（自分の続行文は除いたもの）。transcript があればそちらを優先。
+	LastUserMessage *string `json:"last_user_message,omitempty"`
 }
 
 // Output は stdout JSON（両エージェント共通: decision=block で続行、reason が
@@ -110,7 +113,10 @@ func (h *Hook) Run(ctx context.Context, in Input) (Result, error) {
 		// 人間の入力から始まったターンの最初の停止＝回数リセット。
 		cnt.Count = 0
 	}
-	lastPrompt, _ := LastHumanPrompt(h.Agent, in.TranscriptPath)
+	lastPrompt, ok := LastHumanPrompt(h.Agent, in.TranscriptPath)
+	if !ok && in.LastUserMessage != nil && isHumanText(*in.LastUserMessage) {
+		lastPrompt = *in.LastUserMessage
+	}
 	grant := eff.Grant || GrantIn(lastPrompt)
 	continueAsked := ContinueLike(lastPrompt)
 	cap := eff.Cap
@@ -190,10 +196,11 @@ func RunStopHook(agent string, stdin io.Reader, stdout, stderr io.Writer, getenv
 		}
 	}
 	pane, via := getenv("HERDR_PANE_ID"), "env"
-	if agent == "codex" {
+	if agent == "codex" || agent == "opencode" {
 		// ⚠ Codex 0.165 はフックを**共有の app-server デーモン**内で実行する（実測
 		// 2026-10-29: 別 pane の codex の Stop で HERDR_PANE_ID が最初に app-server を
-		// 起動した pane のまま届いた）。env は信用せず cwd で herdr の agent 一覧から引く。
+		// 起動した pane のまま届いた）。opencode の server プラグインも共有 background
+		// service 内。どちらも env は信用せず cwd で herdr の agent 一覧から引く。
 		pane, via = ResolvePaneByCwd(agent, in.Cwd, herdrAgentList)
 	}
 	h := &Hook{Store: st, Agent: agent, PaneID: pane, PaneVia: via, NewJudge: NewJudge, Now: time.Now}

@@ -55,10 +55,12 @@ v0.5.30 で**判定を経過時間ベースへ**変更し、**実 websocket 越�
   Self-Modification で止めるためユーザー実行**。codex は `/hooks` trust も要る。
 - 「いま auto か分からない」対応: ON の pane の **Tab ラベルに「⟳ 」**（`tab.rename`・
   OFF で外す）。Ctrl+Alt+A は実機で動作確認済（ユーザー操作のログで確認）。
-- **残課題**: (1) opencode 対応（Stop フック無し。server プラグイン `session.idle` →
-  `stop-hook opencode` → session id→pane は herdr `agent.list` の `agent_session.value`
-  → `client.session.prompt`。`opencode run --standalone` の隔離実行が応答せず live 検証は
-  未着手）。(2) Web（devices/セッション一覧）からの pane 単位 on/off（遠隔命令化）。
+- opencode: server プラグイン実装済（`internal/autocontinue/opencode_plugin.js`・実 node
+  テスト）。**`auto install --agent opencode`（~/.config/opencode/plugins/ 書込）は classifier が
+  Unauthorized Persistence で止めるためユーザー実行**。実機 live 検証は設置後に
+  `herdr agent start … --kind opencode -- --standalone` で行う（background service は再起動か
+  `opencode reload` が要る）。
+- **残課題**: (1) opencode の実機 live 検証（上記）。(2) Web（devices/セッション一覧）からの pane 単位 on/off（遠隔命令化）。
   (3) fleet 配信は release が要る＝ユーザー確認後。(4) 判定器は `claude -p`（Haiku・
   4〜5s）＝各 PC に claude ログインが要る。無ければ常に停止側（ログに fallback）。
 

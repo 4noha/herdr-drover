@@ -392,7 +392,7 @@ Web からはセッション行とターミナル画面の「⟳」ボタン（1
 ### auto（セミオート続行＝「つづけて」の自動判定）
 
 エージェントがターンを終える瞬間に公式の Stop フックで「人にしか答えられない状態か」を
-判定し、違えば「つづけて」を自動入力する（Claude Code / Codex）。既定 OFF。
+判定し、違えば「つづけて」を自動入力する（Claude Code / Codex / opencode）。既定 OFF。
 
 ```sh
 herdr-drover auto install            # ~/.claude/settings.json と ~/.codex/hooks.json に追記
@@ -419,7 +419,8 @@ herdr-drover auto off / uninstall
   command = "4noha.drover.auto-toggle"
   ```
 - ⚠ フックは**設置後に新しく始めたセッション**から有効。Codex は各 PC で一度
-  `/hooks` から trust が要る。opencode は未対応（SPEC §2.6）。
+  `/hooks` から trust が要る。opencode は server プラグイン方式（`auto install` が
+  `~/.config/opencode/plugins/` に設置。サーバ再起動か `opencode reload` 後に有効）。
 
 ### ssh-forward（slave へ owner の SSH エージェントを一時転送）
 
