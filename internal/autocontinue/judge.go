@@ -45,9 +45,15 @@ const JudgeSystemPrompt = "You are a strict classifier for a terminal multiplexe
 // DefaultJudgeCmd は既定の判定器（小モデル）。最後の引数にプロンプトが付く。
 // `--max-turns 1`＝ツールを使わせない・`--output-format text`＝1 語だけ読む・
 // `--no-session-persistence`＝判定ごとの transcript を残さない。
+//
+// ⚠ `--setting-sources ""` と `--exclude-dynamic-system-prompt-sections` は必須。実測
+// 2026-10-29: 無いと判定が **cwd とユーザー設定に依存**した（同じ完了報告が /tmp では
+// 3 票とも CONTINUE、/var/folders では DONE、「HOLD」と答える票も）。設定・CLAUDE.md・
+// 環境情報を一切読ませない hermetic な分類器にすると cwd に依らず DONE で安定。
 func DefaultJudgeCmd() []string {
 	return []string{"claude", "-p", "--model", "haiku", "--max-turns", "1", "--output-format", "text",
-		"--no-session-persistence", "--system-prompt", JudgeSystemPrompt}
+		"--no-session-persistence", "--setting-sources", "", "--exclude-dynamic-system-prompt-sections",
+		"--system-prompt", JudgeSystemPrompt}
 }
 
 var (

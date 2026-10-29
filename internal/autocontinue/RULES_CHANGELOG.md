@@ -23,6 +23,10 @@
     そちらが先に当たる）。
   - 判定器は **3 回並列の多数決**（`judge_votes`、既定 3）。v3 の live 評価で完了報告が
     DONE/CONTINUE に揺れたため。過半数なしは停止側。source は `llm:2/3` のように票を残す。
+  - 判定器を **hermetic** に: `--setting-sources ""`＋`--exclude-dynamic-system-prompt-sections`。
+    揺れの正体は乱数ではなく **cwd とユーザー設定への依存**だった（同じ完了報告が /tmp では
+    3 票とも CONTINUE、/var/folders では DONE、「HOLD」と答える票も。設定を読ませないと
+    cwd に依らず DONE）。多数決は残す（きわどい事例の保険）。
 
 ## v3 — 2026-10-29（判定器プロンプトの DONE 定義を明確化）
 
