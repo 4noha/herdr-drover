@@ -59,6 +59,13 @@ type taskNotifier struct {
 	// テストが httptest.Server の URL を挿すための seam（push.Send 自体の
 	// baseURL 引数と同じ設計）。
 	baseURL string
+	// suppressed は「この pane の直近の停止はセミオート（autocontinue）が処理中／
+	// 自動続行した」か。true の間は working→idle を**遷移として確定させない**
+	//（prev を working のまま保つ）＝自動続行なら次 tick で working に戻って
+	// 何も起きず、本当に止まった（マークが消えた）時は後の tick で通常どおり通知。
+	// nil なら常に false（seam。既定は autocontinue.SuppressFunc）。
+	suppressed func(key string) bool
+	supLogged  map[string]bool
 }
 
 // newTaskNotifier は cl.SAKeyPath（既定 ~/.herdr-drover/sa.json）を読んで
@@ -103,6 +110,18 @@ func (tn *taskNotifier) check(ctx context.Context, st pushTokenStore, sessions [
 		prev := tn.prev[key]
 		tn.prev[key] = status
 		if prev != "working" || !taskNotifyState(status) {
+			delete(tn.supLogged, key)
+			continue
+		}
+		if tn.suppressed != nil && tn.suppressed(key) {
+			tn.prev[key] = "working" // 遷移を保留（マークが消えれば次 tick で確定）
+			if tn.supLogged == nil {
+				tn.supLogged = map[string]bool{}
+			}
+			if !tn.supLogged[key] {
+				tn.supLogged[key] = true
+				tn.lg.Printf("[push] semi-auto 処理中のため通知を保留 sid=%s status=%s", key, status)
+			}
 			continue
 		}
 		if tn.hc == nil {

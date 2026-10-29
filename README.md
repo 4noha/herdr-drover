@@ -389,6 +389,38 @@ Web からはセッション行とターミナル画面の「⟳」ボタン（1
 - 起動コマンドは herdr が保持する実 argv をそのまま再利用する（PATH を引き直さない）
   ＝daemon 経由でも手元の CLI と同じバイナリが起動する。
 
+### auto（セミオート続行＝「つづけて」の自動判定）
+
+エージェントがターンを終える瞬間に公式の Stop フックで「人にしか答えられない状態か」を
+判定し、違えば「つづけて」を自動入力する（Claude Code / Codex）。既定 OFF。
+
+```sh
+herdr-drover auto install            # ~/.claude/settings.json と ~/.codex/hooks.json に追記
+herdr-drover auto on                 # 今いる pane で有効化（--pane ID / --all で全体）
+herdr-drover auto on --grant         # 裁量あり＝上限 10 回（「いけるところまで」相当）
+herdr-drover auto on --phrase "改善を続けてください"
+herdr-drover auto toggle             # フォーカス pane を反転（herdr トースト付き。Ctrl+Alt+A 用）
+herdr-drover auto status             # 設定・フック設置状況・直近の判定ログ
+herdr-drover auto judge < msg.txt    # 判定器の動作確認
+herdr-drover auto off / uninstall
+```
+
+- 続行は画面に `[semi-auto n/cap] つづけて` と出る。1 回のユーザ入力につき 3 回
+  （裁量あり 10 回）で必ず止まり、そこからは通常どおり通知が飛ぶ。
+- 自動続行した停止は push／webhook 通知を出さない（本当に止まった時だけ通知）。
+- 判定は `~/.herdr-drover/autocontinue/autocontinue.log` に 1 行ずつ残る。
+- キー一発: `~/.config/herdr/config.toml` に次を足して `herdr server reload-config`
+  （plugin action `auto-toggle` がフォーカス pane を反転し、トーストで ON/OFF を出す）。
+
+  ```toml
+  [[keys.command]]
+  key = "ctrl+alt+a"
+  type = "plugin_action"
+  command = "4noha.drover.auto-toggle"
+  ```
+- ⚠ フックは**設置後に新しく始めたセッション**から有効。Codex は各 PC で一度
+  `/hooks` から trust が要る。opencode は未対応（SPEC §2.6）。
+
 ### ssh-forward（slave へ owner の SSH エージェントを一時転送）
 
 共用 slave 上で **owner の SSH 秘密鍵をディスクに置かず**、一時的に git/gh の

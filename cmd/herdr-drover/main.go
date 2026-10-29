@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 
 	"github.com/4noha/herdr-drover/internal/agentid"
+	"github.com/4noha/herdr-drover/internal/autocontinue"
 )
 
 func main() {
@@ -124,6 +125,25 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return 2
 		}
 		return runShim(rest[0], rest[1:], stdout, stderr)
+	case "auto":
+		// セミオート続行（auto.go）。サブコマンド＋フラグを取る。
+		if err := cmdAuto(rest, stdout, stderr); err != nil {
+			fmt.Fprintf(stderr, "herdr-drover auto: %v\n", err)
+			if errors.Is(err, errUsage) {
+				return 2
+			}
+			return 1
+		}
+		return 0
+	case "stop-hook":
+		// エージェントの Stop フック入口（内部）。stdin JSON→stdout JSON。
+		// 常に exit 0（フック失敗扱いでエージェントを邪魔しない。詳細は
+		// internal/autocontinue.RunStopHook）。
+		if len(rest) != 1 {
+			fmt.Fprintf(stderr, "herdr-drover stop-hook: エージェント種別が要る（claude|codex）\n")
+			return 0
+		}
+		return autocontinue.RunStopHook(rest[0], os.Stdin, stdout, stderr, autocontinue.OSGetenv)
 	case "organize":
 		// organize はフラグ（--capture/--dry-run）を取るので rest を渡す
 		//（organize.go が flag.FlagSet で解析）。
@@ -236,6 +256,16 @@ func usage(w io.Writer) {
                           （alias は exec に効かないので symlink か shim 形を使う）。
                           種別を跨いで attach しない／本体の解決は新規起動が要ると
                           分かってから（未導入エージェントの既存セッションへも繋げる）
+  herdr-drover auto status|on|off|toggle|install|uninstall|judge
+                          セミオート続行: エージェントがターンを終えた時に Stop フック
+                          （Claude Code / Codex 公式）で「人にしか答えられない状態か」を
+                          判定し、違えば「つづけて」を自動入力。既定 OFF・pane 単位で
+                          「auto on」（--all で全体・--grant で上限 10 回・--phrase で文言）。
+                          「auto toggle」は今いる／フォーカス pane の反転＋herdr トースト
+                          （plugin action auto-toggle に [[keys.command]] でキー割当）。
+                          「auto install」 が ~/.claude/settings.json と ~/.codex/hooks.json に
+                          フックを追記（新しく始めたセッションから有効・codex は /hooks で
+                          一度 trust）。判定は autocontinue.log と画面の [semi-auto n/cap] で可視
   herdr-drover organize [--dry-run]
                           claude セッションを含む Tab を wsmap ルール
                           （exact-cwd > 最長 prefix > default）解決先の

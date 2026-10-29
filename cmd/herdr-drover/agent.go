@@ -12,6 +12,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/4noha/herdr-drover/internal/autocontinue"
 	"io"
 	"log"
 	"os"
@@ -416,6 +417,17 @@ func runOneCloud(ctx context.Context, cfg Config, cl Cloud, primary bool, hcli *
 		var wn *webhookNotifier
 		if primary {
 			wn = newWebhookNotifier(cl.PCName, lg)
+		}
+		// セミオート続行（autocontinue）が処理中／自動続行した停止は通知しない。
+		// 状態ディレクトリが解決できない構成では seam が常に false＝従来どおり。
+		if autoDir, err := autocontinue.ResolveDir(); err == nil {
+			sup := autocontinue.SuppressFunc(autoDir, time.Now)
+			tn.suppressed = sup
+			if wn != nil {
+				wn.suppressed = sup
+			}
+		} else {
+			lg.Printf("[autocontinue] 状態ディレクトリ解決失敗（通知抑止なし）: %v", err)
 		}
 		prod = prod.WithOnSessions(func(sessions []map[string]any) {
 			tn.check(ctx, scConcrete, sessions)

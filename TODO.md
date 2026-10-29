@@ -30,6 +30,30 @@ v0.5.30 で**判定を経過時間ベースへ**変更し、**実 websocket 越�
 > できない* の記述は**すべて解消済み**（PR #1 merge・`e9bab96` で release に windows 資産。
 > Windows 機の self-update 成功を 7/25 15:52 の Ack で実確認）。
 
+### 2026-10-29: セミオート続行（`auto` / Stop フック）実装・ローカル反映済・fleet 未配信
+
+ユーザー報告「作業がすぐ中断して『つづけて』を連打するループ」の自動化。仕様は
+**SPEC §2.6**。実装は `internal/autocontinue`（状態・判定・transcript・フック・設置）＋
+`cmd/herdr-drover/auto.go`（CLI）＋ notify.go / webhooknotify.go の抑止 seam。
+
+- 実測根拠: このMacの全 transcript 静的解析（Claude 1.8%・Codex 10.5%・opencode 6.2% が
+  「つづけて」系。Codex は待ち中央値 6 分）。判定は 2 値（番号付き選択肢も「つづけて」で
+  よい＝ユーザ自身がそうしている）。
+- 検証: 実 Claude Code 2.1.312 で `claude -p --settings` 経由の Stop フック契約を live で
+  確認（`TestLiveClaudeStopHook`・opt-in）。Codex の live 確認は `--dangerously-bypass-hook-
+  trust` が必要で未実施＝**実機で `/hooks` trust 後に動作確認が要る**（0.165.0 のバイナリに
+  `stop_hook_active`/`last_assistant_message` は存在）。
+- このMacの状態: plugin 再リンク済（action `auto-toggle`）・`~/.config/herdr/config.toml` に
+  `[[keys.command]] ctrl+alt+a` 追加＋reload 済（backup `.bak-2026-10-29-autokey`）。
+  **`herdr-drover auto install`（~/.claude/settings.json 書込）は auto mode の classifier が
+  Self-Modification で止めるためユーザー実行**。codex は `/hooks` trust も要る。
+- **残課題**: (1) opencode 対応（Stop フック無し。server プラグイン `session.idle` →
+  `stop-hook opencode` → session id→pane は herdr `agent.list` の `agent_session.value`
+  → `client.session.prompt`。`opencode run --standalone` の隔離実行が応答せず live 検証は
+  未着手）。(2) Web（devices/セッション一覧）からの pane 単位 on/off（遠隔命令化）。
+  (3) fleet 配信は release が要る＝ユーザー確認後。(4) 判定器は `claude -p`（Haiku・
+  4〜5s）＝各 PC に claude ログインが要る。無ければ常に停止側（ログに fallback）。
+
 ### 2026-10-29: Web viewer ワイヤ v2（元 pane 実サイズ observe＋履歴先送り）実装・ローカル反映済・fleet 未配信
 
 ユーザー報告「別 PC のログが表示領域以上遡れない／Web で一発描画されない」の根治。

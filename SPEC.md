@@ -223,6 +223,37 @@ Tab ごと自動 close される**。よって差し替え後に生存を確認�
 
 ---
 
+### 2.6 `auto` / `stop-hook`（セミオート続行・2026-10-29）
+
+「作業がすぐ中断して『つづけて』を連打する」ループの自動化。**エージェント公式の
+Stop フック**を使う（herdr の画面監視では「止まった」は分かるが「止まるべきだったか」
+は分からない＝判定はどのみち自前。Stop フックなら最終発話が構造化データで届く）。
+
+| 項目 | 仕様 |
+|---|---|
+| 入口 | Claude Code `~/.claude/settings.json` と Codex `~/.codex/hooks.json` の `hooks.Stop[].hooks[]` に `'<bin>' stop-hook <agent>`（`auto install` が**追記のみ**・他フック温存・冪等・bin 変更は差し替え）。timeout 55s |
+| stdin | `session_id` / `transcript_path` / `cwd` / `stop_hook_active` / `last_assistant_message`（両エージェント共通。2.1.312 / 0.165.0 実測） |
+| stdout | 続行＝`{"decision":"block","reason":"[semi-auto n/cap] <文言>"}`（reason が次のユーザ入力になる）。停止＝無出力。**exit は常に 0**（フック失敗扱いでエージェントを邪魔しない） |
+| pane | `HERDR_PANE_ID`（herdr が pane 配下プロセスに与える env）。無ければ何もしない |
+| 有効化 | 既定 OFF。`auto on`（今いる pane）／`--pane ID`／`--all`（全体既定）。pane 設定 > 全体 > 既定 |
+| 判定 | 2 値（続行／停止）。ルール先行: 空発話→停止、疑問文＋人にしかできない語（権限・認証情報・実機・デプロイ・push・課金…）→停止、「未完／次は／残り」＋非疑問→続行。残りは判定器（既定 `claude -p --model haiku --max-turns 1`）に CONTINUE/HUMAN/DONE の 1 語。判定器エラー・不明出力は**停止側** |
+| 判定器 env | `HERDR_*`・`CLAUDECODE*` を**必ず外す**（herdr hook が判定器の session を pane に誤報告する／入れ子ガード／再帰）。`HERDR_DROVER_AUTO_JUDGE=1` を立て、フック側はそれを見て即終了 |
+| 回数 | `stop_hook_active=false`（人間入力起点の最初の停止）で 0 にリセット。上限 裁量なし 3・裁量あり 10（config で変更可）。上限で停止＝通常の通知が飛ぶ |
+| 裁量 | pane 設定 `--grant`、または transcript の直近の人間入力に「いけるところまで／最後まで／完成まで／自律的に／できることを…」。裁量あり＋短い続行指示（40 字以内）なら**その言い回しをそのまま**文言に使う（例 `[semi-auto 2/10] 最後まで自律的にすすめて`） |
+| 文言 | 既定「つづけて」。`--phrase` で pane／全体ごとに差し替え |
+| キー一発 | plugin action `auto-toggle`（`herdr-drover auto toggle`＝フォーカス pane の反転＋`notification.show` トースト）。herdr が action に `HERDR_PANE_ID`（フォーカス pane）を注入する（実測: `herdr plugin action invoke auto-toggle --plugin 4noha.drover` の context に `focused_pane_id`）。キー割当は `~/.config/herdr/config.toml` の `[[keys.command]]`（`key="ctrl+alt+a"`・`type="plugin_action"`・`command="4noha.drover.auto-toggle"`）＋`herdr server reload-config`。manifest 変更後は `herdr plugin link <repo>` で plugins.json を更新 |
+| 可視化 | 画面: reason の `[semi-auto n/cap]`。ログ: `~/.herdr-drover/autocontinue/autocontinue.log`（1 フック 1 行: pane/sid/active/count/grant/verdict/src/決定）。`auto status` が直近 5 行を表示 |
+| 通知抑止 | フック開始で `suppress/<pane>.json`（pending）、続行で continue、停止で削除。daemon の push/webhook notifier は**抑止中の working→idle を確定させない**（prev を working のまま保留）＝自動続行なら通知ゼロ、停止側に倒れた（マーク削除）後の tick で通常どおり 1 回。TTL 120s（kill 等で永久抑止しない） |
+| 状態 | `~/.herdr-drover/autocontinue/`（`HERDR_DROVER_AUTO_DIR` で上書き＝テスト隔離）: `config.json`・`panes/`・`sessions/<agent>_<sid>.json`・`suppress/` |
+| Codex 固有 | 非管理フックは各 PC で一度 `/hooks` から trust（未 trust はスキップ＋起動時警告）。設置時に報告する。`codex exec` 用の `--dangerously-bypass-hook-trust` は使わない |
+| 未対応 | opencode（Stop フック無し。`session.idle` を受ける server プラグインから `herdr-drover stop-hook opencode` を呼び、session id→pane は herdr `agent.list` の `agent_session.value` で引き、`client.session.prompt` で投入する設計＝TODO） |
+
+実測根拠（2026-10-29・このMacの全 transcript 静的解析）: ユーザ入力中の「つづけて」系は
+Claude 1.8%・Codex 10.5%・opencode 6.2%、Codex は打つまでの待ち中央値 6 分。直前の発話は
+「未完／次は」4 割・疑問文終わり 1%。番号付き選択肢にもユーザは「つづけて」で返す＝
+番号を解く必要はない。実 Claude Code で契約を通す live テストは
+`HERDR_DROVER_LIVE_CLAUDE=1 go test ./cmd/herdr-drover -run TestLiveClaudeStopHook`。
+
 ## 3. 遠隔命令仕様
 
 Firestore `commands/{pc}/q/{id}` 経由。owner 認証済み Web が投入し、
