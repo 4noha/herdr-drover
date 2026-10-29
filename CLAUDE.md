@@ -17,7 +17,9 @@ cwd 自動 attach／新 Tab 起動を提供する。Python 版 claude-master(cm)
   **別エージェント導入時は `internal/agentid/spec.go` に Spec を足すだけ**
   （BinNames は herdr の lookup_agent 表の要素にすること＝ValidateSpecs が検証）
 - **セミオート続行（「つづけて」自動判定）: SPEC §2.6**（Claude Code / Codex の公式 Stop
-  フック＋`internal/autocontinue`。既定 OFF・判定は 2 値・上限 10/20 回・自動続行は通知を出さない）
+  フック＋`internal/autocontinue`。既定 OFF・判定は 2 値・上限 10/20 回・自動続行は通知を出さない。
+  **判定ルールを変えるときは `RulesVersion` を上げ `RULES_CHANGELOG.md` に根拠の事例を書き、
+  `testdata/judge_cases.json` に事例を足して `TestJudgeCorpus` を通す**）
 - 機能別設計: [DESIGN_SLAVE.md](DESIGN_SLAVE.md)＋[DESIGN_SLAVE_SPEC.md](DESIGN_SLAVE_SPEC.md)
   （共用 PC）／[DESIGN_SSH_FORWARD.md](DESIGN_SSH_FORWARD.md)（SSH 転送）
 - **再開時はまず TODO.md を読む**（in-flight タスク・残課題・デプロイ手順の正）

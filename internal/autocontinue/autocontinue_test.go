@@ -536,3 +536,140 @@ func TestHookReusesPlainContinueInstruction(t *testing.T) {
 		t.Fatalf("log: %s", res.LogLine)
 	}
 }
+
+// ---- 事例の蓄積とコーパス ------------------------------------------------------
+
+// 判定のたびに cases.jsonl に 1 行残り、停止後に人が打った最初の指示が followup として
+// 合成される（『つづけて』なら「その停止は誤りだった示唆」）。ラベルは labels.jsonl。
+func TestHookRecordsCasesAndFollowup(t *testing.T) {
+	h, st := newTestHook(t, fakeJudge("HUMAN", nil))
+	st.SaveConfig(Config{Enabled: boolp(true)})
+	tp := filepath.Join(t.TempDir(), "c.jsonl")
+	os.WriteFile(tp, []byte(`{"type":"user","message":{"role":"user","content":"全部やって"}}`+"\n"), 0o600)
+	in := Input{SessionID: "s9", TranscriptPath: tp, LastAssistantMessage: strp("方針 A と B があります。どちらにしますか？")}
+	if _, err := h.Run(context.Background(), in); err != nil {
+		t.Fatal(err)
+	}
+	cases, err := st.ReadCases(0)
+	if err != nil || len(cases) != 1 {
+		t.Fatalf("cases=%d err=%v", len(cases), err)
+	}
+	c := cases[0]
+	if c.Decision != "stop" || c.Verdict != "human" || c.Source != "llm" || c.Rules != RulesVersion || c.Prompt != "全部やって" || !c.Grant ||
+		c.Message != "方針 A と B があります。どちらにしますか？" || c.Cap != DefaultGrantCap {
+		t.Fatalf("case: %+v", c)
+	}
+	// 次の人間入力が『つづけて』→ 直前の停止事例に followup が付く。
+	os.WriteFile(tp, []byte(`{"type":"user","message":{"role":"user","content":"全部やって"}}`+"\n"+
+		`{"type":"user","message":{"role":"user","content":"つづけて"}}`+"\n"), 0o600)
+	h.NewJudge = func([]string, string) *Judge { return fakeJudge("CONTINUE", nil) }
+	in.LastAssistantMessage = strp("続けます。")
+	if _, err := h.Run(context.Background(), in); err != nil {
+		t.Fatal(err)
+	}
+	cases, _ = st.ReadCases(0)
+	if len(cases) != 2 {
+		t.Fatalf("cases=%d", len(cases))
+	}
+	if cases[0].FollowupPrompt != "つづけて" || cases[0].FollowupContinue == nil || !*cases[0].FollowupContinue {
+		t.Fatalf("followup が付いていない: %+v", cases[0])
+	}
+	if cases[1].Decision != "continue" || cases[1].Reason != "[semi-auto 1/10] つづけて" || !cases[1].Asked {
+		t.Fatalf("2 件目: %+v", cases[1])
+	}
+	// ラベル付与と合成、末尾 n 件、export の形。
+	if err := st.LabelCase(cases[0].ID, "continue", "選択肢は自分で選んでよい", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.LabelCase(cases[0].ID, "maybe", "", time.Now()); err == nil {
+		t.Fatal("不正ラベルが通った")
+	}
+	last, _ := st.ReadCases(1)
+	if len(last) != 1 || last[0].ID != cases[1].ID {
+		t.Fatalf("末尾 1 件: %+v", last)
+	}
+	all, _ := st.ReadCases(0)
+	if all[0].Label != "continue" || all[0].LabelNote != "選択肢は自分で選んでよい" {
+		t.Fatalf("label 合成: %+v", all[0])
+	}
+	cc := ExportCorpus(all[0], "テスト", time.Date(2026, 10, 29, 0, 0, 0, 0, time.UTC))
+	if cc.Expect != "continue" || cc.ExpectSource != "llm" || cc.Rules != RulesVersion || cc.Message != all[0].Message || cc.Added != "2026-10-29" {
+		t.Fatalf("export: %+v", cc)
+	}
+	// 上限到達も事例として残る（decision=cap）。
+	st.SaveConfig(Config{Enabled: boolp(true), Cap: 1, GrantCap: 1})
+	in.StopHookActive = true
+	if _, err := h.Run(context.Background(), in); err != nil {
+		t.Fatal(err)
+	}
+	all, _ = st.ReadCases(0)
+	if all[len(all)-1].Decision != "cap" {
+		t.Fatalf("cap 事例: %+v", all[len(all)-1])
+	}
+}
+
+// TestJudgeCorpus はリポジトリ内コーパス（testdata/judge_cases.json）に対するルール層の
+// 全体整合性を固定する。expect_source が rule:… の事例はその規則で決まること、llm の
+// 事例はルールで決めずに判定器へ渡ること（＝判定器の答えがそのまま結果になること）を
+// 検証する。HERDR_DROVER_LIVE_JUDGE=1 なら llm の事例を実判定器（claude -p）で評価する。
+func TestJudgeCorpus(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("testdata", "judge_cases.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var corpus []CorpusCase
+	if err := json.Unmarshal(b, &corpus); err != nil {
+		t.Fatal(err)
+	}
+	if len(corpus) == 0 {
+		t.Fatal("コーパスが空")
+	}
+	seen := map[string]bool{}
+	live := os.Getenv("HERDR_DROVER_LIVE_JUDGE") == "1"
+	var liveJudge *Judge
+	if live {
+		liveJudge = NewJudge(DefaultJudgeCmd(), t.TempDir())
+	}
+	for _, c := range corpus {
+		if c.ID == "" || seen[c.ID] {
+			t.Fatalf("id が空か重複: %q", c.ID)
+		}
+		seen[c.ID] = true
+		if c.Origin == "" || c.Added == "" || c.Message == "" {
+			t.Fatalf("%s: origin/added/message は必須", c.ID)
+		}
+		switch c.Expect {
+		case "continue", "human", "done":
+		default:
+			t.Fatalf("%s: expect は continue|human|done（%q）", c.ID, c.Expect)
+		}
+		asked := c.Asked || ContinueLike(c.Prompt)
+		grant := c.Grant || GrantIn(c.Prompt)
+		// ルール層のみ: 判定器は「呼ばれたら期待どおり答える」fake にする。
+		called := false
+		fake := &Judge{Cmd: []string{"fake"}, Timeout: time.Second, Run: func(context.Context, []string, string) (string, error) {
+			called = true
+			return strings.ToUpper(c.Expect), nil
+		}}
+		got := fake.Judge(context.Background(), c.Message, c.Prompt, grant, asked)
+		if string(got.Verdict) != c.Expect {
+			t.Errorf("%s: verdict=%s source=%s want %s（origin: %s）", c.ID, got.Verdict, got.Source, c.Expect, c.Origin)
+			continue
+		}
+		if c.ExpectSource == "llm" {
+			if !called || got.Source != "llm" {
+				t.Errorf("%s: 判定器へ渡るべき事例がルールで決まった: source=%s detail=%q", c.ID, got.Source, got.Detail)
+			}
+		} else if got.Source != c.ExpectSource {
+			t.Errorf("%s: source=%s want %s", c.ID, got.Source, c.ExpectSource)
+		}
+		if live && c.ExpectSource == "llm" {
+			lg := liveJudge.Judge(context.Background(), c.Message, c.Prompt, grant, asked)
+			if string(lg.Verdict) != c.Expect {
+				t.Errorf("%s: 実判定器=%s（src=%s）want %s", c.ID, lg.Verdict, lg.Source, c.Expect)
+			} else {
+				t.Logf("%s: 実判定器=%s ok", c.ID, lg.Verdict)
+			}
+		}
+	}
+}

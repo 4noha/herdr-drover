@@ -27,6 +27,11 @@ type Judgement struct {
 	Detail  string
 }
 
+// RulesVersion はルール層の版。ルール（正規表現・順序・最後の一文の扱い）を変えたら
+// 上げ、RULES_CHANGELOG.md に「何の事例を根拠に何を変えたか」を書く。各判定記録
+// （cases.jsonl）とログに刻まれる＝後から「どの版の判定か」を追える。
+const RulesVersion = 3
+
 // JudgeTimeout は判定器 1 回の上限（Claude Code の Stop フック既定 60s の内側）。
 const JudgeTimeout = 40 * time.Second
 
@@ -56,16 +61,41 @@ var (
 	reVerdict = regexp.MustCompile(`(?i)\b(CONTINUE|HUMAN|DONE)\b`)
 )
 
-// endsWithQuestion は末尾（装飾・空白を除く）が疑問符か。
+// stripTrailingParens は末尾の括弧書き（「どうしますか？（次回は…から入れます。）」の
+// （…）部分）を最大 2 つ外す。問いの後ろに補足の括弧が付く発話で疑問文判定が外れないため
+// （コーパス grant-continue-or-stop）。
+func stripTrailingParens(s string) string {
+	t := strings.TrimSpace(s)
+	for i := 0; i < 2; i++ {
+		t = strings.TrimRight(t, " \t\r\n*_`")
+		var open string
+		switch {
+		case strings.HasSuffix(t, "）"):
+			open = "（"
+		case strings.HasSuffix(t, ")"):
+			open = "("
+		default:
+			return t
+		}
+		j := strings.LastIndex(t, open)
+		if j < 0 {
+			return t
+		}
+		t = strings.TrimSpace(t[:j])
+	}
+	return t
+}
+
+// endsWithQuestion は末尾（装飾・空白・括弧書きを除く）が疑問符か。
 func endsWithQuestion(s string) bool {
-	t := strings.TrimRight(strings.TrimSpace(s), " \t\r\n*_`)）」』]")
+	t := strings.TrimRight(stripTrailingParens(s), " \t\r\n*_`」』]")
 	return strings.HasSuffix(t, "?") || strings.HasSuffix(t, "？")
 }
 
 // lastSentence は末尾の一文（最後の文末記号より後ろ。改行も区切り）。人待ちの
 // 判定はこれだけで行う＝本文中の技術用語に引きずられない。
 func lastSentence(s string) string {
-	t := strings.TrimRight(strings.TrimSpace(s), " \t\r\n*_`)）」』]")
+	t := strings.TrimRight(stripTrailingParens(s), " \t\r\n*_`」』]")
 	t = strings.TrimRight(t, "?？")
 	i := strings.LastIndexAny(t, "。！!？?\n")
 	if i >= 0 {
@@ -210,12 +240,21 @@ func buildPrompt(msg, lastPrompt string, grant, continueAsked bool) string {
 	b.WriteString("Answer with exactly one word: CONTINUE, HUMAN, or DONE.\n\n")
 	b.WriteString("CONTINUE = the agent stopped although work remains, or it is offering choices / a plan / a recommendation that it can decide itself (pick its own recommendation and proceed).\n")
 	b.WriteString("HUMAN = finishing needs something only the human can give: credentials or login, a physical action on a device, approval for an irreversible or external operation (deploy, publish, payment, deleting data, pushing to a shared repo), or genuinely missing requirements the agent cannot infer.\n")
-	b.WriteString("DONE = the requested task is fully complete and nothing is left to do.\n\n")
+	b.WriteString("DONE = the message reports the requested work as complete and lists no remaining steps, open questions, or failures. Do not invent further work: a completion report is DONE even if more could theoretically be done.\n\n")
 	if grant {
 		b.WriteString("The human explicitly granted autonomy (\"go as far as you can\"). Treat ordinary choices and plan approvals as CONTINUE.\n\n")
 	} else if continueAsked {
 		b.WriteString("The human's latest instruction was itself just \"keep going\" (つづけて). They want the agent to proceed on its own judgement: treat ordinary choices and plan approvals as CONTINUE; answer HUMAN only for the strict HUMAN conditions above.\n\n")
 	}
+	// few-shot（コーパスから。判定器の揺れを抑える＝2026-10-29 live 評価で完了報告が
+	// CONTINUE に揺れた）。変えたら RulesVersion と RULES_CHANGELOG.md。
+	b.WriteString("Examples:\n")
+	b.WriteString("- \"修正をコミットしました。テストは 25 件すべて通っています。README も反映済みです。\" -> DONE\n")
+	b.WriteString("- \"744 テスト成功。解除は未完です。次は神経回路内で開始応答を一過性にする検証です。\" -> CONTINUE\n")
+	b.WriteString("- \"候補は 1. A 2. B 3. C です。どれか指示ください。\" -> CONTINUE (the agent can pick its own recommendation)\n")
+	b.WriteString("- \"pytest が無く実行できませんでした。テスト結果は未確認です。\" -> CONTINUE (the agent can install it or report without it)\n")
+	b.WriteString("- \"SSH 先のパスワードを教えてもらえますか？\" -> HUMAN\n")
+	b.WriteString("- \"本体の電源を切って USB ケーブルを差し直してから教えてください。\" -> HUMAN\n\n")
 	if lp := strings.TrimSpace(lastPrompt); lp != "" {
 		b.WriteString("Latest human instruction:\n<<<\n")
 		b.WriteString(tail(lp, 800))

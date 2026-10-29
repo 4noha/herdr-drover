@@ -66,6 +66,11 @@ v0.5.30 で**判定を経過時間ベースへ**変更し、**実 websocket 越�
 - Web 連携（2026-10-29 午後）: session doc `semi_auto`（producer.WithSemiAuto）＋遠隔命令
   `semi-auto`（DoSemiAuto・drover-cloud allowlist・web `on=` 引数）＋Web コンソールのバッジ／⟳
   ボタン＋devices 一覧の印。**Cloud Run を先にデプロイ**（allowlist）→ daemon。
+- 判定の改善サイクル（ユーザー方針 2026-10-29「修正前も合理的だった。データを貯めて全体
+  整合性のあるテストを」）: 判定ごとに `cases.jsonl`（続行時も）・停止後の人の反応を followup・
+  `auto cases` で閲覧/ラベル/export・`testdata/judge_cases.json`＋`TestJudgeCorpus`・
+  `RulesVersion`＋`RULES_CHANGELOG.md`。運用: 続行事例はユーザーが時々眺めて誤続行を
+  label、誤停止はユーザーが報告 → export してコーパスへ → ルール/プロンプト変更は版を上げる。
 - **残課題**: (1) fleet 配信は release が要る＝ユーザー確認後。(4) 判定器は `claude -p`（Haiku・
   4〜5s）＝各 PC に claude ログインが要る。無ければ常に停止側（ログに fallback）。
 

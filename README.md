@@ -402,6 +402,8 @@ herdr-drover auto on --phrase "改善を続けてください"
 herdr-drover auto toggle             # フォーカス pane を反転（herdr トースト付き。Ctrl+Alt+A 用）
 herdr-drover auto status             # 設定・フック設置状況・直近の判定ログ
 herdr-drover auto judge < msg.txt    # 判定器の動作確認
+herdr-drover auto cases --decision continue   # 判定事例（続行だけ）。誤続行を見つけたら label
+herdr-drover auto cases label <id> human "本当は止めるべき"   # 正解ラベル → export でコーパスへ
 herdr-drover auto off / uninstall
 ```
 
@@ -409,7 +411,9 @@ herdr-drover auto off / uninstall
   バッジが出て、操作パッドの ⟳ ボタンで Web から ON/OFF できる（devices 一覧にも ⟳）。続行は画面に `[semi-auto n/cap] つづけて` と出る。1 回のユーザ入力につき 10 回
   （裁量あり 20 回）で必ず止まり、そこからは通常どおり通知が飛ぶ。
 - 自動続行した停止は push／webhook 通知を出さない（本当に止まった時だけ通知）。
-- 判定は `~/.herdr-drover/autocontinue/autocontinue.log` に 1 行ずつ残る。
+- 判定は `~/.herdr-drover/autocontinue/autocontinue.log` に 1 行ずつ残る。判定の材料（最終発話・
+  指示）と結果は `cases.jsonl` に貯まり、ルールの版と変更理由は
+  `internal/autocontinue/RULES_CHANGELOG.md`、整合性テストは `testdata/judge_cases.json`。
 - キー一発: `~/.config/herdr/config.toml` に次を足して `herdr server reload-config`
   （plugin action `auto-toggle` がフォーカス pane を反転し、トーストで ON/OFF を出す）。
 

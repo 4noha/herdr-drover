@@ -9,6 +9,9 @@ package main
 //	herdr-drover auto uninstall [--agent claude|codex|all]
 //	herdr-drover auto judge [--prompt 直近の指示] [--grant] < 最終発話   （判定器の動作確認）
 //	herdr-drover auto toggle [--pane ID]   （今いる／フォーカス pane の ON/OFF 反転＋herdr 通知。plugin action auto-toggle＝キー割当用）
+//	herdr-drover auto cases [--last N] [--decision continue|stop|cap] [--sid ID] [--full]   （判定事例の一覧）
+//	herdr-drover auto cases label <id> <continue|human|done> [note]       （正解ラベル）
+//	herdr-drover auto cases export <id> [origin]                          （コーパス用 JSON を出力）
 //	herdr-drover stop-hook <agent>      （内部: エージェントの Stop フックから呼ばれる）
 //
 // 仕組みと根拠は internal/autocontinue の package コメントと SPEC §2.6。
@@ -36,7 +39,7 @@ var autoHookAgents = []string{"claude", "codex", "opencode"}
 
 func cmdAuto(args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return fmt.Errorf("%w: サブコマンドが要る（status|on|off|toggle|install|uninstall|judge）", errUsage)
+		return fmt.Errorf("%w: サブコマンドが要る（status|on|off|toggle|install|uninstall|judge|cases）", errUsage)
 	}
 	st, err := autocontinue.Open()
 	if err != nil {
@@ -54,8 +57,10 @@ func cmdAuto(args []string, stdout, stderr io.Writer) error {
 		return autoJudge(st, rest, os.Stdin, stdout)
 	case "toggle":
 		return autoToggle(st, rest, stdout)
+	case "cases":
+		return autoCases(st, rest, stdout)
 	}
-	return fmt.Errorf("%w: 不明なサブコマンド %q（status|on|off|toggle|install|uninstall|judge）", errUsage, sub)
+	return fmt.Errorf("%w: 不明なサブコマンド %q（status|on|off|toggle|install|uninstall|judge|cases）", errUsage, sub)
 }
 
 func autoStatus(st *autocontinue.Store, w io.Writer) error {
@@ -514,4 +519,104 @@ func autoTabMark(api *herdrapi.Client, pane string, on bool, w io.Writer) {
 		return
 	}
 	fmt.Fprintf(w, "auto: Tab ラベル %q → %q\n", tg.Tab.Label, label)
+}
+
+// autoCases は判定事例の閲覧・ラベル・export。
+//
+//	auto cases [--last N] [--decision continue|stop|cap] [--sid ID] [--full]
+//	auto cases label <id> <continue|human|done> [note…]
+//	auto cases export <id> [origin…]   … testdata/judge_cases.json に貼る JSON
+//
+// 「続行した事例の直前の文脈」も全部残るので、続行だけを眺めて時々ある誤続行を
+// 見つける（--decision continue）。停止が誤りだった事例は停止後に打った指示が
+// followup に付く（『つづけて』なら ↩ 印）。
+func autoCases(st *autocontinue.Store, args []string, w io.Writer) error {
+	if len(args) > 0 && (args[0] == "label" || args[0] == "export") {
+		sub := args[0]
+		if len(args) < 2 {
+			return fmt.Errorf("%w: auto cases %s <id> …", errUsage, sub)
+		}
+		id := args[1]
+		if sub == "label" {
+			if len(args) < 3 {
+				return fmt.Errorf("%w: auto cases label <id> <continue|human|done> [note]", errUsage)
+			}
+			if err := st.LabelCase(id, args[2], strings.Join(args[3:], " "), time.Now()); err != nil {
+				return err
+			}
+			fmt.Fprintf(w, "auto: 事例 %s にラベル %s を付けました\n", id, args[2])
+			return nil
+		}
+		cases, err := st.ReadCases(0)
+		if err != nil {
+			return err
+		}
+		for _, c := range cases {
+			if c.ID == id {
+				cc := autocontinue.ExportCorpus(c, strings.Join(args[2:], " "), time.Now())
+				b, _ := json.MarshalIndent(cc, "", "  ")
+				fmt.Fprintln(w, string(b))
+				fmt.Fprintf(w, "# ↑ internal/autocontinue/testdata/judge_cases.json に追記し、expect / expect_source を確認して TestJudgeCorpus を回す\n")
+				return nil
+			}
+		}
+		return fmt.Errorf("事例 %s が見つからない（%s）", id, st.CasesPath())
+	}
+	fs := flag.NewFlagSet("auto cases", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	last := fs.Int("last", 30, "末尾 N 件")
+	decision := fs.String("decision", "", "continue|stop|cap で絞る")
+	sid := fs.String("sid", "", "セッション id で絞る")
+	full := fs.Bool("full", false, "最終発話を切らずに出す")
+	if err := fs.Parse(args); err != nil {
+		return fmt.Errorf("%w: %v", errUsage, err)
+	}
+	cases, err := st.ReadCases(0)
+	if err != nil {
+		return err
+	}
+	var sel []autocontinue.Case
+	for _, c := range cases {
+		if *decision != "" && c.Decision != *decision {
+			continue
+		}
+		if *sid != "" && c.SID != *sid {
+			continue
+		}
+		sel = append(sel, c)
+	}
+	if *last > 0 && len(sel) > *last {
+		sel = sel[len(sel)-*last:]
+	}
+	fmt.Fprintf(w, "事例 %d 件（全 %d 件・%s）\n", len(sel), len(cases), st.CasesPath())
+	for _, c := range sel {
+		mark := ""
+		if c.FollowupContinue != nil && *c.FollowupContinue {
+			mark = " ↩人が『つづけて』"
+		} else if c.FollowupPrompt != "" {
+			mark = " ↩人: " + strings.ReplaceAll(tailRunes(c.FollowupPrompt, 40), "\n", " ")
+		}
+		if c.Label != "" {
+			mark += " [label=" + c.Label + "]"
+		}
+		fmt.Fprintf(w, "— %s  %s %s pane=%s %s/%d rules=v%d\n   %s%s\n", c.At, c.ID, c.Agent, c.Pane, c.Decision, c.Cap, c.Rules,
+			strings.TrimSpace(fmt.Sprintf("verdict=%s src=%s %s", c.Verdict, c.Source, c.Detail)), mark)
+		if c.Prompt != "" {
+			fmt.Fprintf(w, "   指示: %s\n", strings.ReplaceAll(tailRunes(c.Prompt, 80), "\n", " "))
+		}
+		msg := c.Message
+		if !*full {
+			msg = tailRunes(msg, 240)
+		}
+		fmt.Fprintf(w, "   発話: %s\n", strings.ReplaceAll(strings.TrimSpace(msg), "\n", " ⏎ "))
+	}
+	return nil
+}
+
+func tailRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return "…" + string(r[len(r)-n:])
 }

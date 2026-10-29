@@ -302,3 +302,47 @@ func TestLiveClaudeStopHook(t *testing.T) {
 }
 
 func boolPtr(b bool) *bool { return &b }
+
+// auto cases: 事例の一覧（絞り込み）・ラベル・export。
+func TestAutoCasesCLI(t *testing.T) {
+	home := t.TempDir()
+	setTestHome(t, home)
+	dir := filepath.Join(home, "auto")
+	t.Setenv(autocontinue.DirEnv, dir)
+	st := &autocontinue.Store{Dir: dir}
+	now := time.Now()
+	c1 := autocontinue.Case{ID: "claude-s1-1-aa", At: now.Format(time.RFC3339), Rules: autocontinue.RulesVersion, Agent: "claude", Pane: "w1:p1", SID: "s1",
+		Prompt: "全部やって", Message: "方針 A と B。どちらにしますか？", Verdict: "human", Source: "llm", Decision: "stop", Cap: 10}
+	c2 := autocontinue.Case{ID: "claude-s1-2-bb", At: now.Format(time.RFC3339), Rules: autocontinue.RulesVersion, Agent: "claude", Pane: "w1:p1", SID: "s1",
+		Prompt: "つづけて", Message: "続けます。次は検証です。", Verdict: "continue", Source: "rule:unfinished", Decision: "continue", Reason: "[semi-auto 1/10] つづけて", Cap: 10}
+	st.AppendCase(c1)
+	st.AppendFollowup(c1.ID, "つづけて", now)
+	st.AppendCase(c2)
+	run2 := func(args ...string) (string, int) {
+		var out, errb bytes.Buffer
+		code := run(args, &out, &errb)
+		return out.String() + errb.String(), code
+	}
+	out, code := run2("auto", "cases")
+	if code != 0 || !strings.Contains(out, "事例 2 件") || !strings.Contains(out, "↩人が『つづけて』") || !strings.Contains(out, "rule:unfinished") {
+		t.Fatalf("list: code=%d\n%s", code, out)
+	}
+	out, _ = run2("auto", "cases", "--decision", "continue")
+	if !strings.Contains(out, "事例 1 件") || strings.Contains(out, c1.ID) || !strings.Contains(out, c2.ID) {
+		t.Fatalf("decision filter:\n%s", out)
+	}
+	out, code = run2("auto", "cases", "label", c1.ID, "continue", "選択肢は自分で選んでよい")
+	if code != 0 || !strings.Contains(out, "ラベル continue") {
+		t.Fatalf("label: code=%d %s", code, out)
+	}
+	if _, code := run2("auto", "cases", "label", c1.ID, "maybe"); code == 0 {
+		t.Fatal("不正ラベルが exit 0")
+	}
+	out, code = run2("auto", "cases", "export", c1.ID, "テスト事例")
+	if code != 0 || !strings.Contains(out, `"expect": "continue"`) || !strings.Contains(out, `"origin": "テスト事例"`) || !strings.Contains(out, `"expect_source": "llm"`) {
+		t.Fatalf("export: code=%d\n%s", code, out)
+	}
+	if _, code := run2("auto", "cases", "export", "nope"); code == 0 {
+		t.Fatal("無い id の export が exit 0")
+	}
+}

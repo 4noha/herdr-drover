@@ -119,6 +119,16 @@ func (h *Hook) Run(ctx context.Context, in Input) (Result, error) {
 	}
 	grant := eff.Grant || GrantIn(lastPrompt)
 	continueAsked := ContinueLike(lastPrompt)
+	// 人間の新しい入力で始まった停止（active=false）なら、同じセッションの直前の
+	// 判定が「停止」だった場合に、その後の人の反応（最初の指示）を事例へ追記する
+	//（『つづけて』が来ていれば、その停止は誤りだった示唆＝コーパス候補）。
+	if !in.StopHookActive && lastPrompt != "" {
+		if prev, found := h.Store.LastCaseOf(h.Agent, in.SessionID); found && prev.Decision != "continue" && prev.FollowupPrompt == "" {
+			_ = h.Store.AppendFollowup(prev.ID, lastPrompt, now)
+		}
+	}
+	rec := Case{ID: NewCaseID(h.Agent, in.SessionID, now), At: now.Format(time.RFC3339), Rules: RulesVersion, Agent: h.Agent,
+		Pane: h.PaneID, SID: in.SessionID, Active: in.StopHookActive, Grant: grant, Asked: continueAsked, Prompt: lastPrompt}
 	cap := eff.Cap
 	if grant {
 		cap = eff.GrantCap
@@ -128,16 +138,22 @@ func (h *Hook) Run(ctx context.Context, in Input) (Result, error) {
 	if in.LastAssistantMessage != nil {
 		msg = *in.LastAssistantMessage
 	}
-	base := fmt.Sprintf("%s pane=%s sid=%s active=%t count=%d/%d grant=%t", h.Agent, h.PaneID, in.SessionID, in.StopHookActive, cnt.Count, cap, grant)
+	rec.Count, rec.Cap = cnt.Count, cap
+	base := fmt.Sprintf("%s pane=%s sid=%s active=%t count=%d/%d grant=%t rules=v%d", h.Agent, h.PaneID, in.SessionID, in.StopHookActive, cnt.Count, cap, grant, RulesVersion)
 	if continueAsked {
 		base += " asked=continue"
 	}
 	if h.PaneVia != "" && h.PaneVia != "env" {
 		base += " via=" + h.PaneVia
 	}
+	if in.LastAssistantMessage != nil {
+		rec.Message = *in.LastAssistantMessage
+	}
 	if cnt.Count >= cap {
 		res.Count = cnt.Count
 		res.Skipped = "cap"
+		rec.Decision, rec.Skipped = "cap", "cap"
+		_ = h.Store.AppendCase(rec)
 		return stop(res, base+" 上限到達→停止（人の確認待ち）")
 	}
 	judge := h.NewJudge(eff.JudgeCmd, h.Store.Dir)
@@ -147,8 +163,11 @@ func (h *Hook) Run(ctx context.Context, in Input) (Result, error) {
 	if jd.Detail != "" {
 		detail = " (" + strings.ReplaceAll(tail(jd.Detail, 60), "\n", " ") + ")"
 	}
+	rec.Verdict, rec.Source, rec.Detail = string(jd.Verdict), jd.Source, jd.Detail
 	if jd.Verdict != VerdictContinue {
 		res.Count = cnt.Count
+		rec.Decision = "stop"
+		_ = h.Store.AppendCase(rec)
 		return stop(res, fmt.Sprintf("%s verdict=%s src=%s%s→停止", base, jd.Verdict, jd.Source, detail))
 	}
 	cnt.Count++
@@ -168,6 +187,8 @@ func (h *Hook) Run(ctx context.Context, in Input) (Result, error) {
 	res.Output = &Output{Decision: "block", Reason: reason}
 	res.LogLine = fmt.Sprintf("%s verdict=continue src=%s%s→続行 %q", base, jd.Source, detail, reason)
 	_ = h.Store.AppendLog(now, res.LogLine)
+	rec.Decision, rec.Reason = "continue", reason
+	_ = h.Store.AppendCase(rec)
 	return res, nil
 }
 
