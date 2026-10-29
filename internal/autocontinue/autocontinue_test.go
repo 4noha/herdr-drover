@@ -46,7 +46,7 @@ func TestJudgeRules(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := fakeJudge(c.reply, c.err).Judge(context.Background(), c.msg, "", false)
+			got := fakeJudge(c.reply, c.err).Judge(context.Background(), c.msg, "", false, false)
 			if got.Verdict != c.want || got.Source != c.wantSrc {
 				t.Fatalf("got %+v want verdict=%s src=%s", got, c.want, c.wantSrc)
 			}
@@ -54,20 +54,25 @@ func TestJudgeRules(t *testing.T) {
 	}
 	// 判定器が無い（Run=nil）構成は停止側。
 	j := &Judge{}
-	if got := j.Judge(context.Background(), "完了しました。", "", false); got.Verdict != VerdictHuman || got.Source != "fallback:no-judge" {
+	if got := j.Judge(context.Background(), "完了しました。", "", false, false); got.Verdict != VerdictHuman || got.Source != "fallback:no-judge" {
 		t.Fatalf("no-judge: %+v", got)
 	}
 }
 
 func TestBuildPromptCarriesContext(t *testing.T) {
-	p := buildPrompt("最終発話", "いけるところまでつづけて", true)
+	p := buildPrompt("最終発話", "いけるところまでつづけて", true, true)
 	for _, want := range []string{"CONTINUE, HUMAN, or DONE", "granted autonomy", "いけるところまでつづけて", "最終発話"} {
 		if !strings.Contains(p, want) {
 			t.Fatalf("prompt に %q が無い:\n%s", want, p)
 		}
 	}
-	if strings.Contains(buildPrompt("x", "", false), "granted autonomy") {
+	if strings.Contains(buildPrompt("x", "", false, false), "granted autonomy") {
 		t.Fatal("裁量なしで granted の文言が出ている")
+	}
+	// 指示そのものが「つづけて」: 裁量は無いが続行側に寄せる文言が入る。
+	p = buildPrompt("x", "改善を続けてください", false, true)
+	if !strings.Contains(p, "keep going") || strings.Contains(p, "granted autonomy") {
+		t.Fatalf("asked=continue の文言:\n%s", p)
 	}
 }
 
@@ -495,5 +500,33 @@ func TestHookLogsUnresolvedPane(t *testing.T) {
 	b, _ := os.ReadFile(st.LogPath())
 	if !strings.Contains(string(b), "codex pane 未解決（cwd:曖昧(2件 a,b)）cwd=/u/hr01") {
 		t.Fatalf("log:\n%s", b)
+	}
+}
+
+// 直近の指示が素の「つづけて」系（裁量語なし）: 上限は 3 のまま、文言はその言い回し、
+// 判定器には asked=continue が渡る。
+func TestHookReusesPlainContinueInstruction(t *testing.T) {
+	var gotPrompt string
+	judge := &Judge{Cmd: []string{"fake"}, Timeout: time.Second, Run: func(_ context.Context, argv []string, _ string) (string, error) {
+		gotPrompt = argv[len(argv)-1]
+		return "CONTINUE", nil
+	}}
+	h, st := newTestHook(t, judge)
+	st.SaveConfig(Config{Enabled: boolp(true)})
+	tp := filepath.Join(t.TempDir(), "c.jsonl")
+	os.WriteFile(tp, []byte(`{"type":"user","message":{"role":"user","content":"改善を続けてください"}}`+"\n"), 0o600)
+	in := Input{SessionID: "s2", TranscriptPath: tp, LastAssistantMessage: strp("方針は A か B です。どちらにしますか？")}
+	res, err := h.Run(context.Background(), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Output == nil || res.Output.Reason != "[semi-auto 1/3] 改善を続けてください" || res.Grant || res.Cap != 3 {
+		t.Fatalf("res=%+v out=%+v", res, res.Output)
+	}
+	if !strings.Contains(gotPrompt, "keep going") {
+		t.Fatalf("判定器に asked=continue が渡っていない:\n%s", gotPrompt)
+	}
+	if !strings.Contains(res.LogLine, "asked=continue") {
+		t.Fatalf("log: %s", res.LogLine)
 	}
 }

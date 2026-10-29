@@ -112,6 +112,7 @@ func (h *Hook) Run(ctx context.Context, in Input) (Result, error) {
 	}
 	lastPrompt, _ := LastHumanPrompt(h.Agent, in.TranscriptPath)
 	grant := eff.Grant || GrantIn(lastPrompt)
+	continueAsked := ContinueLike(lastPrompt)
 	cap := eff.Cap
 	if grant {
 		cap = eff.GrantCap
@@ -122,6 +123,9 @@ func (h *Hook) Run(ctx context.Context, in Input) (Result, error) {
 		msg = *in.LastAssistantMessage
 	}
 	base := fmt.Sprintf("%s pane=%s sid=%s active=%t count=%d/%d grant=%t", h.Agent, h.PaneID, in.SessionID, in.StopHookActive, cnt.Count, cap, grant)
+	if continueAsked {
+		base += " asked=continue"
+	}
 	if h.PaneVia != "" && h.PaneVia != "env" {
 		base += " via=" + h.PaneVia
 	}
@@ -131,7 +135,7 @@ func (h *Hook) Run(ctx context.Context, in Input) (Result, error) {
 		return stop(res, base+" 上限到達→停止（人の確認待ち）")
 	}
 	judge := h.NewJudge(eff.JudgeCmd, h.Store.Dir)
-	jd := judge.Judge(ctx, msg, lastPrompt, grant)
+	jd := judge.Judge(ctx, msg, lastPrompt, grant, continueAsked)
 	res.Judgment, res.Verdict, res.Source = jd, jd.Verdict, jd.Source
 	detail := ""
 	if jd.Detail != "" {
@@ -147,9 +151,9 @@ func (h *Hook) Run(ctx context.Context, in Input) (Result, error) {
 		return stop(res, fmt.Sprintf("%s counter 保存失敗→停止: %v", base, err))
 	}
 	phrase := eff.Phrase
-	if grant && pane.Phrase == "" && ContinueLike(lastPrompt) {
-		// 裁量ありで pane 側に文言の明示指定が無ければ、ユーザの言い回しをそのまま使う
-		//（「いけるところまでつづけて」「最後まで自律的にすすめて」等）。
+	if continueAsked && pane.Phrase == "" {
+		// 直近の指示が続行系なら、pane 側に文言の明示指定が無い限りその言い回しを
+		// そのまま使う（「改善を続けてください」「いけるところまでつづけて」等）。
 		phrase = strings.TrimSpace(lastPrompt)
 	}
 	reason := fmt.Sprintf("%s %d/%d] %s", ReasonPrefix, cnt.Count, cap, phrase)

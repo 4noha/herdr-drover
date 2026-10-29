@@ -128,7 +128,10 @@ func asExit(err error, target **exec.ExitError) bool {
 
 // Judge は「続行してよいか」を判定する。msg はエージェントの最終発話、
 // lastPrompt は直近のユーザ指示（裁量判定・判定器の文脈用。無ければ空）。
-func (j *Judge) Judge(ctx context.Context, msg, lastPrompt string, grant bool) Judgement {
+//
+// continueAsked は「直近の人間の指示そのものが『つづけて』系」だったこと＝選択肢や
+// 計画の提示で迷うケースを続行側へ寄せる（上限は変えない）。
+func (j *Judge) Judge(ctx context.Context, msg, lastPrompt string, grant, continueAsked bool) Judgement {
 	if strings.TrimSpace(msg) == "" {
 		// 発話が無い停止（エラー終了等）は判定材料が無い＝止める。
 		return Judgement{Verdict: VerdictHuman, Source: "rule:empty"}
@@ -150,7 +153,7 @@ func (j *Judge) Judge(ctx context.Context, msg, lastPrompt string, grant bool) J
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	argv := append(append([]string{}, j.Cmd...), buildPrompt(msg, lastPrompt, grant))
+	argv := append(append([]string{}, j.Cmd...), buildPrompt(msg, lastPrompt, grant, continueAsked))
 	out, err := j.Run(ctx, argv, j.Dir)
 	if err != nil {
 		return Judgement{Verdict: VerdictHuman, Source: "fallback:judge-error", Detail: err.Error()}
@@ -168,7 +171,7 @@ func (j *Judge) Judge(ctx context.Context, msg, lastPrompt string, grant bool) J
 }
 
 // buildPrompt は判定器へのプロンプト。出力は 1 語に固定する。
-func buildPrompt(msg, lastPrompt string, grant bool) string {
+func buildPrompt(msg, lastPrompt string, grant, continueAsked bool) string {
 	var b strings.Builder
 	b.WriteString("You are a gate deciding whether a coding agent that just ended its turn should be told to keep working.\n")
 	b.WriteString("Answer with exactly one word: CONTINUE, HUMAN, or DONE.\n\n")
@@ -177,6 +180,8 @@ func buildPrompt(msg, lastPrompt string, grant bool) string {
 	b.WriteString("DONE = the requested task is fully complete and nothing is left to do.\n\n")
 	if grant {
 		b.WriteString("The human explicitly granted autonomy (\"go as far as you can\"). Treat ordinary choices and plan approvals as CONTINUE.\n\n")
+	} else if continueAsked {
+		b.WriteString("The human's latest instruction was itself just \"keep going\" (つづけて). They want the agent to proceed on its own judgement: treat ordinary choices and plan approvals as CONTINUE; answer HUMAN only for the strict HUMAN conditions above.\n\n")
 	}
 	if lp := strings.TrimSpace(lastPrompt); lp != "" {
 		b.WriteString("Latest human instruction:\n<<<\n")

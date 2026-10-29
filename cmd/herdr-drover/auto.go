@@ -314,8 +314,9 @@ func autoJudge(st *autocontinue.Store, args []string, stdin io.Reader, w io.Writ
 	eff := autocontinue.Resolve(cfg, autocontinue.PaneSetting{}, false)
 	g := *grant || autocontinue.GrantIn(*prompt)
 	start := time.Now()
-	jd := autocontinue.NewJudge(eff.JudgeCmd, st.Dir).Judge(context.Background(), string(msg), *prompt, g)
-	fmt.Fprintf(w, "verdict=%s source=%s grant=%t elapsed=%s", jd.Verdict, jd.Source, g, time.Since(start).Round(time.Millisecond))
+	asked := autocontinue.ContinueLike(*prompt)
+	jd := autocontinue.NewJudge(eff.JudgeCmd, st.Dir).Judge(context.Background(), string(msg), *prompt, g, asked)
+	fmt.Fprintf(w, "verdict=%s source=%s grant=%t asked=%t elapsed=%s", jd.Verdict, jd.Source, g, asked, time.Since(start).Round(time.Millisecond))
 	if jd.Detail != "" {
 		fmt.Fprintf(w, " detail=%q", jd.Detail)
 	}
