@@ -32,7 +32,7 @@ type Judgement struct {
 // RulesVersion はルール層の版。ルール（正規表現・順序・最後の一文の扱い）を変えたら
 // 上げ、RULES_CHANGELOG.md に「何の事例を根拠に何を変えたか」を書く。各判定記録
 // （cases.jsonl）とログに刻まれる＝後から「どの版の判定か」を追える。
-const RulesVersion = 10
+const RulesVersion = 11
 
 // JudgeTimeout は判定器 1 回の上限（Claude Code の Stop フック既定 60s の内側）。
 const JudgeTimeout = 40 * time.Second
@@ -79,6 +79,8 @@ var (
 	reReplyEnd = regexp.MustCompile(`(教えて|知らせて|返して|連絡して|報告して|答えて)(ください|下さい|ほしい|もらえ|いただ)|どちら(か|の状態か|ですか)`)
 	// reDeferral: 区切り・先送りの宣言（次の作業をエージェント自身が続けてよい形）。
 	reDeferral = regexp.MustCompile(`(次回|次は|また|後で).{0,30}(再開|続き|続け|から入|から始め)|今日はここまで|ここまでで(十分|区切り)`)
+	// reAwaitResponse: 外部からの応答・返信が来るのを待つ宣言（来たら確認します 等）。
+	reAwaitResponse = regexp.MustCompile(`(応答|返信|返事|返答|レスポンス|反応)(が|を|の)?\s*(来|き|届|返っ|返って|戻っ|あっ|ありまし|得られ)(たら|次第|てから|るまで)|(応答|返信|返事|返答|レスポンス|反応)(を|が)?\s*待(ち|って|つ|ちます)`)
 	// reUnfinished: 未完を明示する語。疑問文で終わらなければ続行。
 	reUnfinished = regexp.MustCompile(`(未完|未対応|未実装|未着手|残り|残る|残課題|次は|次に|続けます|続行します|進めます|引き続き|次のステップ|途中です|まだ.*(ません|ない))`)
 	// reVerdict: 判定器出力から 1 語を拾う。
@@ -279,6 +281,11 @@ func (j *Judge) Judge(ctx context.Context, msg, lastPrompt string, grant, contin
 	// 求める形だけ）。
 	if ll := lastLines(tail(msg, 1200), 12); reAskReply.MatchString(ll) {
 		return Judgement{Verdict: VerdictHuman, Source: "rule:asks-reply", Detail: tail(ll, 80)}
+	}
+	// v11: 最後の一文が外部の応答・返信待ち（「応答が来たら確認してお伝えします」）なら止める。
+	// エージェントに進められる作業が無く、「つづけて」を送っても待機の言い直しを繰り返すだけ。
+	if ls := lastSentence(t); !q && reAwaitResponse.MatchString(ls) {
+		return Judgement{Verdict: VerdictHuman, Source: "rule:awaiting-response", Detail: ls}
 	}
 	// v5: 区切りの宣言（「次回は〜から再開します」「今日はここまで」）で終わる発話は続行。
 	// 末尾の一文だけを見る（本文中の要望は対象外）。人への依頼は上で先に止めている。

@@ -155,5 +155,15 @@
     "message": "NP1 が LE スキャンに全く出てきません（周囲のデバイスは7台見えています）。**NP1 の画面はついていますか？**\n\n- 画面が出ている → BLE スタックが落ちている可能性。**電源を入れ直して**ください\n- 画面が消えている → 電源が入っていません。**電源 ON** をお願いします\n\nどちらの状態か教えてください。",
     "expect": "human",
     "expect_source": "rule:asks-physical"
+  },
+  {
+    "id": "awaiting-external-response",
+    "origin": "opencode 2026-10-29 — ユーザー判断『続けてほしくないパターン』。外部の応答待ちの宣言（応答が来たら確認して伝えます）。一般化した最小文面",
+    "added": "2026-10-29",
+    "rules": 11,
+    "agent": "opencode",
+    "message": "リクエストを送信しました。応答が来たら内容を確認して、手順と合わせてお伝えします。",
+    "expect": "human",
+    "expect_source": "rule:awaiting-response"
   }
 ]
