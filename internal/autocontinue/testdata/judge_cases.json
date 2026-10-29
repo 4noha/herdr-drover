@@ -125,5 +125,15 @@
     "message": "SD が Mac にマウントされていません（カードリーダーも検出されず）。SD を Mac に挿してください。\n（NP1 の電源を切る → SD を抜く → Mac に挿す → 「挿した」）\nもし今すぐ難しければ、その間に別の静的解析を進めます。どうしますか？",
     "expect": "human",
     "expect_source": "rule:asks-physical"
+  },
+  {
+    "id": "np1-wrapup-state-and-resume",
+    "origin": "PioneerNP1 (opencode) 2026-10-29 — 区切りの報告（端末の状態の箇条書き＋「次回はこの実験から再開します」）。ユーザー判断: 『つづけて』で良いパターン。SD を戻す等の注記は状態メモで、エージェントを止める依頼ではない。※同日の別の 2 件は無線認証情報の取得結果を含む内容のため事例化しない",
+    "added": "2026-10-29",
+    "rules": 5,
+    "agent": "opencode",
+    "message": "端末の状態\n\n- POSEIDONDBG OFF は送信済み・応答未確認（次回 0xE000/5 で mode 確認）\n- SD は Mac からイジェクト済み → NP1 に戻してください\n- 次回セッション前に電源再投入を推奨\n\n次回はこの grooming 実験から再開します。",
+    "expect": "continue",
+    "expect_source": "rule:wrapup-deferral"
   }
 ]
