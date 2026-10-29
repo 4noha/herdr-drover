@@ -238,8 +238,8 @@ Stop フック**を使う（herdr の画面監視では「止まった」は分�
 | 有効化 | 既定 OFF。`auto on`（今いる pane）／`--pane ID`／`--all`（全体既定）。pane 設定 > 全体 > 既定 |
 | 判定 | 2 値（続行／停止）。ルール先行: 空発話→停止、疑問文＋人にしかできない語（権限・認証情報・実機・デプロイ・push・課金…）→停止、「未完／次は／残り」＋非疑問→続行。残りは判定器（既定 `claude -p --model haiku --max-turns 1`）に CONTINUE/HUMAN/DONE の 1 語。判定器エラー・不明出力は**停止側** |
 | 判定器 env | `HERDR_*`・`CLAUDECODE*` を**必ず外す**（herdr hook が判定器の session を pane に誤報告する／入れ子ガード／再帰）。`HERDR_DROVER_AUTO_JUDGE=1` を立て、フック側はそれを見て即終了 |
-| 回数 | `stop_hook_active=false`（人間入力起点の最初の停止）で 0 にリセット。上限 裁量なし 3・裁量あり 10（config で変更可）。上限で停止＝通常の通知が飛ぶ |
-| 裁量 | pane 設定 `--grant`、または transcript の直近の人間入力に「いけるところまで／最後まで／完成まで／自律的に／できることを…」。直近の指示が短い続行系（40 字以内・「つづけて／続けてください／すすめて」等）なら、裁量の有無に関係なく**その言い回しをそのまま**文言に使い（例 `[semi-auto 2/10] 最後まで自律的にすすめて`・`[semi-auto 1/3] 改善を続けてください`）、判定器にも「指示自体が続行要求」を渡して選択肢／計画提示を続行側へ寄せる（ログ `asked=continue`。上限は裁量なしなら 3 のまま） |
+| 回数 | `stop_hook_active=false`（人間入力起点の最初の停止）で 0 にリセット。上限 裁量なし 10・裁量あり 20（config で変更可。初版 3/10 は実運用で少なかった）。上限で停止＝通常の通知が飛ぶ |
+| 裁量 | pane 設定 `--grant`、または transcript の直近の人間入力に「いけるところまで／最後まで／完成まで／自律的に／できることを…」。直近の指示が短い続行系（40 字以内・「つづけて／続けてください／すすめて」等）なら、裁量の有無に関係なく**その言い回しをそのまま**文言に使い（例 `[semi-auto 2/10] 最後まで自律的にすすめて`・`[semi-auto 1/3] 改善を続けてください`）、判定器にも「指示自体が続行要求」を渡して選択肢／計画提示を続行側へ寄せる（ログ `asked=continue`。上限は裁量なしなら 10 のまま） |
 | 文言 | 既定「つづけて」。`--phrase` で pane／全体ごとに差し替え |
 | キー一発 | plugin action `auto-toggle`（`herdr-drover auto toggle`＝フォーカス pane の反転＋`notification.show` トースト）。herdr が action に `HERDR_PANE_ID`（フォーカス pane）を注入する（実測: `herdr plugin action invoke auto-toggle --plugin 4noha.drover` の context に `focused_pane_id`）。キー割当は `~/.config/herdr/config.toml` の `[[keys.command]]`（`key="ctrl+alt+a"`・`type="plugin_action"`・`command="4noha.drover.auto-toggle"`）＋`herdr server reload-config`。manifest 変更後は `herdr plugin link <repo>` で plugins.json を更新 |
 | 可視化 | 恒久表示: ON の pane の **Tab ラベルに「⟳ 」接頭辞**（`tab.rename`。OFF で外す）。トースト: `notification.show`。画面: reason の `[semi-auto n/cap]`。ログ: `~/.herdr-drover/autocontinue/autocontinue.log`（1 フック 1 行: pane/sid/active/count/grant/verdict/src/決定）。`auto status` が直近 5 行を表示 |

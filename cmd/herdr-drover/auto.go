@@ -127,7 +127,7 @@ func autoSet(st *autocontinue.Store, on bool, args []string, w io.Writer) error 
 	pane := fs.String("pane", "", "対象 pane id（既定: 環境変数 HERDR_PANE_ID＝今いる pane）")
 	all := fs.Bool("all", false, "全体既定を変える（pane 設定が無い pane に適用）")
 	phrase := fs.String("phrase", "", "続行時に送る文言（既定「つづけて」）")
-	grant := fs.Bool("grant", false, "裁量あり（上限 grant_cap。「いけるところまで」相当）")
+	grant := fs.Bool("grant", false, "裁量あり（上限 grant_cap=20。「いけるところまで」相当）")
 	capN := fs.Int("cap", 0, "裁量なしの上限回数（--all 時）")
 	gcap := fs.Int("grant-cap", 0, "裁量ありの上限回数（--all 時）")
 	if err := fs.Parse(args); err != nil {

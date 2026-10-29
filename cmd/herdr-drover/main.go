@@ -260,7 +260,7 @@ func usage(w io.Writer) {
                           セミオート続行: エージェントがターンを終えた時に Stop フック
                           （Claude Code / Codex 公式）で「人にしか答えられない状態か」を
                           判定し、違えば「つづけて」を自動入力。既定 OFF・pane 単位で
-                          「auto on」（--all で全体・--grant で上限 10 回・--phrase で文言）。
+                          「auto on」（--all で全体・--grant で上限 20 回・--phrase で文言）。
                           「auto toggle」は今いる／フォーカス pane の反転＋herdr トースト
                           （plugin action auto-toggle に [[keys.command]] でキー割当）。
                           「auto install」 が ~/.claude/settings.json と ~/.codex/hooks.json に

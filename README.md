@@ -397,7 +397,7 @@ Web からはセッション行とターミナル画面の「⟳」ボタン（1
 ```sh
 herdr-drover auto install            # ~/.claude/settings.json と ~/.codex/hooks.json に追記
 herdr-drover auto on                 # 今いる pane で有効化（--pane ID / --all で全体）
-herdr-drover auto on --grant         # 裁量あり＝上限 10 回（「いけるところまで」相当）
+herdr-drover auto on --grant         # 裁量あり＝上限 20 回（「いけるところまで」相当）
 herdr-drover auto on --phrase "改善を続けてください"
 herdr-drover auto toggle             # フォーカス pane を反転（herdr トースト付き。Ctrl+Alt+A 用）
 herdr-drover auto status             # 設定・フック設置状況・直近の判定ログ
@@ -405,8 +405,8 @@ herdr-drover auto judge < msg.txt    # 判定器の動作確認
 herdr-drover auto off / uninstall
 ```
 
-- ON の pane は Tab ラベルの先頭に「⟳ 」が付く（OFF で消える）。続行は画面に `[semi-auto n/cap] つづけて` と出る。1 回のユーザ入力につき 3 回
-  （裁量あり 10 回）で必ず止まり、そこからは通常どおり通知が飛ぶ。
+- ON の pane は Tab ラベルの先頭に「⟳ 」が付く（OFF で消える）。続行は画面に `[semi-auto n/cap] つづけて` と出る。1 回のユーザ入力につき 10 回
+  （裁量あり 20 回）で必ず止まり、そこからは通常どおり通知が飛ぶ。
 - 自動続行した停止は push／webhook 通知を出さない（本当に止まった時だけ通知）。
 - 判定は `~/.herdr-drover/autocontinue/autocontinue.log` に 1 行ずつ残る。
 - キー一発: `~/.config/herdr/config.toml` に次を足して `herdr server reload-config`

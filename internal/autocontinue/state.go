@@ -22,7 +22,7 @@
 //   - silent にしない: 判定・送った文言は毎回 autocontinue.log と画面（reason の
 //     `[semi-auto n/cap]` 接頭辞）に出す。
 //   - 既定 OFF。pane 単位（`HERDR_PANE_ID`）か全体で明示的に on にする。
-//   - 上限（裁量なし 3 回・裁量あり 10 回）で必ず止まる。判定器が落ちたら**停止側**。
+//   - 上限（裁量なし 10 回・裁量あり 20 回）で必ず止まる。判定器が落ちたら**停止側**。
 //   - 自動続行した停止は push/webhook 通知の対象にしない（suppress マーク。
 //     notify.go / webhooknotify.go が参照）。本当に止まった時は通常どおり通知。
 package autocontinue
@@ -43,9 +43,11 @@ const DirEnv = "HERDR_DROVER_AUTO_DIR"
 
 // 既定値。
 const (
-	DefaultPhrase   = "つづけて"
-	DefaultCap      = 3
-	DefaultGrantCap = 10
+	DefaultPhrase = "つづけて"
+	// DefaultCap は 1 ユーザ入力あたりの自動続行の既定上限。初版 3 は実運用で少なかった
+	//（ユーザー要望 2026-10-29）ため 10。裁量あり（「いけるところまで」）は 20。
+	DefaultCap      = 10
+	DefaultGrantCap = 20
 	// MarkTTL は suppress マークの有効期間。フック（判定器込み）が終わるまでの
 	// 上限より長く、エージェントが kill された等で永久に抑止しない程度に短く。
 	MarkTTL = 120 * time.Second

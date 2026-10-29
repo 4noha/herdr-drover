@@ -245,7 +245,7 @@ func TestHookUsesLastUserMessageWithoutTranscript(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Output == nil || res.Output.Reason != "[semi-auto 1/10] 最後まで自律的にすすめて" || !res.Grant {
+	if res.Output == nil || res.Output.Reason != "[semi-auto 1/20] 最後まで自律的にすすめて" || !res.Grant {
 		t.Fatalf("res=%+v out=%+v", res, res.Output)
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -259,14 +260,14 @@ func TestHookFlowCountsCapsAndMarks(t *testing.T) {
 	}
 	in := Input{SessionID: "s1", HookEventName: "Stop", LastAssistantMessage: strp("途中経過です。")}
 	ctx := context.Background()
-	// 1〜3 回目: 続行（reason に n/cap と文言・mark=continue・counter 増加）。
-	for i := 1; i <= 3; i++ {
+	// 1〜10 回目: 続行（reason に n/cap と文言・mark=continue・counter 増加）。
+	for i := 1; i <= 10; i++ {
 		in.StopHookActive = i > 1
 		res, err := h.Run(ctx, in)
 		if err != nil {
 			t.Fatal(err)
 		}
-		want := "[semi-auto " + string(rune('0'+i)) + "/3] つづけて"
+		want := fmt.Sprintf("[semi-auto %d/10] つづけて", i)
 		if res.Output == nil || res.Output.Decision != "block" || res.Output.Reason != want {
 			t.Fatalf("%d 回目: output=%+v want reason %q", i, res.Output, want)
 		}
@@ -277,7 +278,7 @@ func TestHookFlowCountsCapsAndMarks(t *testing.T) {
 			t.Fatalf("%d 回目: counter=%d", i, c.Count)
 		}
 	}
-	// 4 回目: 上限＝停止・マーク消滅（通知は通常どおり飛ぶ）。
+	// 11 回目: 上限＝停止・マーク消滅（通知は通常どおり飛ぶ）。
 	in.StopHookActive = true
 	res, err := h.Run(ctx, in)
 	if err != nil || res.Output != nil || res.Skipped != "cap" {
@@ -289,7 +290,7 @@ func TestHookFlowCountsCapsAndMarks(t *testing.T) {
 	// 人間の新しい入力（active=false）で回数リセット。
 	in.StopHookActive = false
 	res, _ = h.Run(ctx, in)
-	if res.Output == nil || res.Output.Reason != "[semi-auto 1/3] つづけて" {
+	if res.Output == nil || res.Output.Reason != "[semi-auto 1/10] つづけて" {
 		t.Fatalf("リセット後: %+v", res.Output)
 	}
 	// 判定 HUMAN → 出力なし・マーク消滅・counter 据え置き。
@@ -307,8 +308,8 @@ func TestHookFlowCountsCapsAndMarks(t *testing.T) {
 	}
 	// ログは 1 実行 1 行（6 行）。
 	b, _ := os.ReadFile(st.LogPath())
-	if n := strings.Count(string(b), "\n"); n != 6 {
-		t.Fatalf("log 行数=%d want 6:\n%s", n, b)
+	if n := strings.Count(string(b), "\n"); n != 13 {
+		t.Fatalf("log 行数=%d want 13:\n%s", n, b)
 	}
 	if !strings.Contains(string(b), "verdict=human src=llm→停止") || !strings.Contains(string(b), "上限到達→停止") {
 		t.Fatalf("log 内容:\n%s", b)
@@ -328,7 +329,7 @@ func TestHookSkipsWhenDisabledOrNoPane(t *testing.T) {
 	// pane 単位 on（全体 off のまま）→ 続行。
 	st.SavePane("w1:p4F", PaneSetting{Enabled: boolp(true), Phrase: "改善を続けてください"})
 	res, _ = h.Run(context.Background(), in)
-	if res.Output == nil || res.Output.Reason != "[semi-auto 1/3] 改善を続けてください" {
+	if res.Output == nil || res.Output.Reason != "[semi-auto 1/10] 改善を続けてください" {
 		t.Fatalf("pane on: %+v", res.Output)
 	}
 	// pane 単位 off（全体 on）→ skip。
@@ -358,20 +359,20 @@ func TestHookGrantFromTranscript(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 裁量あり＝上限 10・文言はユーザの言い回しをそのまま。
-	if res.Output == nil || res.Output.Reason != "[semi-auto 1/10] 最後まで自律的にすすめて" || !res.Grant || res.Cap != 10 {
+	if res.Output == nil || res.Output.Reason != "[semi-auto 1/20] 最後まで自律的にすすめて" || !res.Grant || res.Cap != 20 {
 		t.Fatalf("grant: %+v out=%+v", res, res.Output)
 	}
 	// pane 設定があっても phrase 未指定なら、ユーザの言い回しを使う。
 	st.SavePane("w1:p4F", PaneSetting{Enabled: boolp(true)})
 	in.StopHookActive = true
 	res, _ = h.Run(context.Background(), in)
-	if res.Output == nil || res.Output.Reason != "[semi-auto 2/10] 最後まで自律的にすすめて" {
+	if res.Output == nil || res.Output.Reason != "[semi-auto 2/20] 最後まで自律的にすすめて" {
 		t.Fatalf("pane without phrase: %+v", res.Output)
 	}
 	// pane 側に文言の明示指定があればそちらが優先。
 	st.SavePane("w1:p4F", PaneSetting{Phrase: "つづけて"})
 	res, _ = h.Run(context.Background(), in)
-	if res.Output == nil || res.Output.Reason != "[semi-auto 3/10] つづけて" {
+	if res.Output == nil || res.Output.Reason != "[semi-auto 3/20] つづけて" {
 		t.Fatalf("pane phrase: %+v", res.Output)
 	}
 }
@@ -418,7 +419,7 @@ func TestRunStopHookIO(t *testing.T) {
 		t.Fatalf("exit=%d", code)
 	}
 	var o Output
-	if err := json.Unmarshal([]byte(out.String()), &o); err != nil || o.Decision != "block" || o.Reason != "[semi-auto 1/3] つづけて" {
+	if err := json.Unmarshal([]byte(out.String()), &o); err != nil || o.Decision != "block" || o.Reason != "[semi-auto 1/10] つづけて" {
 		t.Fatalf("stdout=%q err=%v", out.String(), err)
 	}
 	// 判定器サブプロセス内（再帰ガード）は即 0・無出力。
@@ -520,7 +521,7 @@ func TestHookReusesPlainContinueInstruction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Output == nil || res.Output.Reason != "[semi-auto 1/3] 改善を続けてください" || res.Grant || res.Cap != 3 {
+	if res.Output == nil || res.Output.Reason != "[semi-auto 1/10] 改善を続けてください" || res.Grant || res.Cap != 3 {
 		t.Fatalf("res=%+v out=%+v", res, res.Output)
 	}
 	if !strings.Contains(gotPrompt, "keep going") {
