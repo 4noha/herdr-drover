@@ -6,6 +6,7 @@ package main
 // platform_windows.go のスタブ）のため、本テストも unix 限定。
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -954,4 +955,33 @@ func TestWatchLifecycleRecoversFromBackwardClockJump(t *testing.T) {
 
 	cancel()
 	<-done
+}
+
+// 接続直後の握手: プロセスで最初の接続は「履歴のみ HELLO → RESIZE」の順、履歴を受け終えた
+// （histDone）後の再接続は RESIZE のみ（再接続のたびに履歴を要求すると同じ履歴が
+// scrollback に何度も積まれる）。
+func TestAttachHandshakeHistoryOncePerProcess(t *testing.T) {
+	h := &connHolder{}
+	var first bytes.Buffer
+	if !attachHandshake(&first, h, 50, 160) {
+		t.Fatal("最初の接続で履歴を要求していない")
+	}
+	wantHello := []byte{0xff, 0xfe, 0x7f, 0xfd}
+	wantResize := []byte{0xff, 0xff, 0x00, 0x32, 0x00, 0xa0}
+	if !bytes.Equal(first.Bytes(), append(append([]byte{}, wantHello...), wantResize...)) {
+		t.Fatalf("握手の順序/中身: % x", first.Bytes())
+	}
+	// 履歴を受け終えるまでは、再接続でも要求し直す（最初の接続が履歴前に切れた場合）。
+	var again bytes.Buffer
+	if !attachHandshake(&again, h, 50, 160) || !bytes.HasPrefix(again.Bytes(), wantHello) {
+		t.Fatalf("histDone 前の再接続は要求し直すはず: % x", again.Bytes())
+	}
+	h.histDone.Store(true)
+	var re bytes.Buffer
+	if attachHandshake(&re, h, 50, 160) {
+		t.Fatal("histDone 後の再接続で履歴を要求している（重複して積まれる）")
+	}
+	if !bytes.Equal(re.Bytes(), wantResize) {
+		t.Fatalf("再接続は RESIZE のみのはず: % x", re.Bytes())
+	}
 }

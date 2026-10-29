@@ -669,12 +669,14 @@ relay は byte 透過のまま。cm ワイヤ（`internal/bridge/cmwire.go`）�
 | producer→viewer | `ESC ] 7707 ; v=2;cols=C;rows=R;trunc=T;hist=H;hlines=L;scrolled=N ESC \` | **META**。observe を**元 pane の実サイズ**（桁=`pane.layout rect.width`・行=`pane.get viewport_rows`）で起動したことの宣言。viewer 要求サイズは無視（ログに残す）。取得失敗は viewer 要求へフォールバック。`hist`=この接続で履歴を**取得できたか**（予算内）、`hlines`=実際に送る履歴の行数（0=scrollback が空。Claude Code 系 pane は常に 0 になり得る）、`scrolled`=元 pane のローカル表示が最下部から遡っている行数（observe はその表示位置を描く） |
 | producer→viewer | 履歴本文（`pane.read source=recent format=text lines=1000` の末尾 R 行＝可視画面を落とし LF→CRLF、非空なら R 行の CRLF パディング） | `ESC[2J` は画面上の行を**消す**のであって押し上げない＝先に全行を scrollback へ押し込むためのパディング（欠くと最後の 1 画面分が黙って消える） |
 | producer→viewer | `ESC ] 7707 ; hist_end ESC \` | 履歴の終端。以後は従来どおり observe のフレーム |
+| viewer→producer | `SCROLL` の `dy=0x7ffd`（`bridge.HelloHistDy`） | **履歴のみ HELLO**（↗窓 attach 用）。observe は viewer の `RESIZE` サイズのまま（v1 と同じ描画）、ストリーム先頭に**素のテキストの履歴だけ**を流す（OSC の META／hist_end なし＝端末にそのまま書ける）。落とす行数＝元 pane の可視行数（`pane.get viewport_rows`）、詰める CRLF＝viewer（attach pane）の行数（`HistoryPayloadPad`）。履歴が予算内に取れない／可視画面ぶん以下なら何も流さない。**RESIZE より前**に送る（producer は RESIZE で observe を起動する）。v1 producer は SCROLL として無視 |
 
 - META＋履歴は **Bridge（＝1 接続）につき 1 回**（`histSent`）。observe の respawn では再送しない。
 - **履歴読取の予算とキャッシュ**（本番実測 2026-10-29: 長寿命 pane では `pane.read` が **4〜16 秒**かかる。返る行数と無関係＝herdr 側）: 読取は `HistoryBudget`（既定 1.5s）だけ待ち、間に合わなければ `hist=0` で先に描画する。読取は daemon 共有の `HistoryCache`（pane ごと同時 1 本・TTL 60s）で継続し、次の接続（quiescence 再接続・リロード）で `hist=1` として送る。
 - Web（`term.js` `cmMakeMetaFilter`）は OSC を xterm に流す前に剥がし、`v=2` で `term.options.scrollback=5000`＋`term.resize(C,R)`＋fontSize を画面高に合わせる（**クライアント内で完結。RESIZE は再送しない**＝不変条件維持）。本文つき履歴（`hist=1`）はページにつき 1 回だけ scrollback に入れ、以降の接続で届いた分は捨てる。`hist=0` の接続は「未受領」のまま＝次の `hist=1` を受け入れ、既に画面を描いていれば `term.reset()` してから履歴→full frame の順で描き直す。`scrolled>0` はステータス欄に案内（⤓ で最新へ）。
 - META が来ない（旧 producer）なら従来の固定 160×500 グリッドのまま。
-- 未対応: ↗窓 attach（viewer が本物の pane＝サイズを元 pane に合わせる手段が要る）。
+- **↗窓 attach（2026-10-29 対応）**: attach は pane サイズを元 pane に合わせられない（viewer が本物の pane）ので v2 の「元 pane 実サイズ」モードは使わず、**履歴のみ HELLO**（上表）で、herdr のスクロールでリモートの過去ログを遡れるようにした。履歴は attach pane の scrollback に積まれる＝再接続のたびに要求すると重複するため、**プロセスにつき最初の接続の 1 回だけ**要求（`connHolder.histDone`。フレームを 1 バイトでも受けた接続で立てる）。履歴が予算（1.5s）内に取れなかった接続でも histDone は立つ＝その場合その attach では遡れない（本番で `pane.read` が 4〜16s かかる pane がある。次に attach pane を開き直した時に取れる）。
+- 実測ゲート（attach）: `internal/bridge/bridge_attachhist_test.go`（隔離 herdr に実 pane 2 つ: source に scrollback を作り、FIFO を cat する viewer pane に bridge の出力を流して、viewer の herdr scrollback に過去行が重複・逆順なく入ること／HELLO なしの対照では入らないこと／OSC が流れないこと）、`cmd/herdr-drover/attach_test.go TestAttachHandshakeHistoryOncePerProcess`。
 - 実測ゲート: `internal/bridge/bridge_v2_test.go`（実 herdr: argv＝layout 桁×pty 行・ストリーム順序・respawn 非再送・旧 viewer 無影響）、drover-cloud `web/termjs_gate_test.go TestTermJSMetaFilter`（node）。
 
 ## 6. 設定

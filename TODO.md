@@ -87,9 +87,9 @@ v0.5.30 で**判定を経過時間ベースへ**変更し、**実 websocket 越�
   `bridge_v2_test.go`（サイズ・順序・予算フォールバック→キャッシュ・最新へ・旧 viewer）。
 - Web（drover-cloud）: `term.js` `cmMakeMetaFilter`/`cmParseMeta`（node ゲート
   `TestTermJSMetaFilter`）・HELLO 送出・v2 で scrollback 5000＋`resize`＋fontSize 合わせ。
-- **残課題**: (1) ↗窓 attach は v2 未対応（viewer が本物の pane＝元 pane サイズに合わせる
-  手段が要る。履歴は attach pane の scrollback に書けば herdr のスクロールで遡れる＝
-  スパイク済）。(2) fleet 配信は release（tag）が要る＝ユーザー確認後。(3) 履歴は
+- ↗窓 attach: **履歴のみ HELLO**（dy=0x7ffd）で対応済（SPEC §5.2。実 herdr 2 pane の統合テスト）。
+  実機の他 PC 間での確認は配信後。
+- **残課題**: (1) ↗窓 attach の履歴は、取得予算超過の接続では入らない（本番で pane.read が 4〜16s の pane）。(2) fleet 配信は release（tag）が要る＝ユーザー確認後。(3) 履歴は
   text（モノクロ）・最大 1000 行・Claude Code 系 pane はほぼ空＝「会話全文」は
   エージェント自身の transcript から引く別機能。(4) 実ブラウザでの最終確認は Cloud Run
   デプロイ後（headless Chrome では xterm の runtime 切替と履歴重ね書きのみ検証済）。

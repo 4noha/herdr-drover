@@ -52,6 +52,10 @@ const (
 	// EvScrollBottom は元 pane の実スクロールを最下部へ戻す要求（SCROLL の
 	// dy=ScrollBottomDy を流用。v1 producer は無視）。
 	EvScrollBottom
+	// EvHelloHist は「履歴のみ」の v2 HELLO（SCROLL の dy=HelloHistDy）。↗窓 attach
+	// 用: observe は viewer の RESIZE サイズのまま（v1 と同じ描画）、ストリーム先頭に
+	// **素のテキストの履歴**だけを流す（OSC の META は付けない＝端末にそのまま書ける）。
+	EvHelloHist
 )
 
 // HelloV2Dy は SCROLL フレームの dy をワイヤ v2 HELLO として予約する値。
@@ -64,6 +68,11 @@ const HelloV2Dy = 0x7fff
 // Web 側は明示ボタン［最新へ］からだけ送る（ホイール連動はしない）。
 // v1 producer は SCROLL として無視する。
 const ScrollBottomDy = 0x7ffe
+
+// HelloHistDy は ↗窓 attach 用の「履歴のみ」HELLO（EvHelloHist）。observe サイズは
+// viewer の RESIZE のまま、先頭に履歴を素のテキストで流す。v1 producer は SCROLL を
+// 無視するので旧 PC に送っても無害（履歴が来ないだけ）。
+const HelloHistDy = 0x7ffd
 
 // maxImageBytes は IMAGE payload の上限（8MiB）。cm と同じく DoS／メモリ
 // 膨張防止で、これを超える長さ宣言は「不正長」としてヘッダごと捨てて
@@ -137,6 +146,8 @@ func (p *CMWireParser) Feed(data []byte) []Event {
 				kind = EvHello
 			case ScrollBottomDy:
 				kind = EvScrollBottom
+			case HelloHistDy:
+				kind = EvHelloHist
 			}
 			evs = append(evs, Event{Kind: kind, Dy: dy})
 			p.in = p.in[4:]

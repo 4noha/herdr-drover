@@ -31,11 +31,13 @@ import (
 	"os"
 	"os/signal"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/4noha/drover-cloud/relayclient"
 	"github.com/4noha/drover-cloud/state"
+	"github.com/4noha/herdr-drover/internal/bridge"
 	"github.com/4noha/herdr-drover/internal/herdrapi"
 )
 
@@ -235,6 +237,11 @@ type connHolder struct {
 	// pending は未接続中に打たれた入力。接続確立時に TTL 内なら流す。
 	pending      []byte
 	pendingSince time.Time
+	// histDone は「リモートの履歴をこの pane の scrollback へ入れ終えた」印。↗窓は
+	// 常駐 pane で quiescence 再接続が頻繁に起きるため、履歴は**プロセスにつき最初の
+	// 接続の 1 回だけ**要求する（再接続のたびに要求すると同じ履歴が scrollback に
+	// 何度も積まれる）。フレームを 1 バイトでも受けた接続で立てる。
+	histDone atomic.Bool
 }
 
 // set は現接続を差し替える。接続確立時（c != nil）に、未接続中へ溜めた入力が
@@ -617,7 +624,12 @@ func attachOnce(ctx context.Context, st *state.Client, relayURL, injSid, remoteP
 	// 初回 RESIZE（cm-wire magic）で observe サイズを pane 実寸へ。以後 SIGWINCH
 	// で再送。RESIZE を送らないと bridge は初回 full frame を出さない（実測仕様）。
 	rows, cols := termSize(int(out.Fd()))
-	_, _ = conn.Write(resizeMagic(rows, cols))
+	// 履歴のみ HELLO（プロセスにつき最初の接続だけ）。producer は observe を RESIZE の
+	// サイズのまま、先頭にリモートの scrollback を素のテキストで流す＝この pane
+	// （herdr）のスクロールでリモートの過去ログを遡れる。旧 PC は SCROLL として
+	// 無視する（履歴が来ないだけ）。RESIZE より前に送ること（producer は RESIZE で
+	// observe を起動するため、HELLO が後だと履歴フラグが間に合わない）。
+	askHist := attachHandshake(conn, holder, rows, cols)
 
 	winch := make(chan os.Signal, 1)
 	signal.Notify(winch, syscall.SIGWINCH)
@@ -645,6 +657,9 @@ func attachOnce(ctx context.Context, st *state.Client, relayURL, injSid, remoteP
 
 	pumpStart := time.Now()
 	idleClosed, got, why := pumpFrames(conn, out, DefaultIdle)
+	if askHist && got > 0 {
+		holder.histDone.Store(true)
+	}
 	// ⚠張り付き調査の核心行。received=0 が続くなら「dial は通るが source が bridge を
 	// 張っていない」（＝Wake/grant 側の問題）、received>0 なら「流れていた接続が落ちた」
 	// で原因が別れる。**1 サイクル 1 行**に畳んで書く（量の見積もりを外して
@@ -734,6 +749,25 @@ func isQuiescentClose(idle, sinceLastByte time.Duration) bool {
 	}
 	const slack = time.Second
 	return sinceLastByte+slack >= idle
+}
+
+// attachHandshake は接続直後に送るバイト列を書く: 履歴のみ HELLO（プロセスで最初の
+// 接続だけ）→ RESIZE。戻り値は HELLO を送ったか（呼び手が、フレームを受けた時に
+// holder.histDone を立てる判断に使う）。順序が要: producer は RESIZE で observe を起動
+// する＝HELLO が後だと履歴フラグが間に合わない。
+func attachHandshake(w io.Writer, holder *connHolder, rows, cols int) (askedHist bool) {
+	if !holder.histDone.Load() {
+		_, _ = w.Write(helloHistMagic())
+		askedHist = true
+	}
+	_, _ = w.Write(resizeMagic(rows, cols))
+	return askedHist
+}
+
+// helloHistMagic は「履歴のみ」HELLO（SCROLL フレーム 0xff 0xfe + dy=bridge.HelloHistDy）。
+// producer 側の定義は internal/bridge/cmwire.go。
+func helloHistMagic() []byte {
+	return []byte{0xff, 0xfe, byte(bridge.HelloHistDy >> 8), byte(bridge.HelloHistDy & 0xff)}
 }
 
 // resizeMagic は cm-wire の RESIZE（0xff 0xff + rows u16BE + cols u16BE）。

@@ -160,6 +160,9 @@ type Bridge struct {
 	// histSent は META＋履歴を conn へ流したか（Bridge＝1 接続につき 1 回。
 	// observe の respawn では再送しない＝viewer の scrollback に重複しない）。
 	histSent atomic.Bool
+	// histOnly は ↗窓 attach の「履歴のみ」HELLO（EvHelloHist）。observe は viewer の
+	// RESIZE サイズのまま、先頭に素のテキストの履歴だけを流す（META/OSC なし）。
+	histOnly atomic.Bool
 
 	// cur は現行 observe サブプロセス（テストの respawn／リーク検査用に
 	// mu 越しで観測する）。
@@ -491,6 +494,42 @@ func (b *Bridge) historyPrefix(size winSize) []byte {
 	return append(out, MetaHistEnd()...)
 }
 
+// historyPlain は ↗窓 attach 向けの素の履歴（META/OSC なし）。落とす行数は**元 pane の
+// 可視行数**（pane.get viewport_rows。取れなければ viewer の行数）、詰める CRLF は
+// **viewer（attach pane）の行数**。予算内に取れなければ何も送らない（次の接続で送る
+// 設計は無い: attach は再接続のたびに履歴を重ねないよう、最初の 1 回だけ要求する）。
+func (b *Bridge) historyPlain(viewer winSize) []byte {
+	cache := b.HistoryCache
+	if cache == nil {
+		cache = NewHistoryCache()
+	}
+	budget := b.HistoryBudget
+	if budget <= 0 {
+		budget = DefaultHistoryBudget
+	}
+	read := b.readHistory
+	if read == nil {
+		read = func() (*herdrapi.PaneReadInfo, error) {
+			return b.Herdr.PaneReadLines(b.Sid, "recent", HistoryLines)
+		}
+	}
+	drop := viewer.rows
+	if pi, err := b.Herdr.PaneGet(b.Sid); err == nil && pi.Scroll.ViewportRows > 0 {
+		drop = pi.Scroll.ViewportRows
+	} else if err != nil {
+		b.logf("attach 履歴: pane.get 失敗（落とす行数は viewer の %d を使う）: %v", drop, err)
+	}
+	e, ok := cache.fetch(b.Sid, budget, read, b.logf)
+	if !ok {
+		b.logf("attach 履歴: %s 内に取れず＝履歴なしで描画（読取は継続）", budget)
+		return nil
+	}
+	hist := HistoryPayloadPad(e.text, drop, viewer.rows)
+	b.logf("attach 履歴: %d バイト（pane.read %d 行・truncated=%v・元 pane の可視 %d 行は除外・viewer 行 %d で詰め）",
+		len(hist), strings.Count(e.text, "\n"), e.truncated, drop, viewer.rows)
+	return hist
+}
+
 func nextBackoff(d time.Duration) time.Duration {
 	d *= 2
 	if d > backoffMax {
@@ -586,6 +625,9 @@ func (b *Bridge) readConn(resizeCh chan winSize, connDone chan<- error) {
 				case EvHello:
 					b.v2.Store(true)
 					b.logf("viewer: ワイヤ v2 HELLO（observe は元 pane 実サイズ・先頭に履歴）")
+				case EvHelloHist:
+					b.histOnly.Store(true)
+					b.logf("viewer: 履歴のみ HELLO（observe は viewer の RESIZE サイズ・先頭に素の履歴）")
 				case EvScrollBottom:
 					// ［最新へ］: 元 pane の実スクロールを最下部へ（共有状態＝
 					// ローカル表示も戻る。viewer の明示操作からのみ届く）。
@@ -750,16 +792,24 @@ func (b *Bridge) spawnObserve(size winSize) (*observeProc, error) {
 		// v2: 最初の observe 世代だけ、フレームより前に META＋履歴を流す
 		// （同じ goroutine で書く＝順序保証・write deadline も同じ規律）。
 		// respawn 世代では histSent 済みなので送らない。
-		if b.v2.Load() && b.histSent.CompareAndSwap(false, true) {
-			prefix := b.historyPrefix(size)
-			if wd != nil {
-				_ = wd.SetWriteDeadline(time.Now().Add(writeTimeout))
+		if (b.v2.Load() || b.histOnly.Load()) && b.histSent.CompareAndSwap(false, true) {
+			var prefix []byte
+			if b.v2.Load() {
+				prefix = b.historyPrefix(size)
+			} else {
+				prefix = b.historyPlain(size)
 			}
-			if _, werr := b.Conn.Write(prefix); werr != nil {
-				p.connErr = fmt.Errorf("conn 書込失敗(META/履歴): %w", werr)
-				return
+			// 履歴なし（取れなかった／可視画面ぶん以下）は何も書かない。
+			if len(prefix) > 0 {
+				if wd != nil {
+					_ = wd.SetWriteDeadline(time.Now().Add(writeTimeout))
+				}
+				if _, werr := b.Conn.Write(prefix); werr != nil {
+					p.connErr = fmt.Errorf("conn 書込失敗(META/履歴): %w", werr)
+					return
+				}
+				b.bump()
 			}
-			b.bump()
 		}
 		// フレームは 160×500 級で base64 2.1MB に達する（実測）ため、
 		// bufio.Scanner（既定 64KB 上限）ではなく ReadBytes を使う。

@@ -80,9 +80,18 @@ func MetaHistEnd() []byte {
 //
 // 履歴が可視画面ぶん以下しか無ければ nil（何も書かない）。
 func HistoryPayload(text string, rows int) []byte {
-	if rows <= 0 || text == "" {
+	return HistoryPayloadPad(text, rows, rows)
+}
+
+// HistoryPayloadPad は HistoryPayload の drop（落とす可視行数＝元 pane の行数）と
+// pad（詰める CRLF 数＝**書き込み先の端末の行数**）を分けたもの。↗窓 attach では
+// 元 pane の行数と attach pane の行数が違う: 落とすのは元の可視画面ぶん、詰めるのは
+// attach 側の画面ぶん（足りないと `ESC[2J` で履歴の末尾が消える）。
+func HistoryPayloadPad(text string, drop, pad int) []byte {
+	if drop <= 0 || pad <= 0 || text == "" {
 		return nil
 	}
+	rows := drop
 	lines := strings.Split(text, "\n")
 	if n := len(lines); n > 0 && lines[n-1] == "" {
 		lines = lines[:n-1] // 末尾改行ぶんの空要素
@@ -96,7 +105,7 @@ func HistoryPayload(text string, rows int) []byte {
 		sb.WriteString(strings.TrimRight(l, " \r"))
 		sb.WriteString("\r\n")
 	}
-	for i := 0; i < rows; i++ {
+	for i := 0; i < pad; i++ {
 		sb.WriteString("\r\n")
 	}
 	return []byte(sb.String())
