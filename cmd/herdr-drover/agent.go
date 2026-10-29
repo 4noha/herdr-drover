@@ -433,10 +433,15 @@ func runOneCloud(ctx context.Context, cfg Config, cl Cloud, primary bool, hcli *
 		} else {
 			lg.Printf("[autocontinue] 状態ディレクトリ解決失敗（通知抑止なし）: %v", err)
 		}
+		ar := newAPIRetrier(hcli, lg)
 		prod = prod.WithOnSessions(func(sessions []map[string]any) {
 			tn.check(ctx, scConcrete, sessions)
 			if wn != nil {
 				wn.check(ctx, scConcrete, sessions)
+			}
+			// API エラーで落ちた停止の自動再開（セミオート ON の pane のみ。apiretry.go）。
+			if primary {
+				ar.check(ctx, sessions)
 			}
 		})
 	}

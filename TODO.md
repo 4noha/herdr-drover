@@ -89,6 +89,10 @@ v0.5.30 で**判定を経過時間ベースへ**変更し、**実 websocket 越�
   `TestTermJSMetaFilter`）・HELLO 送出・v2 で scrollback 5000＋`resize`＋fontSize 合わせ。
 - ↗窓 attach: **履歴のみ HELLO**（dy=0x7ffd）で対応済（SPEC §5.2。実 herdr 2 pane の統合テスト）。
   実機の他 PC 間での確認は配信後。
+- API エラーで落ちた停止の自動再開（2026-10-29 ユーザー指摘「すぐ『つづけて』で続くパターン」）:
+  daemon 側 `apiretry.go`（SPEC §2.6）。**実機で本物の API エラー画面での確認は未**（文言は
+  ユーザーの貼り付けと Claude Code/Codex の既知文言からの照合）。外れる文言が出たら
+  `reAPIError` に足す（テスト `TestAPIErrorLine` に追記）。
 - **残課題**: (1) ↗窓 attach の履歴は、取得予算超過の接続では入らない（本番で pane.read が 4〜16s の pane）。(2) fleet 配信は release（tag）が要る＝ユーザー確認後。(3) 履歴は
   text（モノクロ）・最大 1000 行・Claude Code 系 pane はほぼ空＝「会話全文」は
   エージェント自身の transcript から引く別機能。(4) 実ブラウザでの最終確認は Cloud Run
