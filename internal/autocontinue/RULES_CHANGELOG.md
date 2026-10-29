@@ -13,8 +13,13 @@
 - 根拠: コーパスの live 評価（`HERDR_DROVER_LIVE_JUDGE=1`）で `completion-report`（完了報告）が
   午前は DONE、午後は CONTINUE に揺れた。`token-term-normal-question` は HUMAN と判定され、
   「どの環境で検証するか」は人にしか決められない要件なので期待側を human に改めた。
-- 変更: 判定器プロンプトの DONE を「完了報告で、残課題・問い・失敗の記載が無ければ DONE。
-  仕事を作らない」と明記し、コーパス由来の few-shot（DONE/CONTINUE/HUMAN 各 2 例）を追加。
+- 変更: 判定器を `claude -p` の**既定システムプロンプト（コーディングエージェント役）から
+  分類器役の `--system-prompt` に差し替え**（既定役のままだと完了報告を few-shot で DONE と
+  示しても 3 回とも CONTINUE＝「作業を続ける」側に寄る。差し替え後は 3 回とも DONE）。
+  `--no-session-persistence` で判定ごとの transcript を残さない。判定器の出力は**最後の**
+  一致語を採る（説明付き回答の先頭一致で誤読しない）。
+  併せて DONE を「完了報告で、残課題・問い・失敗の記載が無ければ DONE。仕事を作らない」と
+  明記し、コーパス由来の few-shot（DONE/CONTINUE/HUMAN 各 2 例）を追加。
   `opencode-pytest-missing` は午前 HUMAN・午後 CONTINUE と揺れたが、方針（人にしか出来ない
   ことだけ止める）では自分で pytest を入れられるので期待を continue にし few-shot に採用。
   ルール層は変更なし。

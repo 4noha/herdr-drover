@@ -25,6 +25,7 @@ type Judgement struct {
 	Verdict Verdict
 	Source  string // rule:<name> / llm / fallback:<理由>
 	Detail  string
+	Raw     string // 判定器の生出力（診断用・ログには載せない）
 }
 
 // RulesVersion はルール層の版。ルール（正規表現・順序・最後の一文の扱い）を変えたら
@@ -35,10 +36,17 @@ const RulesVersion = 3
 // JudgeTimeout は判定器 1 回の上限（Claude Code の Stop フック既定 60s の内側）。
 const JudgeTimeout = 40 * time.Second
 
+// JudgeSystemPrompt は判定器のシステムプロンプト。`claude -p` の既定（コーディング
+// エージェント役）のままだと「作業を続ける」側に寄る（2026-10-29 実測: 完了報告を
+// few-shot で DONE と示しても 3 回とも CONTINUE）ため、分類器役に差し替える。
+const JudgeSystemPrompt = "You are a strict classifier for a terminal multiplexer. You read one message and answer with exactly one word: CONTINUE, HUMAN, or DONE. No explanation, no punctuation, no tools."
+
 // DefaultJudgeCmd は既定の判定器（小モデル）。最後の引数にプロンプトが付く。
-// `--max-turns 1`＝ツールを使わせない・`--output-format text`＝1 語だけ読む。
+// `--max-turns 1`＝ツールを使わせない・`--output-format text`＝1 語だけ読む・
+// `--no-session-persistence`＝判定ごとの transcript を残さない。
 func DefaultJudgeCmd() []string {
-	return []string{"claude", "-p", "--model", "haiku", "--max-turns", "1", "--output-format", "text"}
+	return []string{"claude", "-p", "--model", "haiku", "--max-turns", "1", "--output-format", "text",
+		"--no-session-persistence", "--system-prompt", JudgeSystemPrompt}
 }
 
 var (
@@ -219,18 +227,24 @@ func (j *Judge) Judge(ctx context.Context, msg, lastPrompt string, grant, contin
 	argv := append(append([]string{}, j.Cmd...), buildPrompt(msg, lastPrompt, grant, continueAsked))
 	out, err := j.Run(ctx, argv, j.Dir)
 	if err != nil {
-		return Judgement{Verdict: VerdictHuman, Source: "fallback:judge-error", Detail: err.Error()}
+		return Judgement{Verdict: VerdictHuman, Source: "fallback:judge-error", Detail: err.Error(), Raw: out}
 	}
-	m := reVerdict.FindString(out)
+	// 判定器が説明を付けて答えた場合に備え、**最後の**一致を採る（「CONTINUE ではなく
+	// DONE」の先頭一致で誤読しない）。
+	ms := reVerdict.FindAllString(out, -1)
+	m := ""
+	if len(ms) > 0 {
+		m = ms[len(ms)-1]
+	}
 	switch strings.ToUpper(m) {
 	case "CONTINUE":
-		return Judgement{Verdict: VerdictContinue, Source: "llm"}
+		return Judgement{Verdict: VerdictContinue, Source: "llm", Raw: out}
 	case "DONE":
-		return Judgement{Verdict: VerdictDone, Source: "llm"}
+		return Judgement{Verdict: VerdictDone, Source: "llm", Raw: out}
 	case "HUMAN":
-		return Judgement{Verdict: VerdictHuman, Source: "llm"}
+		return Judgement{Verdict: VerdictHuman, Source: "llm", Raw: out}
 	}
-	return Judgement{Verdict: VerdictHuman, Source: "fallback:unparsed", Detail: tail(strings.TrimSpace(out), 80)}
+	return Judgement{Verdict: VerdictHuman, Source: "fallback:unparsed", Detail: tail(strings.TrimSpace(out), 80), Raw: out}
 }
 
 // buildPrompt は判定器へのプロンプト。出力は 1 語に固定する。

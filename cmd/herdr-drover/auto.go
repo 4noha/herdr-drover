@@ -297,6 +297,7 @@ func autoJudge(st *autocontinue.Store, args []string, stdin io.Reader, w io.Writ
 	fs.SetOutput(io.Discard)
 	prompt := fs.String("prompt", "", "直近のユーザ指示（裁量判定・文脈用）")
 	grant := fs.Bool("grant", false, "裁量ありとして判定")
+	raw := fs.Bool("raw", false, "判定器の生出力も表示")
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("%w: %v", errUsage, err)
 	}
@@ -318,6 +319,9 @@ func autoJudge(st *autocontinue.Store, args []string, stdin io.Reader, w io.Writ
 		fmt.Fprintf(w, " detail=%q", jd.Detail)
 	}
 	fmt.Fprintln(w)
+	if *raw && jd.Raw != "" {
+		fmt.Fprintf(w, "--- raw ---\n%s\n", strings.TrimSpace(jd.Raw))
+	}
 	return nil
 }
 

@@ -99,11 +99,11 @@
   },
   {
     "id": "token-term-normal-question",
-    "origin": "設計時の想定事例 — 技術用語 token を含むが認証情報の依頼ではない問い＝ルールでは決めず判定器へ。実判定器（Haiku）は『どの環境で検証するか』を人にしか決められない要件と見て HUMAN（2026-10-29 live 評価）＝妥当なので期待を human に",
+    "origin": "設計時の想定事例 — 技術用語 token を含むが認証情報の依頼ではない問い＝ルールでは決めず判定器へ。方針「人にしか出来ないことだけ止める」では検証環境は自分で選べるので continue（既定システムプロンプトの判定器は HUMAN/CONTINUE で揺れた。v3 の分類器プロンプトでは CONTINUE）",
     "added": "2026-10-29",
     "rules": 3,
     "message": "token の有効期限は 1h でした。どの環境で検証しますか？",
-    "expect": "human",
+    "expect": "continue",
     "expect_source": "llm"
   }
 ]
