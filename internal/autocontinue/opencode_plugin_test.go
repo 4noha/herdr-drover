@@ -122,7 +122,7 @@ if (mode === "v1") {
   const api = {
     event: { subscribe: ({ types, signal }) => { calls.types = types; signal?.addEventListener("abort", () => { closed = true; push(undefined); }); return iterable; } },
     session: {
-      get: async ({ sessionID }) => { calls.get.push(sessionID); return sessions[sessionID]; },
+      get: async ({ sessionID }) => { calls.get.push(sessionID); const { directory, ...rest } = sessions[sessionID]; return rest; },
       // 2.2.0 の形 {prompt:{text}, delivery} だけ受け、旧形 {parts} は拒否する。
       prompt: async ({ sessionID, prompt, parts }) => { if (!prompt) throw new Error("parts form not accepted"); calls.prompt.push({ id: sessionID, text: prompt.text, delivery: "queue" }); return {}; },
     },
@@ -131,7 +131,9 @@ if (mode === "v1") {
   // opencode 2.2.0 実測のバス形: {id, created, type, location:{directory}, data:{…}}。
   // 発話は session.inbox.enqueued（user）/ session.step.started + session.text.ended（assistant）、
   // ターン終了は session.execution.succeeded、中断は session.execution.interrupted。
-  const bus = (type, data) => ({ id: "evt_" + Math.random(), created: Date.now(), type, location: { directory: "/u/proj" }, data });
+  // execution.* には location が付かない（実測）。session.get も directory を返さない前提で、
+  // 他イベントの location から cwd が引けることを検証する。
+  const bus = (type, data) => ({ id: "evt_" + Math.random(), created: Date.now(), type, ...(type.startsWith("session.execution.") ? {} : { location: { directory: "/u/proj" } }), data });
   let n = 0;
   const feed = (sid, list) => {
     for (const m of list) {

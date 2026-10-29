@@ -137,6 +137,7 @@ async function decide({ sessionID, cwd, summary }) {
 function makeTracker(maxMsgs = MAX_MSGS_PER_SESSION) {
   const sessions = new Map(); // sid → Map<messageID, {role, error, parts: Map<partID, text>}>
   const children = new Map(); // child sid → parent sid
+  const dirs = new Map(); // sid → directory（location.directory を持つイベントから）
   const get = (sid) => {
     let s = sessions.get(sid);
     if (!s) {
@@ -160,6 +161,10 @@ function makeTracker(maxMsgs = MAX_MSGS_PER_SESSION) {
       // v2 のバス（実測 2.2.0）は {type, location:{directory}, data:{…}}、SDK 型は
       // {type, properties:{…}}。どちらでも受ける。
       const p = ev?.properties ?? ev?.data ?? {};
+      // location は一部のイベントにしか付かない（execution.* には無い）ので、見えた
+      // 時にセッションごとに覚える。session.created は data.location にも持つ。
+      const dir = ev?.location?.directory ?? p.location?.directory;
+      if (dir && p.sessionID) dirs.set(p.sessionID, dir);
       switch (t) {
         case "session.created":
         case "session.updated": {
@@ -173,6 +178,7 @@ function makeTracker(maxMsgs = MAX_MSGS_PER_SESSION) {
           if (id) {
             sessions.delete(id);
             children.delete(id);
+            dirs.delete(id);
           }
           return;
         }
@@ -238,6 +244,7 @@ function makeTracker(maxMsgs = MAX_MSGS_PER_SESSION) {
     },
     isChild: (sid) => children.has(sid),
     markChild: (sid, parent) => children.set(sid, parent),
+    dir: (sid) => dirs.get(sid),
     summary(sid) {
       const s = sessions.get(sid);
       const list = [];
@@ -293,7 +300,9 @@ async function setupV2(api) {
         tracker.markChild(sid, sess.parentID);
         return;
       }
-      const reason = await decide({ sessionID: sid, cwd: sess?.directory || locDir, summary: tracker.summary(sid) });
+      const cwd = sess?.directory || sess?.location?.directory || sess?.path?.cwd || locDir || tracker.dir(sid) || "";
+      if (!cwd) log(`cwd 不明 sid=${sid} session.get keys=${sess && typeof sess === "object" ? Object.keys(sess).join(",") : typeof sess}`);
+      const reason = await decide({ sessionID: sid, cwd, summary: tracker.summary(sid) });
       if (reason) {
         // prompt はターン完了まで返ることがあるので待たない（イベント処理を塞がない）。
         void promptSession(sid, reason);
@@ -336,8 +345,8 @@ async function setupV2(api) {
           const p = ev.properties ?? ev.data ?? {};
           const sid = p.sessionID ?? p.id;
           const sm = tracker.summary(sid);
-          log(`${ev.type} sid=${sid} child=${tracker.isChild(sid)} assistant_len=${(sm.lastAssistant || "").length} active=${sm.stopHookActive} err=${sm.lastAssistantError}`);
-          onIdle(sid, ev.location?.directory);
+          log(`${ev.type} sid=${sid} child=${tracker.isChild(sid)} assistant_len=${(sm.lastAssistant || "").length} active=${sm.stopHookActive} err=${sm.lastAssistantError} dir=${ev.location?.directory ?? tracker.dir(sid) ?? ""}`);
+          onIdle(sid, ev.location?.directory ?? tracker.dir(sid));
         }
       }
     } catch (e) {
