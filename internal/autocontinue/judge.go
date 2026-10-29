@@ -32,7 +32,7 @@ type Judgement struct {
 // RulesVersion はルール層の版。ルール（正規表現・順序・最後の一文の扱い）を変えたら
 // 上げ、RULES_CHANGELOG.md に「何の事例を根拠に何を変えたか」を書く。各判定記録
 // （cases.jsonl）とログに刻まれる＝後から「どの版の判定か」を追える。
-const RulesVersion = 7
+const RulesVersion = 8
 
 // JudgeTimeout は判定器 1 回の上限（Claude Code の Stop フック既定 60s の内側）。
 const JudgeTimeout = 40 * time.Second
@@ -75,6 +75,8 @@ var (
 	reAskReply = regexp.MustCompile(`[」』"”](と|を)?(教えて|知らせて|返して|連絡して|報告して)(ください|下さい|ほしい|くれ)|(できたら|したら|終わったら|入れたら|挿したら|戻したら).{0,12}(教えて|知らせて|連絡)(ください|下さい)`)
 	// rePhysicalPrereq: 再開の前提がユーザーの物理操作になっている語。
 	rePhysicalPrereq = regexp.MustCompile(`電源(再投入|を入れ直|を入れ|を切|再起動|投入)|再投入|入れ直|SD|USB|ケーブル|抜いて|挿し|差し|取り付け|装着|実機を`)
+	// reReplyEnd: 最後の一文がユーザーへの返答依頼。
+	reReplyEnd = regexp.MustCompile(`(教えて|知らせて|返して|連絡して|報告して|答えて)(ください|下さい|ほしい|もらえ|いただ)|どちら(か|の状態か|ですか)`)
 	// reDeferral: 区切り・先送りの宣言（次の作業をエージェント自身が続けてよい形）。
 	reDeferral = regexp.MustCompile(`(次回|次は|また|後で).{0,30}(再開|続き|続け|から入|から始め)|今日はここまで|ここまでで(十分|区切り)`)
 	// reUnfinished: 未完を明示する語。疑問文で終わらなければ続行。
@@ -256,6 +258,13 @@ func (j *Judge) Judge(ctx context.Context, msg, lastPrompt string, grant, contin
 	// 箇条書き）を v3 は疑問文でないので判定器へ回し、続行してしまった。見る範囲は末尾の
 	// ブロック（最後の空行より後ろ・最大 6 行）＝箇条書きの依頼をまとめて見る。
 	lb := lastBlock(t)
+	// v8: 最後の一文が返答依頼（「どちらか教えてください」「状況を知らせてください」）なら、
+	// 依頼の中身（実機操作・認証情報・不可逆操作）は直前の箇条書き＝別ブロックにある。
+	// 末尾 12 行まで広げて見る（誤続行: 「画面が出ている→電源を入れ直してください／消えている
+	// →電源 ON をお願いします」の後に空行を挟んで「どちらか教えてください」）。
+	if reReplyEnd.MatchString(lastSentence(t)) {
+		lb = lastLines(tail(msg, 1200), 12)
+	}
 	switch {
 	case reCredAsk.MatchString(lb):
 		return Judgement{Verdict: VerdictHuman, Source: "rule:asks-credential", Detail: tail(lb, 80)}
