@@ -123,6 +123,10 @@ func TestAutoCLI(t *testing.T) {
 	setTestHome(t, home)
 	dir := filepath.Join(home, "auto")
 	t.Setenv(autocontinue.DirEnv, dir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config")) // opencode プラグインの置き場も隔離
+	// ⚠ 実 herdr へ繋がない（on/off/toggle は Tab 印とトーストで herdr API を叩く。
+	// 隔離しないと実機の Tab ラベルを書き換える＝実際に起きた）。
+	t.Setenv("HERDR_SOCKET_PATH", filepath.Join(home, "no-such.sock"))
 	t.Setenv("HERDR_PANE_ID", "w1:p4F")
 	runOK := func(args ...string) string {
 		t.Helper()
@@ -139,11 +143,14 @@ func TestAutoCLI(t *testing.T) {
 	if !strings.Contains(out, "claude の Stop フックを") || !strings.Contains(out, "codex の Stop フックを") || !strings.Contains(out, "/hooks") {
 		t.Fatalf("install 出力: %s", out)
 	}
-	for _, a := range []string{"claude", "codex"} {
+	for _, a := range []string{"claude", "codex", "opencode"} {
 		p, _ := autocontinue.SettingsPath(home, a)
 		if _, ok, err := autocontinue.Installed(p, a); !ok || err != nil {
 			t.Fatalf("%s 未設置 err=%v", a, err)
 		}
+	}
+	if _, err := os.Stat(filepath.Join(home, ".config", "opencode", "plugins", "herdr-drover-autocontinue.js")); err != nil {
+		t.Fatalf("opencode プラグインが隔離 XDG_CONFIG_HOME に無い: %v", err)
 	}
 	b, _ := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
 	if !strings.Contains(string(b), `"model": "opus"`) || !strings.Contains(string(b), `"SessionStart"`) {
@@ -154,8 +161,8 @@ func TestAutoCLI(t *testing.T) {
 	}
 	// on（今いる pane）→ pane ファイル。status に出る。
 	out = runOK("auto", "on", "--phrase", "改善を続けてください")
-	if !strings.Contains(out, "pane w1:p4F を enabled=true") {
-		t.Fatalf("on: %s", out)
+	if !strings.Contains(out, "semi-auto ON: w1:p4F") || !strings.Contains(out, "通知に失敗") {
+		t.Fatalf("on（実 herdr に繋がず警告のみ・切替は成立）: %s", out)
 	}
 	st := &autocontinue.Store{Dir: dir}
 	p, found, _ := st.LoadPane("w1:p4F")
