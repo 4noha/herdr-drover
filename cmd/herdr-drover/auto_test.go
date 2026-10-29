@@ -217,7 +217,7 @@ func TestAutoCLI(t *testing.T) {
 		t.Fatalf("toggle→ON（フック除去後なので未設置警告が要る）: %s", out)
 	}
 	b, _ = os.ReadFile(st.LogPath())
-	if !strings.Contains(string(b), "toggle pane=w7:p1 → ON") {
+	if !strings.Contains(string(b), "set pane=w7:p1 → ON") {
 		t.Fatalf("toggle がログに無い: %s", b)
 	}
 	// 使い方エラーは exit 2。
