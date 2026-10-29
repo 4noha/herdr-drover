@@ -32,7 +32,7 @@ type Judgement struct {
 // RulesVersion はルール層の版。ルール（正規表現・順序・最後の一文の扱い）を変えたら
 // 上げ、RULES_CHANGELOG.md に「何の事例を根拠に何を変えたか」を書く。各判定記録
 // （cases.jsonl）とログに刻まれる＝後から「どの版の判定か」を追える。
-const RulesVersion = 9
+const RulesVersion = 10
 
 // JudgeTimeout は判定器 1 回の上限（Claude Code の Stop フック既定 60s の内側）。
 const JudgeTimeout = 40 * time.Second
@@ -74,7 +74,7 @@ var (
 	// reAskReply: ユーザーに返答・報告を求める依頼（「入れた」と教えてください 等）。
 	reAskReply = regexp.MustCompile(`[」』"”](と|を)?(教えて|知らせて|返して|連絡して|報告して)(ください|下さい|ほしい|くれ)|(できたら|したら|終わったら|入れたら|挿したら|戻したら).{0,12}(教えて|知らせて|連絡)(ください|下さい)`)
 	// rePhysicalPrereq: 再開の前提がユーザーの物理操作になっている語。
-	rePhysicalPrereq = regexp.MustCompile(`電源(再投入|を入れ直|を入れ|を切|再起動|投入)|再投入|入れ直|SD|USB|ケーブル|抜いて|挿し|差し|取り付け|装着|実機を`)
+	rePhysicalPrereq = regexp.MustCompile(`電源(再投入|を入れ直|を入れ|を切|再起動|投入)|再投入|入れ直|SD|USB|ケーブル|抜いて|抜き差し|挿し|差し|繋ぎ直|つなぎ直|取り付け|装着|実機を`)
 	// reReplyEnd: 最後の一文がユーザーへの返答依頼。
 	reReplyEnd = regexp.MustCompile(`(教えて|知らせて|返して|連絡して|報告して|答えて)(ください|下さい|ほしい|もらえ|いただ)|どちら(か|の状態か|ですか)`)
 	// reDeferral: 区切り・先送りの宣言（次の作業をエージェント自身が続けてよい形）。
@@ -282,6 +282,15 @@ func (j *Judge) Judge(ctx context.Context, msg, lastPrompt string, grant, contin
 	}
 	// v5: 区切りの宣言（「次回は〜から再開します」「今日はここまで」）で終わる発話は続行。
 	// 末尾の一文だけを見る（本文中の要望は対象外）。人への依頼は上で先に止めている。
+	// v10: 区切り報告の末尾に「次回」の項があり、その手順（見出し形式・箇条書き・矢印の
+	// 連なり）にユーザーの物理操作（抜き差し・接続し直し・電源再投入）が含まれるなら止める。
+	// 最後の「次回」以降だけを見る（本文中の別の「次回」や、最後が「次回は〜再開します」だけの
+	// 文はこれまでどおり wrapup-deferral 側）。
+	if ll := lastLines(tail(msg, 1200), 10); !q {
+		if i := strings.LastIndex(ll, "次回"); i >= 0 && rePhysicalPrereq.MatchString(ll[i:]) {
+			return Judgement{Verdict: VerdictHuman, Source: "rule:next-needs-physical", Detail: tail(ll[i:], 80)}
+		}
+	}
 	// v7: 再開の最初の手順にユーザーの物理操作（電源再投入・SD・ケーブル等）が含まれる
 	// 宣言は続行しない（エージェントだけでは再開できない＝人待ち）。判定器へも回さず停止。
 	if ls := lastSentence(t); !q && reDeferral.MatchString(ls) {
