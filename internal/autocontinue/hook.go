@@ -157,6 +157,9 @@ func (h *Hook) Run(ctx context.Context, in Input) (Result, error) {
 		return stop(res, base+" 上限到達→停止（人の確認待ち）")
 	}
 	judge := h.NewJudge(eff.JudgeCmd, h.Store.Dir)
+	if judge != nil && judge.Votes == 0 {
+		judge.Votes = eff.JudgeVotes
+	}
 	jd := judge.Judge(ctx, msg, lastPrompt, grant, continueAsked)
 	res.Judgment, res.Verdict, res.Source = jd, jd.Verdict, jd.Source
 	detail := ""

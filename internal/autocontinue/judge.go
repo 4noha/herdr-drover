@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -31,7 +32,7 @@ type Judgement struct {
 // RulesVersion はルール層の版。ルール（正規表現・順序・最後の一文の扱い）を変えたら
 // 上げ、RULES_CHANGELOG.md に「何の事例を根拠に何を変えたか」を書く。各判定記録
 // （cases.jsonl）とログに刻まれる＝後から「どの版の判定か」を追える。
-const RulesVersion = 3
+const RulesVersion = 4
 
 // JudgeTimeout は判定器 1 回の上限（Claude Code の Stop フック既定 60s の内側）。
 const JudgeTimeout = 40 * time.Second
@@ -60,9 +61,10 @@ var (
 	// reCredAsk: 認証情報・秘密の提示を**人に求める**文（名詞＋依頼動詞の両方）。
 	reCredAsk = regexp.MustCompile(`(?i)(パスワード|パスフレーズ|認証情報|credential|password|secret|api ?key|トークン|token|OTP|認証コード|2FA|二段階|ログイン|サインイン|アカウント).*(教えて|ください|下さい|入力|貼|渡し|提供|もらえ|いただけ|頂け|お願い)`)
 	// reIrreversibleAsk: 不可逆・対外操作の**承認を求める**文。
-	reIrreversibleAsk = regexp.MustCompile(`(?i)(本番|デプロイ|公開|push|リリース|削除|消し|force|上書き|送信|送って|投稿|支払|購入|課金|決済|カード|権限|許可|承認).*(してよ|していい|してもいい|しますか|してよろしい|して大丈夫|しても大丈夫|よろしい|していただ|してもらえ|可能ですか|should I|shall I|ok to|okay to)`)
+	// 「カード」は入れない（SD カード／カードリーダーと衝突＝np1-sd-insert-or-else）。
+	reIrreversibleAsk = regexp.MustCompile(`(?i)(本番|デプロイ|公開|push|リリース|削除|消し|force|上書き|送信|送って|投稿|支払|購入|課金|決済|権限|許可|承認).*(してよ|していい|してもいい|しますか|してよろしい|して大丈夫|しても大丈夫|よろしい|していただ|してもらえ|可能ですか|should I|shall I|ok to|okay to)`)
 	// rePhysicalAsk: 実機・物理操作を**人に求める**文。
-	rePhysicalAsk = regexp.MustCompile(`(実機|物理|電源|ケーブル|差し込|差し直|接続して|押して|置いて|つないで|繋いで).*(ください|下さい|もらえ|いただけ|頂け|してから|お願い)`)
+	rePhysicalAsk = regexp.MustCompile(`(実機|物理|電源|ケーブル|差し込|差し直|接続して|押して|置いて|つないで|繋いで|SD|USB|カード(を|の)|抜いて|挿して|刺して|装着|取り付け|取り外|本体を).*(ください|下さい|もらえ|いただけ|頂け|してから|お願い|教えて|知らせて)`)
 	// reUnfinished: 未完を明示する語。疑問文で終わらなければ続行。
 	reUnfinished = regexp.MustCompile(`(未完|未対応|未実装|未着手|残り|残る|残課題|次は|次に|続けます|続行します|進めます|引き続き|次のステップ|途中です|まだ.*(ません|ない))`)
 	// reVerdict: 判定器出力から 1 語を拾う。
@@ -100,6 +102,26 @@ func endsWithQuestion(s string) bool {
 	return strings.HasSuffix(t, "?") || strings.HasSuffix(t, "？")
 }
 
+// lastBlock は末尾のブロック（最後の空行より後ろ。最大 6 行・括弧書きは除く）を 1 行に
+// 繋いだもの。箇条書きの依頼（「1. 電源を切る 2. SD を抜く 3. 『挿した』と教えてください」）
+// を名詞＋依頼動詞の組として見るため。
+func lastBlock(s string) string {
+	t := stripTrailingParens(s)
+	lines := strings.Split(t, "\n")
+	var blk []string
+	for i := len(lines) - 1; i >= 0 && len(blk) < 6; i-- {
+		l := strings.TrimSpace(lines[i])
+		if l == "" {
+			if len(blk) > 0 {
+				break
+			}
+			continue
+		}
+		blk = append([]string{l}, blk...)
+	}
+	return strings.Join(blk, " ")
+}
+
 // lastSentence は末尾の一文（最後の文末記号より後ろ。改行も区切り）。人待ちの
 // 判定はこれだけで行う＝本文中の技術用語に引きずられない。
 func lastSentence(s string) string {
@@ -129,11 +151,18 @@ type Judge struct {
 	// Dir は判定器サブプロセスの cwd（claude -p の transcript がここに紐づく＝
 	// 実プロジェクトの transcript 一覧を汚さない）。
 	Dir string
+	// Votes は判定器の並列呼出数（多数決）。小モデルはきわどい事例で揺れる（v3 の live
+	// 評価で完了報告が DONE/CONTINUE に揺れた）ので、3 回の多数決にする。過半数が無ければ
+	// 停止側（human）。0 は DefaultJudgeVotes。
+	Votes int
 }
+
+// DefaultJudgeVotes は多数決の既定（並列なので所要時間は 1 回分）。
+const DefaultJudgeVotes = 3
 
 // NewJudge は既定の exec 実装。
 func NewJudge(cmd []string, dir string) *Judge {
-	return &Judge{Cmd: cmd, Timeout: JudgeTimeout, Run: runExec, Dir: dir}
+	return &Judge{Cmd: cmd, Timeout: JudgeTimeout, Run: runExec, Dir: dir, Votes: DefaultJudgeVotes}
 }
 
 // runExec は argv を実行して stdout を返す。
@@ -198,16 +227,22 @@ func (j *Judge) Judge(ctx context.Context, msg, lastPrompt string, grant, contin
 	}
 	t := tail(msg, 400)
 	q := endsWithQuestion(t)
+	// 人への依頼（認証情報・不可逆操作の承認・実機操作）は**疑問文でなくても**止める。
+	// v4: PioneerNP1 の「SD を抜いて Mac に挿す → 『挿した』と教えてください」（命令形・
+	// 箇条書き）を v3 は疑問文でないので判定器へ回し、続行してしまった。見る範囲は末尾の
+	// ブロック（最後の空行より後ろ・最大 6 行）＝箇条書きの依頼をまとめて見る。
+	lb := lastBlock(t)
+	switch {
+	case reCredAsk.MatchString(lb):
+		return Judgement{Verdict: VerdictHuman, Source: "rule:asks-credential", Detail: tail(lb, 80)}
+	case rePhysicalAsk.MatchString(lb):
+		return Judgement{Verdict: VerdictHuman, Source: "rule:asks-physical", Detail: tail(lb, 80)}
+	case reIrreversibleAsk.MatchString(lb):
+		return Judgement{Verdict: VerdictHuman, Source: "rule:asks-irreversible", Detail: tail(lb, 80)}
+	}
 	if q {
 		ls := lastSentence(t)
-		switch {
-		case reCredAsk.MatchString(ls):
-			return Judgement{Verdict: VerdictHuman, Source: "rule:asks-credential", Detail: ls}
-		case reIrreversibleAsk.MatchString(ls):
-			return Judgement{Verdict: VerdictHuman, Source: "rule:asks-irreversible", Detail: ls}
-		case rePhysicalAsk.MatchString(ls):
-			return Judgement{Verdict: VerdictHuman, Source: "rule:asks-physical", Detail: ls}
-		case reAskContinue.MatchString(ls):
+		if reAskContinue.MatchString(ls) {
 			// 「続けますか？」はセミオートの趣旨そのもの＝続行。
 			return Judgement{Verdict: VerdictContinue, Source: "rule:asks-to-continue", Detail: ls}
 		}
@@ -225,26 +260,81 @@ func (j *Judge) Judge(ctx context.Context, msg, lastPrompt string, grant, contin
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	argv := append(append([]string{}, j.Cmd...), buildPrompt(msg, lastPrompt, grant, continueAsked))
-	out, err := j.Run(ctx, argv, j.Dir)
-	if err != nil {
-		return Judgement{Verdict: VerdictHuman, Source: "fallback:judge-error", Detail: err.Error(), Raw: out}
+	votes := j.Votes
+	if votes <= 0 {
+		votes = DefaultJudgeVotes
 	}
-	// 判定器が説明を付けて答えた場合に備え、**最後の**一致を採る（「CONTINUE ではなく
-	// DONE」の先頭一致で誤読しない）。
+	type vote struct {
+		v   Verdict
+		raw string
+		err error
+	}
+	results := make([]vote, votes)
+	var wg sync.WaitGroup
+	for i := 0; i < votes; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			out, err := j.Run(ctx, argv, j.Dir)
+			results[i] = vote{v: parseVerdict(out), raw: out, err: err}
+		}(i)
+	}
+	wg.Wait()
+	count := map[Verdict]int{}
+	raws := make([]string, 0, votes)
+	errs := 0
+	for _, r := range results {
+		raws = append(raws, strings.TrimSpace(r.raw))
+		if r.err != nil {
+			errs++
+			raws[len(raws)-1] += " (err: " + r.err.Error() + ")"
+			continue
+		}
+		if r.v != "" {
+			count[r.v]++
+		}
+	}
+	raw := strings.Join(raws, " | ")
+	if errs == votes {
+		return Judgement{Verdict: VerdictHuman, Source: "fallback:judge-error", Detail: results[0].err.Error(), Raw: raw}
+	}
+	var best Verdict
+	bestN := 0
+	for v, n := range count {
+		if n > bestN {
+			best, bestN = v, n
+		}
+	}
+	if best == "" {
+		return Judgement{Verdict: VerdictHuman, Source: "fallback:unparsed", Detail: tail(raw, 80), Raw: raw}
+	}
+	if bestN*2 <= votes && votes > 1 {
+		// 過半数なし（3 票が全部違う等）＝停止側。
+		return Judgement{Verdict: VerdictHuman, Source: "llm:no-majority", Detail: raw, Raw: raw}
+	}
+	src := "llm"
+	if votes > 1 {
+		src = fmt.Sprintf("llm:%d/%d", bestN, votes)
+	}
+	return Judgement{Verdict: best, Source: src, Raw: raw}
+}
+
+// parseVerdict は判定器の出力から**最後の**一致語を採る（説明付き回答の先頭一致で誤読
+// しない）。無ければ空。
+func parseVerdict(out string) Verdict {
 	ms := reVerdict.FindAllString(out, -1)
-	m := ""
-	if len(ms) > 0 {
-		m = ms[len(ms)-1]
+	if len(ms) == 0 {
+		return ""
 	}
-	switch strings.ToUpper(m) {
+	switch strings.ToUpper(ms[len(ms)-1]) {
 	case "CONTINUE":
-		return Judgement{Verdict: VerdictContinue, Source: "llm", Raw: out}
+		return VerdictContinue
 	case "DONE":
-		return Judgement{Verdict: VerdictDone, Source: "llm", Raw: out}
+		return VerdictDone
 	case "HUMAN":
-		return Judgement{Verdict: VerdictHuman, Source: "llm", Raw: out}
+		return VerdictHuman
 	}
-	return Judgement{Verdict: VerdictHuman, Source: "fallback:unparsed", Detail: tail(strings.TrimSpace(out), 80), Raw: out}
+	return ""
 }
 
 // buildPrompt は判定器へのプロンプト。出力は 1 語に固定する。

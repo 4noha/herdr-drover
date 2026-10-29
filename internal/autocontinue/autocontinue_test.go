@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -43,10 +44,13 @@ func TestJudgeRules(t *testing.T) {
 		{"本文に secret があっても最後の一文が『続けますか？』なら続行（gts 誤検知の再現）", "VM の secret key 導出を確認しました。\n次の手順\n1. トレースを整理\n2. 鍵更新規則を確定\nいま「VM の実体」を掴んだので、ここからはオフライン解析で進められます。続けますか？", "HUMAN", nil, VerdictContinue, "rule:asks-to-continue"},
 		{"進めてよいですか？ も続行", "設計をまとめました。この方針で実装を進めてよいですか？", "HUMAN", nil, VerdictContinue, "rule:asks-to-continue"},
 		{"push してよいですか？ は不可逆＝停止", "コミットしました。origin に push してよいですか？", "CONTINUE", nil, VerdictHuman, "rule:asks-irreversible"},
-		{"技術用語の token を含む普通の問いは判定器へ", "token の有効期限は 1h でした。どの環境で検証しますか？", "CONTINUE", nil, VerdictContinue, "llm"},
-		{"普通の選択肢提示は判定器へ→CONTINUE", "方針は 1. A 2. B 3. C です。おすすめは 2。どれにしますか？", "CONTINUE", nil, VerdictContinue, "llm"},
-		{"判定器 DONE", "すべて完了しました。", "DONE\n", nil, VerdictDone, "llm"},
-		{"判定器 HUMAN", "どの端末に接続しますか。", "The answer is HUMAN.", nil, VerdictHuman, "llm"},
+		{"技術用語の token を含む普通の問いは判定器へ", "token の有効期限は 1h でした。どの環境で検証しますか？", "CONTINUE", nil, VerdictContinue, "llm:3/3"},
+		{"普通の選択肢提示は判定器へ→CONTINUE", "方針は 1. A 2. B 3. C です。おすすめは 2。どれにしますか？", "CONTINUE", nil, VerdictContinue, "llm:3/3"},
+		{"判定器 DONE", "すべて完了しました。", "DONE\n", nil, VerdictDone, "llm:3/3"},
+		{"判定器 HUMAN", "どの端末に接続しますか。", "The answer is HUMAN.", nil, VerdictHuman, "llm:3/3"},
+		{"説明付き回答は最後の語を採る", "完了しました。", "Not CONTINUE because nothing remains. Final: DONE", nil, VerdictDone, "llm:3/3"},
+		{"実機操作の依頼は疑問文でなくても停止（PioneerNP1 誤続行の再現）", "✅ dump 完了（BatchLogSave result=true）。POSEIDONDBG OFF は送信したが応答未確認です（後で確認）。\nSD を回収します：\n1. 電源を切る\n2. SD を抜いて Mac に挿す\n3. 「挿した」と教えてください", "CONTINUE", nil, VerdictHuman, "rule:asks-physical"},
+		{"実機操作の依頼＋別案の問いも停止", "SD が Mac にマウントされていません（カードリーダーも検出されず）。SD を Mac に挿してください。\n（NP1 の電源を切る → SD を抜く → Mac に挿す → 「挿した」）\nもし今すぐ難しければ、その間に別の静的解析を進めます。どうしますか？", "CONTINUE", nil, VerdictHuman, "rule:asks-physical"},
 		{"判定器エラーは停止側", "完了しました。", "", errors.New("boom"), VerdictHuman, "fallback:judge-error"},
 		{"判定器出力が読めないのは停止側", "完了しました。", "maybe", nil, VerdictHuman, "fallback:unparsed"},
 	}
@@ -316,7 +320,7 @@ func TestHookFlowCountsCapsAndMarks(t *testing.T) {
 	if n := strings.Count(string(b), "\n"); n != 13 {
 		t.Fatalf("log 行数=%d want 13:\n%s", n, b)
 	}
-	if !strings.Contains(string(b), "verdict=human src=llm→停止") || !strings.Contains(string(b), "上限到達→停止") {
+	if !strings.Contains(string(b), "verdict=human src=llm:3/3→停止") || !strings.Contains(string(b), "上限到達→停止") {
 		t.Fatalf("log 内容:\n%s", b)
 	}
 }
@@ -555,7 +559,7 @@ func TestHookRecordsCasesAndFollowup(t *testing.T) {
 		t.Fatalf("cases=%d err=%v", len(cases), err)
 	}
 	c := cases[0]
-	if c.Decision != "stop" || c.Verdict != "human" || c.Source != "llm" || c.Rules != RulesVersion || c.Prompt != "全部やって" || !c.Grant ||
+	if c.Decision != "stop" || c.Verdict != "human" || !strings.HasPrefix(c.Source, "llm") || c.Rules != RulesVersion || c.Prompt != "全部やって" || !c.Grant ||
 		c.Message != "方針 A と B があります。どちらにしますか？" || c.Cap != DefaultGrantCap {
 		t.Fatalf("case: %+v", c)
 	}
@@ -657,7 +661,7 @@ func TestJudgeCorpus(t *testing.T) {
 			continue
 		}
 		if c.ExpectSource == "llm" {
-			if !called || got.Source != "llm" {
+			if !called || !strings.HasPrefix(got.Source, "llm") {
 				t.Errorf("%s: 判定器へ渡るべき事例がルールで決まった: source=%s detail=%q", c.ID, got.Source, got.Detail)
 			}
 		} else if got.Source != c.ExpectSource {
@@ -671,5 +675,38 @@ func TestJudgeCorpus(t *testing.T) {
 				t.Logf("%s: 実判定器=%s ok", c.ID, lg.Verdict)
 			}
 		}
+	}
+}
+
+// 判定器の多数決: 3 票の過半数を採り、割れたら停止側（human）。並列実行。
+func TestJudgeMajorityVote(t *testing.T) {
+	var n atomic.Int32
+	answers := []string{"DONE", "CONTINUE", "DONE"}
+	j := &Judge{Cmd: []string{"fake"}, Timeout: time.Second, Votes: 3, Run: func(context.Context, []string, string) (string, error) {
+		i := int(n.Add(1)) - 1
+		return answers[i%3], nil
+	}}
+	got := j.Judge(context.Background(), "完了しました。", "", false, false)
+	if got.Verdict != VerdictDone || got.Source != "llm:2/3" || n.Load() != 3 {
+		t.Fatalf("majority: %+v calls=%d", got, n.Load())
+	}
+	n.Store(0)
+	answers = []string{"DONE", "CONTINUE", "HUMAN"}
+	got = j.Judge(context.Background(), "完了しました。", "", false, false)
+	if got.Verdict != VerdictHuman || got.Source != "llm:no-majority" {
+		t.Fatalf("split: %+v", got)
+	}
+	// 1 票だけ失敗しても残りで決める。
+	n.Store(0)
+	j.Run = func(context.Context, []string, string) (string, error) {
+		i := int(n.Add(1)) - 1
+		if i == 1 {
+			return "", errors.New("boom")
+		}
+		return "CONTINUE", nil
+	}
+	got = j.Judge(context.Background(), "完了しました。", "", false, false)
+	if got.Verdict != VerdictContinue || got.Source != "llm:2/3" {
+		t.Fatalf("one error: %+v", got)
 	}
 }

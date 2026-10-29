@@ -105,5 +105,25 @@
     "message": "token の有効期限は 1h でした。どの環境で検証しますか？",
     "expect": "continue",
     "expect_source": "llm"
+  },
+  {
+    "id": "np1-sd-eject-imperative",
+    "origin": "PioneerNP1 (opencode, w31:p1M) 2026-10-29 — ユーザー報告の誤続行。「SD を抜いて Mac に挿す → 『挿した』と教えてください」の箇条書き（命令形・疑問符なし）を v3 は判定器へ回し CONTINUE。v4 で末尾ブロックの実機依頼を疑問符なしでも停止",
+    "added": "2026-10-29",
+    "rules": 4,
+    "agent": "opencode",
+    "message": "✅ dump 完了（BatchLogSave result=true）。POSEIDONDBG OFF は送信したが応答未確認です（後で確認）。\nSD を回収します：\n1. 電源を切る\n2. SD を抜いて Mac に挿す\n3. 「挿した」と教えてください",
+    "expect": "human",
+    "expect_source": "rule:asks-physical"
+  },
+  {
+    "id": "np1-sd-insert-or-else",
+    "origin": "PioneerNP1 (opencode, w31:p1M) 2026-10-29 — 同セッションの 2 回目。「SD を Mac に挿してください…もし難しければ別の静的解析を進めます。どうしますか？」。実機依頼が本命なので停止（続行なら別作業に逸れる）",
+    "added": "2026-10-29",
+    "rules": 4,
+    "agent": "opencode",
+    "message": "SD が Mac にマウントされていません（カードリーダーも検出されず）。SD を Mac に挿してください。\n（NP1 の電源を切る → SD を抜く → Mac に挿す → 「挿した」）\nもし今すぐ難しければ、その間に別の静的解析を進めます。どうしますか？",
+    "expect": "human",
+    "expect_source": "rule:asks-physical"
   }
 ]

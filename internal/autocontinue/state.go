@@ -66,6 +66,8 @@ type Config struct {
 	JudgeCmd []string `json:"judge_cmd,omitempty"`
 	// Debug はフック呼出を**全件**（OFF の pane・pane 外も）ログに残す（切り分け用）。
 	Debug bool `json:"debug,omitempty"`
+	// JudgeVotes は判定器の多数決の票数（0=既定 3。1 で単発）。
+	JudgeVotes int `json:"judge_votes,omitempty"`
 }
 
 // PaneSetting は pane 単位の設定（<dir>/panes/<pane>.json）。
@@ -286,17 +288,18 @@ func (s *Store) AppendLog(now time.Time, line string) error {
 
 // Effective は pane の有効設定（pane 設定 > 全体設定 > 既定）。
 type Effective struct {
-	Enabled  bool
-	Phrase   string
-	Grant    bool
-	Cap      int
-	GrantCap int
-	JudgeCmd []string
+	Enabled    bool
+	Phrase     string
+	Grant      bool
+	Cap        int
+	GrantCap   int
+	JudgeCmd   []string
+	JudgeVotes int
 }
 
 // Resolve は config と pane 設定を合成する。
 func Resolve(c Config, p PaneSetting, paneFound bool) Effective {
-	e := Effective{Phrase: DefaultPhrase, Cap: DefaultCap, GrantCap: DefaultGrantCap, JudgeCmd: DefaultJudgeCmd()}
+	e := Effective{Phrase: DefaultPhrase, Cap: DefaultCap, GrantCap: DefaultGrantCap, JudgeCmd: DefaultJudgeCmd(), JudgeVotes: DefaultJudgeVotes}
 	if c.Enabled != nil {
 		e.Enabled = *c.Enabled
 	}
@@ -311,6 +314,9 @@ func Resolve(c Config, p PaneSetting, paneFound bool) Effective {
 	}
 	if len(c.JudgeCmd) > 0 {
 		e.JudgeCmd = c.JudgeCmd
+	}
+	if c.JudgeVotes > 0 {
+		e.JudgeVotes = c.JudgeVotes
 	}
 	if paneFound {
 		if p.Enabled != nil {
