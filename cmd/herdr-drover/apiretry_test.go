@@ -17,6 +17,8 @@ func TestAPIErrorLine(t *testing.T) {
 		"API Error: Connection error.",
 		"stream disconnected before completion: stream closed before response.completed",
 		"API Error: 503 Service Unavailable",
+		"✻ 503 Bedrock is unable to process your request. · Retrying in 0s · attempt 3/10", // エージェント自身の再試行を使い切って止まった後に残る表示
+		"502 Bad Gateway",
 	}
 	for _, s := range yes {
 		screen := "…作業の出力…\n" + s + "\n\n❯ \n──────\n  ⏵⏵ auto mode on"
@@ -27,8 +29,9 @@ func TestAPIErrorLine(t *testing.T) {
 	no := []string{
 		"API Error: 429 rate limit exceeded. Resets in 2h", // 待っても効かない
 		"You've hit your usage limit. Try again at 6 PM",   // 上限
-		"通常の出力です。テストは全部通りました。",                             // エラーなし
-		"ここで API Error という語を説明します。",                        // 文言の説明（形が違う）
+		"通常の出力です。テストは全部通りました。",
+		"ポート 5000 を確認しました。HTTP 200 を返します。", // 数字だけでは拾わない                             // エラーなし
+		"ここで API Error という語を説明します。",        // 文言の説明（形が違う）
 	}
 	for _, s := range no {
 		if l := apiErrorLine("…\n"+s+"\n❯ ", 14); l != "" {

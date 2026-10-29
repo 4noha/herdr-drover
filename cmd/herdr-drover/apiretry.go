@@ -34,7 +34,7 @@ import (
 var apiRetryDelays = []time.Duration{5 * time.Second, 15 * time.Second, 45 * time.Second}
 
 // 一時的な API エラーの文言（画面末尾の行に出る形）。429/rate limit は含めない。
-var reAPIError = regexp.MustCompile(`(?i)(API Error:?\s*(5\d\d|Server error|Overloaded|Internal server error|Connection error|Request timed out|fetch failed|terminated|socket hang up)|Server error mid-response|overloaded_error|stream (disconnected|ended) before completion|ECONNRESET|upstream connect error|Service Unavailable)`)
+var reAPIError = regexp.MustCompile(`(?i)(API Error:?\s*(5\d\d|Server error|Overloaded|Internal server error|Connection error|Request timed out|fetch failed|terminated|socket hang up)|Server error mid-response|overloaded_error|stream (disconnected|ended) before completion|ECONNRESET|upstream connect error|Service Unavailable|\b5\d\d\b[^\n]{0,80}(unable to process your request|Bedrock|Bad Gateway|Gateway Timeout|Service Unavailable)|Retrying in \d+s[^\n]{0,10}attempt \d+/\d+)`)
 
 // reRateLimit は待っても即再開できない型（対象外）。
 var reRateLimit = regexp.MustCompile(`(?i)(rate.?limit|usage limit|429|quota|resets? (at|in)|limit reached|credit)`)
