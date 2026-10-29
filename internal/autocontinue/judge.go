@@ -37,9 +37,19 @@ func DefaultJudgeCmd() []string {
 }
 
 var (
-	// reHumanOnly: 人にしかできない／人の承認が要る事柄。疑問文で終わる発話と
-	// 組み合わせて初めて「人待ち」と判定する（単独では普通の進捗報告に頻出）。
-	reHumanOnly = regexp.MustCompile(`(?i)(権限|許可|承認|パスワード|パスフレーズ|認証情報|credential|password|secret|api ?key|トークン|token|ログイン|サインイン|実機|物理|電源|ケーブル|差し込|接続して|支払|購入|課金|決済|カード|本番|デプロイ|公開|push|リリース|削除してよ|消してよ|force|上書きしてよ|送信してよ|送ってよ|投稿してよ|アカウント|2FA|二段階|OTP|認証コード)`)
+	// 人待ちの判定は**最後の一文**（疑問文）だけで行う。実測 2026-10-29: 直前 400 文字
+	// 全体で見ると、本文の技術用語（VM の "secret" 等）に反応して「続けますか？」を
+	// 人待ちと誤判定した（gts セッション）。
+	//
+	// reAskContinue: 「続けますか／進めてよいですか」型＝エージェント自身が続行の許可を
+	// 求めている。セミオートの趣旨そのもの＝続行（ただし同じ文に不可逆操作があれば人待ち）。
+	reAskContinue = regexp.MustCompile(`(続け|つづけ|進め|すすめ|着手|始め|やり|実行|実装)(ます|て(も)?(いい|よい|よろしい|大丈夫)|ましょう|てよろしい)?(です)?か|よろしいでしょうか|よろしいですか|どうしますか|続行しますか|進行しますか|次に進みますか|(続け|進め)ても|shall I (continue|proceed)|should I (continue|proceed)|continue\?`)
+	// reCredAsk: 認証情報・秘密の提示を**人に求める**文（名詞＋依頼動詞の両方）。
+	reCredAsk = regexp.MustCompile(`(?i)(パスワード|パスフレーズ|認証情報|credential|password|secret|api ?key|トークン|token|OTP|認証コード|2FA|二段階|ログイン|サインイン|アカウント).*(教えて|ください|下さい|入力|貼|渡し|提供|もらえ|いただけ|頂け|お願い)`)
+	// reIrreversibleAsk: 不可逆・対外操作の**承認を求める**文。
+	reIrreversibleAsk = regexp.MustCompile(`(?i)(本番|デプロイ|公開|push|リリース|削除|消し|force|上書き|送信|送って|投稿|支払|購入|課金|決済|カード|権限|許可|承認).*(してよ|していい|してもいい|しますか|してよろしい|して大丈夫|しても大丈夫|よろしい|していただ|してもらえ|可能ですか|should I|shall I|ok to|okay to)`)
+	// rePhysicalAsk: 実機・物理操作を**人に求める**文。
+	rePhysicalAsk = regexp.MustCompile(`(実機|物理|電源|ケーブル|差し込|差し直|接続して|押して|置いて|つないで|繋いで).*(ください|下さい|もらえ|いただけ|頂け|してから|お願い)`)
 	// reUnfinished: 未完を明示する語。疑問文で終わらなければ続行。
 	reUnfinished = regexp.MustCompile(`(未完|未対応|未実装|未着手|残り|残る|残課題|次は|次に|続けます|続行します|進めます|引き続き|次のステップ|途中です|まだ.*(ません|ない))`)
 	// reVerdict: 判定器出力から 1 語を拾う。
@@ -50,6 +60,18 @@ var (
 func endsWithQuestion(s string) bool {
 	t := strings.TrimRight(strings.TrimSpace(s), " \t\r\n*_`)）」』]")
 	return strings.HasSuffix(t, "?") || strings.HasSuffix(t, "？")
+}
+
+// lastSentence は末尾の一文（最後の文末記号より後ろ。改行も区切り）。人待ちの
+// 判定はこれだけで行う＝本文中の技術用語に引きずられない。
+func lastSentence(s string) string {
+	t := strings.TrimRight(strings.TrimSpace(s), " \t\r\n*_`)）」』]")
+	t = strings.TrimRight(t, "?？")
+	i := strings.LastIndexAny(t, "。！!？?\n")
+	if i >= 0 {
+		t = t[i+1:]
+	}
+	return strings.TrimSpace(t)
 }
 
 // tail は末尾 n 文字（rune）。
@@ -138,8 +160,19 @@ func (j *Judge) Judge(ctx context.Context, msg, lastPrompt string, grant, contin
 	}
 	t := tail(msg, 400)
 	q := endsWithQuestion(t)
-	if q && reHumanOnly.MatchString(t) {
-		return Judgement{Verdict: VerdictHuman, Source: "rule:human-only-question", Detail: reHumanOnly.FindString(t)}
+	if q {
+		ls := lastSentence(t)
+		switch {
+		case reCredAsk.MatchString(ls):
+			return Judgement{Verdict: VerdictHuman, Source: "rule:asks-credential", Detail: ls}
+		case reIrreversibleAsk.MatchString(ls):
+			return Judgement{Verdict: VerdictHuman, Source: "rule:asks-irreversible", Detail: ls}
+		case rePhysicalAsk.MatchString(ls):
+			return Judgement{Verdict: VerdictHuman, Source: "rule:asks-physical", Detail: ls}
+		case reAskContinue.MatchString(ls):
+			// 「続けますか？」はセミオートの趣旨そのもの＝続行。
+			return Judgement{Verdict: VerdictContinue, Source: "rule:asks-to-continue", Detail: ls}
+		}
 	}
 	if !q && reUnfinished.MatchString(t) {
 		return Judgement{Verdict: VerdictContinue, Source: "rule:unfinished", Detail: reUnfinished.FindString(t)}
