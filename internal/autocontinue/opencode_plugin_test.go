@@ -123,28 +123,36 @@ if (mode === "v1") {
     event: { subscribe: ({ types, signal }) => { calls.types = types; signal?.addEventListener("abort", () => { closed = true; push(undefined); }); return iterable; } },
     session: {
       get: async ({ sessionID }) => { calls.get.push(sessionID); return sessions[sessionID]; },
-      prompt: async ({ sessionID, parts }) => { calls.prompt.push({ id: sessionID, text: parts[0].text }); return {}; },
+      // 2.2.0 の形 {prompt:{text}, delivery} だけ受け、旧形 {parts} は拒否する。
+      prompt: async ({ sessionID, prompt, parts }) => { if (!prompt) throw new Error("parts form not accepted"); calls.prompt.push({ id: sessionID, text: prompt.text, delivery: "queue" }); return {}; },
     },
   };
   const dispose = await plugin.setup(api);
-  // opencode 2.2.0 実測のバス形: {id, created, type, location:{directory}, data:{…}}
+  // opencode 2.2.0 実測のバス形: {id, created, type, location:{directory}, data:{…}}。
+  // 発話は session.inbox.enqueued（user）/ session.step.started + session.text.ended（assistant）、
+  // ターン終了は session.execution.succeeded、中断は session.execution.interrupted。
   const bus = (type, data) => ({ id: "evt_" + Math.random(), created: Date.now(), type, location: { directory: "/u/proj" }, data });
   let n = 0;
   const feed = (sid, list) => {
     for (const m of list) {
       const id = "msg_" + (++n);
-      push(bus("message.updated", { info: { id, sessionID: sid, role: m.info.role, error: m.info.error } }));
-      let k = 0;
-      for (const p of m.parts) push(bus("message.part.updated", { part: { ...p, id: id + "_p" + (++k), sessionID: sid, messageID: id } }));
+      if (m.info.role === "user") {
+        push(bus("session.inbox.enqueued", { sessionID: sid, inboxID: "inb_" + n, item: { type: "user", payload: { text: m.parts.map((p) => p.text || "").join("") }, delivery: "queue" } }));
+      } else {
+        push(bus("session.step.started", { sessionID: sid, assistantMessageID: id }));
+        let k = 0;
+        for (const p of m.parts) if (p.type === "text") push(bus("session.text.ended", { sessionID: sid, assistantMessageID: id, ordinal: k++, text: p.text }));
+        push(bus(m.info.error ? "session.execution.interrupted" : "session.step.ended", { sessionID: sid, assistantMessageID: id, ...(m.info.error ? { reason: "user" } : {}) }));
+      }
     }
   };
   push(bus("integration.updated", {}));
-  push(bus("session.created", { info: { id: "ses_child", parentID: "ses_root" } }));
+  push(bus("session.created", { sessionID: "ses_child", parentID: "ses_root" }));
   feed("ses_root", messages["ses_root"]);
   feed("ses_abort", messages["ses_abort"]);
-  push(bus("session.idle", { sessionID: "ses_child" }));
-  push(bus("session.idle", { sessionID: "ses_abort" }));
-  push(bus("session.idle", { sessionID: "ses_root" }));
+  push(bus("session.execution.succeeded", { sessionID: "ses_child" }));
+  push(bus("session.execution.succeeded", { sessionID: "ses_abort" }));
+  push(bus("session.execution.succeeded", { sessionID: "ses_root" }));
   await new Promise((r) => setTimeout(r, 300));
   dispose();
 }
@@ -186,7 +194,7 @@ console.log(JSON.stringify({ calls }));
 		}
 		if mode == "v2" {
 			b, _ := os.ReadFile(filepath.Join(dir, "plugin.log"))
-			if !strings.Contains(string(b), "event loop 開始") || !strings.Contains(string(b), "idle sid=ses_root") || !strings.Contains(string(b), "event type=session.idle") {
+			if !strings.Contains(string(b), "event loop 開始") || !strings.Contains(string(b), "session.execution.succeeded sid=ses_root") {
 				t.Fatalf("[v2] プラグインログ:\n%s", b)
 			}
 		}

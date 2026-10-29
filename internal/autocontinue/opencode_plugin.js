@@ -165,6 +165,7 @@ function makeTracker(maxMsgs = MAX_MSGS_PER_SESSION) {
         case "session.updated": {
           const info = p.info;
           if (info?.id && info.parentID) children.set(info.id, info.parentID);
+          if (p.sessionID && p.parentID) children.set(p.sessionID, p.parentID); // 実バス形
           return;
         }
         case "session.deleted": {
@@ -194,6 +195,43 @@ function makeTracker(maxMsgs = MAX_MSGS_PER_SESSION) {
           if (s && p.messageID) s.delete(p.messageID);
           return;
         }
+        // ---- opencode 2.2.0 の内部バス（実測）。SDK 形の message.* は来ない。
+        case "session.inbox.enqueued": {
+          // data {sessionID, inboxID, item:{type:"user", payload:{text,...}}}
+          const item = p.item;
+          if (!p.sessionID || item?.type !== "user") return;
+          const m = message(get(p.sessionID), "inbox:" + (p.inboxID || Math.random()));
+          m.role = "user";
+          m.parts.set("text", String(item.payload?.text ?? ""));
+          return;
+        }
+        case "session.step.started": {
+          // data {sessionID, assistantMessageID, ...} → この assistant 発話を現在位置に
+          if (!p.sessionID || !p.assistantMessageID) return;
+          message(get(p.sessionID), p.assistantMessageID).role = "assistant";
+          return;
+        }
+        case "session.text.ended": {
+          // data {sessionID, assistantMessageID, ordinal, text}（text ブロックの全文）
+          if (!p.sessionID || !p.assistantMessageID) return;
+          const m = message(get(p.sessionID), p.assistantMessageID);
+          m.role = "assistant";
+          m.parts.set(String(p.ordinal ?? m.parts.size), String(p.text ?? ""));
+          return;
+        }
+        case "session.execution.failed":
+        case "session.execution.interrupted": {
+          // 失敗／中断（Esc 等）は最後の assistant をエラー扱い＝続行判定しない
+          const s = sessions.get(p.sessionID);
+          if (!s) return;
+          for (const m of [...s.values()].reverse()) {
+            if (m.role === "assistant") {
+              m.error = true;
+              break;
+            }
+          }
+          return;
+        }
         default:
           return;
       }
@@ -203,7 +241,11 @@ function makeTracker(maxMsgs = MAX_MSGS_PER_SESSION) {
     summary(sid) {
       const s = sessions.get(sid);
       const list = [];
-      if (s) for (const m of s.values()) list.push({ role: m.role, error: m.error, text: [...m.parts.values()].join("\n") });
+      if (s)
+        for (const m of s.values()) {
+          const keys = [...m.parts.keys()].sort((a, b) => (Number(a) || 0) - (Number(b) || 0));
+          list.push({ role: m.role, error: m.error, text: keys.map((k) => m.parts.get(k)).join("\n") });
+        }
       return summarize(list);
     },
   };
@@ -218,9 +260,25 @@ async function setupV2(api) {
   const tracker = makeTracker();
   const busy = new Set();
   const TYPES = [
+    // SDK 形（session.idle + message.*）と 2.2.0 実バス形（session.execution.* など）の両方
     "session.created", "session.updated", "session.deleted", "session.idle",
     "message.updated", "message.part.updated", "message.removed",
+    "session.inbox.enqueued", "session.step.started", "session.text.ended",
+    "session.execution.succeeded", "session.execution.failed", "session.execution.interrupted",
   ];
+  const TURN_END = new Set(["session.idle", "session.execution.succeeded"]);
+  const promptSession = async (sid, text) => {
+    // 2.2.0: /api/session/{id}/prompt = {prompt:{text}, delivery}。古い形 {parts} へフォールバック。
+    try {
+      await api.session.prompt({ sessionID: sid, prompt: { text }, delivery: "queue" });
+    } catch (e1) {
+      try {
+        await api.session.prompt({ sessionID: sid, parts: [{ type: "text", text }] });
+      } catch (e2) {
+        log(`session.prompt 失敗 sid=${sid}: ${e1} / ${e2}`);
+      }
+    }
+  };
   const onIdle = async (sid, locDir) => {
     if (!sid || tracker.isChild(sid) || busy.has(sid)) return;
     busy.add(sid);
@@ -237,10 +295,8 @@ async function setupV2(api) {
       }
       const reason = await decide({ sessionID: sid, cwd: sess?.directory || locDir, summary: tracker.summary(sid) });
       if (reason) {
-        // prompt はターン完了まで返らないので待たない（イベント処理を塞がない）。
-        Promise.resolve(api.session.prompt({ sessionID: sid, parts: [{ type: "text", text: reason }] })).catch((e) =>
-          log(`session.prompt 失敗 sid=${sid}: ${e}`),
-        );
+        // prompt はターン完了まで返ることがあるので待たない（イベント処理を塞がない）。
+        void promptSession(sid, reason);
       }
     } catch (e) {
       log(`idle 処理失敗 sid=${sid}: ${e}`);
@@ -276,11 +332,11 @@ async function setupV2(api) {
         }
         if (!ev || !TYPES.includes(ev.type)) continue;
         tracker.apply(ev);
-        if (ev.type === "session.idle") {
+        if (TURN_END.has(ev.type)) {
           const p = ev.properties ?? ev.data ?? {};
           const sid = p.sessionID ?? p.id;
           const sm = tracker.summary(sid);
-          log(`idle sid=${sid} child=${tracker.isChild(sid)} assistant_len=${(sm.lastAssistant || "").length} active=${sm.stopHookActive} err=${sm.lastAssistantError}`);
+          log(`${ev.type} sid=${sid} child=${tracker.isChild(sid)} assistant_len=${(sm.lastAssistant || "").length} active=${sm.stopHookActive} err=${sm.lastAssistantError}`);
           onIdle(sid, ev.location?.directory);
         }
       }
