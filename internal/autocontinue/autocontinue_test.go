@@ -46,6 +46,8 @@ func TestJudgeRules(t *testing.T) {
 		{"push してよいですか？ は不可逆＝停止", "コミットしました。origin に push してよいですか？", "CONTINUE", nil, VerdictHuman, "rule:asks-irreversible"},
 		{"区切りの宣言でも再開に電源再投入が要るなら停止（ユーザー判断 v7）", "状態を整理しました。\n次回は「電源再投入 → 状態確認」から再開します。", "CONTINUE", nil, VerdictHuman, "rule:deferral-needs-physical"},
 		{"区切りの宣言（物理操作なし）は続行", "状態を整理しました。\n次回は静的解析の続きから再開します。", "HUMAN", nil, VerdictContinue, "rule:wrapup-deferral"},
+		{"ボタン操作の手順を頼む報告は待機中の説明が付いても停止（ユーザー判断 v9）", "セッションは待機中です。受付が開けば自動で進みます。\n中央○ 2秒 → 5秒後に ＋ ＋ − ＋ − − ＋ をお願いします。\n押せない場合は、このままタイムアウトしても影響ありません。", "CONTINUE", nil, VerdictHuman, "rule:asks-physical"},
+		{"長押しの依頼", "準備ができました。電源ボタンを 5 秒長押ししてください。", "CONTINUE", nil, VerdictHuman, "rule:asks-physical"},
 		{"技術用語の token を含む普通の問いは判定器へ", "token の有効期限は 1h でした。どの環境で検証しますか？", "CONTINUE", nil, VerdictContinue, "llm:3/3"},
 		{"普通の選択肢提示は判定器へ→CONTINUE", "方針は 1. A 2. B 3. C です。おすすめは 2。どれにしますか？", "CONTINUE", nil, VerdictContinue, "llm:3/3"},
 		{"判定器 DONE", "すべて完了しました。", "DONE\n", nil, VerdictDone, "llm:3/3"},
