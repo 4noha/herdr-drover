@@ -128,6 +128,8 @@ if (mode === "v1") {
     },
   };
   const dispose = await plugin.setup(api);
+  // 共有 service はプロジェクトごとに setup を重ねて呼ぶ（実測 3 回）。2 本目はループを張らない。
+  const dispose2 = await plugin.setup({ ...api, event: { subscribe: () => { throw new Error("second loop must not subscribe"); } } });
   // opencode 2.2.0 実測のバス形: {id, created, type, location:{directory}, data:{…}}。
   // 発話は session.inbox.enqueued（user）/ session.step.started + session.text.ended（assistant）、
   // ターン終了は session.execution.succeeded、中断は session.execution.interrupted。
@@ -156,7 +158,14 @@ if (mode === "v1") {
   push(bus("session.execution.succeeded", { sessionID: "ses_abort" }));
   push(bus("session.execution.succeeded", { sessionID: "ses_root" }));
   await new Promise((r) => setTimeout(r, 300));
+  dispose2();
   dispose();
+  // 1 本目を dispose した後は新しい setup がループを張れる（subscribe が呼ばれる）。
+  let resubscribed = false;
+  const d3 = await plugin.setup({ ...api, event: { subscribe: () => { resubscribed = true; return iterable; } } });
+  await new Promise((r) => setTimeout(r, 20));
+  calls.resubscribed = resubscribed;
+  d3();
 }
 await new Promise((r) => setTimeout(r, 100));
 console.log(JSON.stringify({ calls }));
@@ -195,6 +204,9 @@ console.log(JSON.stringify({ calls }));
 			t.Fatalf("[%s] prompt calls: %v", mode, prompts)
 		}
 		if mode == "v2" {
+			if calls["resubscribed"] != true {
+				t.Fatalf("[v2] dispose 後の再 setup でループが張られていない: %v", calls["resubscribed"])
+			}
 			b, _ := os.ReadFile(filepath.Join(dir, "plugin.log"))
 			if !strings.Contains(string(b), "event loop 開始") || !strings.Contains(string(b), "session.execution.succeeded sid=ses_root") {
 				t.Fatalf("[v2] プラグインログ:\n%s", b)

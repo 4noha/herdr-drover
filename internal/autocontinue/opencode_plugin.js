@@ -258,12 +258,32 @@ function makeTracker(maxMsgs = MAX_MSGS_PER_SESSION) {
   };
 }
 
+// 共有 background service はプロジェクト（directory）ごとにプラグインを別インスタンスで
+// setup する（2.2.0 実測: 再起動直後に 3 回 setup され、同じイベントが 3 ループに届いた＝
+// 放置すると 1 回の停止で 3 回「つづけて」が入る）。イベントはグローバルなので、
+// プロセスに 1 本だけループを持つ（globalThis の Symbol キーでモジュール多重読込も跨ぐ）。
+const SINGLETON = Symbol.for("herdr-drover.autocontinue.v2");
+
 async function setupV2(api) {
   if (typeof api?.event?.subscribe !== "function" || typeof api?.session?.prompt !== "function") {
     log(`setup(v2): API 不足 event=${typeof api?.event?.subscribe} session.prompt=${typeof api?.session?.prompt}`);
     return;
   }
+  const g = globalThis;
+  if (g[SINGLETON]) {
+    // 既に走っている: api だけ最新に差し替え（prompt は最新の api で出す）。
+    g[SINGLETON].api = api;
+    g[SINGLETON].refs += 1;
+    log(`setup(v2): 既存ループに相乗り（refs=${g[SINGLETON].refs}）`);
+    return () => {
+      const cur = g[SINGLETON];
+      if (cur) cur.refs -= 1;
+    };
+  }
   const ac = new AbortController();
+  const state = { api, refs: 1, ac };
+  g[SINGLETON] = state;
+  const current = () => g[SINGLETON]?.api ?? api;
   const tracker = makeTracker();
   const busy = new Set();
   const TYPES = [
@@ -287,7 +307,7 @@ async function setupV2(api) {
     const errs = [];
     for (const f of forms) {
       try {
-        await api.session.prompt(f);
+        await current().session.prompt(f);
         return;
       } catch (e) {
         errs.push(oneLine(e));
@@ -301,7 +321,7 @@ async function setupV2(api) {
     try {
       let sess;
       try {
-        sess = unwrap(await api.session.get({ sessionID: sid }));
+        sess = unwrap(await current().session.get({ sessionID: sid }));
       } catch (e) {
         log(`session.get 失敗 sid=${sid}: ${oneLine(e)}`);
       }
@@ -362,7 +382,11 @@ async function setupV2(api) {
       if (!ac.signal.aborted) log(`event loop 終了: ${e}`);
     }
   })();
-  return () => ac.abort();
+  return () => {
+    // 最初のインスタンスの dispose でループを止め、次の setup が新しく張れるようにする。
+    ac.abort();
+    if (g[SINGLETON] === state) delete g[SINGLETON];
+  };
 }
 
 // ---- v1: hooks オブジェクト（client.session.messages が使える） -----------------
