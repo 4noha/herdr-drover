@@ -57,11 +57,14 @@ v0.5.30 で**判定を経過時間ベースへ**変更し、**実 websocket 越�
   OFF で外す）。Ctrl+Alt+A は実機で動作確認済（ユーザー操作のログで確認）。
 - opencode: server プラグイン実装済（`internal/autocontinue/opencode_plugin.js`・実 node
   テスト）。**`auto install --agent opencode`（~/.config/opencode/plugins/ 書込）は classifier が
-  Unauthorized Persistence で止めるためユーザー実行**。実機 live 検証は設置後に
-  `herdr agent start … --kind opencode -- --standalone` で行う（background service は再起動か
-  `opencode reload` が要る）。
-- **残課題**: (1) opencode の実機 live 検証（上記）。(2) Web（devices/セッション一覧）からの pane 単位 on/off（遠隔命令化）。
-  (3) fleet 配信は release が要る＝ユーザー確認後。(4) 判定器は `claude -p`（Haiku・
+  Unauthorized Persistence で止めるためユーザー実行**。**実機で確認済**（2026-10-29・
+  `--standalone` の新 Tab で「次は…」→ `[semi-auto 1/3] つづけて` → `[semi-auto 2/3]` →
+  判定器 DONE で停止）。到達までに踏んだ罠は SPEC §2.6 の opencode 行（ローダーは
+  `default.setup(api)` のみ／イベントは内部バス形／`session.prompt` はフラット）。
+  background service への反映は service の再起動が要る（`opencode reload` はユーザー環境の
+  `opencode-openai-codex-auth` のローカル修正が v1 形の hooks を返すため落ちる＝別件）。
+- **残課題**: (1) Web（devices/セッション一覧）からの pane 単位 on/off（遠隔命令化）。
+  (2) fleet 配信は release が要る＝ユーザー確認後。(4) 判定器は `claude -p`（Haiku・
   4〜5s）＝各 PC に claude ログインが要る。無ければ常に停止側（ログに fallback）。
 
 ### 2026-10-29: Web viewer ワイヤ v2（元 pane 実サイズ observe＋履歴先送り）実装・ローカル反映済・fleet 未配信
