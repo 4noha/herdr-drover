@@ -249,7 +249,9 @@ async function setupV2(api) {
   (async () => {
     let events;
     try {
-      events = api.event.subscribe({ types: TYPES, signal: ac.signal });
+      // types フィルタは付けない（フィルタの形がバージョンで違っても取りこぼさない）。
+      // 全イベントを受けてここで絞る。
+      events = api.event.subscribe({ signal: ac.signal });
       if (events && typeof events.then === "function") events = await events;
     } catch (e) {
       log(`event.subscribe 失敗: ${e}`);
@@ -260,10 +262,23 @@ async function setupV2(api) {
       return;
     }
     log("setup(v2): event loop 開始");
+    let seen = 0;
     try {
-      for await (const ev of events) {
+      for await (const raw of events) {
+        // {type, properties} か {event:{type, properties}} のどちらでも受ける。
+        const ev = raw && typeof raw === "object" && !raw.type && raw.event ? raw.event : raw;
+        if (seen < 3) {
+          seen++;
+          log(`event[${seen}] ${JSON.stringify(raw).slice(0, 300)}`);
+        }
+        if (!ev || !TYPES.includes(ev.type)) continue;
         tracker.apply(ev);
-        if (ev?.type === "session.idle") onIdle(ev.properties?.sessionID);
+        if (ev.type === "session.idle") {
+          const sid = ev.properties?.sessionID;
+          const sm = tracker.summary(sid);
+          log(`idle sid=${sid} child=${tracker.isChild(sid)} assistant_len=${(sm.lastAssistant || "").length} active=${sm.stopHookActive} err=${sm.lastAssistantError}`);
+          onIdle(sid);
+        }
       }
     } catch (e) {
       if (!ac.signal.aborted) log(`event loop 終了: ${e}`);

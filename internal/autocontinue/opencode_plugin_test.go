@@ -182,8 +182,9 @@ console.log(JSON.stringify({ calls }));
 			t.Fatalf("[%s] prompt calls: %v", mode, prompts)
 		}
 		if mode == "v2" {
-			if ty, _ := calls["types"].([]any); len(ty) == 0 {
-				t.Fatalf("[v2] subscribe に types が渡っていない: %v", calls["types"])
+			b, _ := os.ReadFile(filepath.Join(dir, "plugin.log"))
+			if !strings.Contains(string(b), "event loop 開始") || !strings.Contains(string(b), "idle sid=ses_root") {
+				t.Fatalf("[v2] プラグインログ:\n%s", b)
 			}
 		}
 		// fake hook が受けた stdin（1 回だけ・root 分）。
