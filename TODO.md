@@ -40,13 +40,21 @@ v0.5.30 で**判定を経過時間ベースへ**変更し、**実 websocket 越�
   「つづけて」系。Codex は待ち中央値 6 分）。判定は 2 値（番号付き選択肢も「つづけて」で
   よい＝ユーザ自身がそうしている）。
 - 検証: 実 Claude Code 2.1.312 で `claude -p --settings` 経由の Stop フック契約を live で
-  確認（`TestLiveClaudeStopHook`・opt-in）。Codex の live 確認は `--dangerously-bypass-hook-
-  trust` が必要で未実施＝**実機で `/hooks` trust 後に動作確認が要る**（0.165.0 のバイナリに
-  `stop_hook_active`/`last_assistant_message` は存在）。
+  確認（`TestLiveClaudeStopHook`・opt-in）。**Codex も実機で確認済**（/hooks trust 後、
+  pane w1:p5B で「次はステップ 5 です」→ `Blocked by hook └ [semi-auto 1/3] つづけて` →
+  続行 → 次の停止は判定器 HUMAN で停止）。
+- ⚠ **Codex 0.165 のフックは共有 app-server デーモン内で走る**＝`HERDR_PANE_ID` も
+  `HERDR_SOCKET_PATH` もデーモン起動時の値（別 pane・隔離テストの /tmp socket）が届く。
+  pane は cwd で `agent.list` から一意に引き、socket は既定パスへフォールバック（SPEC §2.6）。
+  herdr の codex integration（SessionStart→`pane.report_agent_session`）も同じ理由で
+  codex pane に `agent_session` が付いていない可能性が高い（`herdr agent list` 実測:
+  codex 行に agent_session 無し）＝BUG-15 と併せて herdr 側の課題。
 - このMacの状態: plugin 再リンク済（action `auto-toggle`）・`~/.config/herdr/config.toml` に
   `[[keys.command]] ctrl+alt+a` 追加＋reload 済（backup `.bak-2026-10-29-autokey`）。
   **`herdr-drover auto install`（~/.claude/settings.json 書込）は auto mode の classifier が
   Self-Modification で止めるためユーザー実行**。codex は `/hooks` trust も要る。
+- 「いま auto か分からない」対応: ON の pane の **Tab ラベルに「⟳ 」**（`tab.rename`・
+  OFF で外す）。Ctrl+Alt+A は実機で動作確認済（ユーザー操作のログで確認）。
 - **残課題**: (1) opencode 対応（Stop フック無し。server プラグイン `session.idle` →
   `stop-hook opencode` → session id→pane は herdr `agent.list` の `agent_session.value`
   → `client.session.prompt`。`opencode run --standalone` の隔離実行が応答せず live 検証は

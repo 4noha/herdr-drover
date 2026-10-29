@@ -15,6 +15,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/4noha/herdr-drover/internal/herdrapi"
 )
 
 func fakeJudge(reply string, err error) *Judge {
@@ -447,5 +449,51 @@ func TestRunExecStripsHerdrEnv(t *testing.T) {
 	}
 	if _, err := runExec(context.Background(), []string{"sh", "-c", "echo oops >&2; exit 3"}, t.TempDir()); err == nil || !strings.Contains(err.Error(), "oops") {
 		t.Fatalf("stderr が error に載らない: %v", err)
+	}
+}
+
+// Codex はフックが共有 app-server 内で走り HERDR_PANE_ID が信用できない（実測）ため、
+// cwd で herdr の agent 一覧から一意に引く。↗窓は除外・曖昧と該当なしは空＋理由。
+func TestResolvePaneByCwd(t *testing.T) {
+	list := func() ([]herdrapi.AgentInfo, error) {
+		return []herdrapi.AgentInfo{
+			{Agent: "codex", PaneID: "w1:p5B", Cwd: "/u/semi-auto-test", ForegroundCwd: "/u/semi-auto-test"},
+			{Agent: "claude", PaneID: "w1:p5A", Cwd: "/u/semi-auto-test", ForegroundCwd: "/u/semi-auto-test"},
+			{Agent: "codex", PaneID: "w22:p23", Cwd: "/u/hr01", ForegroundCwd: "/u/hr01"},
+			{Agent: "codex", PaneID: "w22:p24", Cwd: "/u/hr01", ForegroundCwd: "/u/hr01"},
+			{Agent: "codex", PaneID: "w31:p19", Cwd: "/Users/x/.herdr-drover", ForegroundCwd: "/Users/x/.herdr-drover",
+				Tokens: map[string]string{"drover_inj_sid": "w29:pN", "drover_inj_cwd": "/u/semi-auto-test"}},
+			{Agent: "codex", PaneID: "w9:p1", Cwd: "/u/sub", ForegroundCwd: ""},
+		}, nil
+	}
+	cases := []struct{ cwd, pane, via string }{
+		{"/u/semi-auto-test", "w1:p5B", "cwd"},
+		{"/u/sub", "w9:p1", "cwd"}, // foreground_cwd 無しは cwd で
+		{"/u/hr01", "", "cwd:曖昧(2件 w22:p23,w22:p24)"},
+		{"/u/none", "", "cwd:該当なし"},
+		{"", "", "cwd:empty"},
+	}
+	for _, c := range cases {
+		pane, via := ResolvePaneByCwd("codex", c.cwd, list)
+		if pane != c.pane || via != c.via {
+			t.Errorf("cwd=%q: got (%q,%q) want (%q,%q)", c.cwd, pane, via, c.pane, c.via)
+		}
+	}
+	if pane, via := ResolvePaneByCwd("codex", "/u/x", func() ([]herdrapi.AgentInfo, error) { return nil, errors.New("down") }); pane != "" || !strings.HasPrefix(via, "cwd:agent.list失敗") {
+		t.Errorf("list error: (%q,%q)", pane, via)
+	}
+}
+
+func TestHookLogsUnresolvedPane(t *testing.T) {
+	h, st := newTestHook(t, fakeJudge("CONTINUE", nil))
+	st.SaveConfig(Config{Enabled: boolp(true)})
+	h.Agent, h.PaneID, h.PaneVia = "codex", "", "cwd:曖昧(2件 a,b)"
+	res, err := h.Run(context.Background(), Input{SessionID: "s", Cwd: "/u/hr01", LastAssistantMessage: strp("次はステップ 2")})
+	if err != nil || res.Output != nil || res.Skipped != "no-pane" {
+		t.Fatalf("res=%+v err=%v", res, err)
+	}
+	b, _ := os.ReadFile(st.LogPath())
+	if !strings.Contains(string(b), "codex pane 未解決（cwd:曖昧(2件 a,b)）cwd=/u/hr01") {
+		t.Fatalf("log:\n%s", b)
 	}
 }

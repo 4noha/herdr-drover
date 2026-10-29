@@ -8,6 +8,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/4noha/herdr-drover/internal/herdrapi"
 )
 
 // Input は Stop フックの stdin JSON（Claude Code / Codex 共通部分。両者とも
@@ -34,8 +36,9 @@ type Output struct {
 type Hook struct {
 	Store *Store
 	Agent string
-	// PaneID は HERDR_PANE_ID（herdr pane 外なら空＝何もしない）。
-	PaneID string
+	// PaneID は対象 pane（空＝何もしない）。PaneVia はその出どころ（env / cwd:…）＝ログ用。
+	PaneID  string
+	PaneVia string
 	// NewJudge は Effective.JudgeCmd から判定器を作る seam（テストは fake）。
 	NewJudge func(cmd []string, dir string) *Judge
 	Now      func() time.Time
@@ -60,13 +63,25 @@ type Result struct {
 func (h *Hook) Run(ctx context.Context, in Input) (Result, error) {
 	now := h.Now()
 	res := Result{}
-	if h.PaneID == "" {
-		res.Skipped = "no-pane"
-		return res, nil
-	}
 	cfg, err := h.Store.LoadConfig()
 	if err != nil {
 		return res, fmt.Errorf("config 読取: %w", err)
+	}
+	if cfg.Debug {
+		n := 0
+		if in.LastAssistantMessage != nil {
+			n = len(*in.LastAssistantMessage)
+		}
+		_ = h.Store.AppendLog(now, fmt.Sprintf("debug: %s invoked pane=%q via=%s sid=%s active=%t event=%s msg_len=%d cwd=%s", h.Agent, h.PaneID, h.PaneVia, in.SessionID, in.StopHookActive, in.HookEventName, n, in.Cwd))
+	}
+	if h.PaneID == "" {
+		res.Skipped = "no-pane"
+		if h.PaneVia != "" && h.PaneVia != "env" {
+			// cwd 解決に失敗した codex 等は silent にしない（env 無しの素の claude -p は
+			// 対象外なので書かない）。
+			_ = h.Store.AppendLog(now, fmt.Sprintf("%s pane 未解決（%s）cwd=%s sid=%s→何もしない", h.Agent, h.PaneVia, in.Cwd, in.SessionID))
+		}
+		return res, nil
 	}
 	pane, found, err := h.Store.LoadPane(h.PaneID)
 	if err != nil {
@@ -107,6 +122,9 @@ func (h *Hook) Run(ctx context.Context, in Input) (Result, error) {
 		msg = *in.LastAssistantMessage
 	}
 	base := fmt.Sprintf("%s pane=%s sid=%s active=%t count=%d/%d grant=%t", h.Agent, h.PaneID, in.SessionID, in.StopHookActive, cnt.Count, cap, grant)
+	if h.PaneVia != "" && h.PaneVia != "env" {
+		base += " via=" + h.PaneVia
+	}
 	if cnt.Count >= cap {
 		res.Count = cnt.Count
 		res.Skipped = "cap"
@@ -167,7 +185,14 @@ func RunStopHook(agent string, stdin io.Reader, stdout, stderr io.Writer, getenv
 			return 0
 		}
 	}
-	h := &Hook{Store: st, Agent: agent, PaneID: getenv("HERDR_PANE_ID"), NewJudge: NewJudge, Now: time.Now}
+	pane, via := getenv("HERDR_PANE_ID"), "env"
+	if agent == "codex" {
+		// ⚠ Codex 0.165 はフックを**共有の app-server デーモン**内で実行する（実測
+		// 2026-10-29: 別 pane の codex の Stop で HERDR_PANE_ID が最初に app-server を
+		// 起動した pane のまま届いた）。env は信用せず cwd で herdr の agent 一覧から引く。
+		pane, via = ResolvePaneByCwd(agent, in.Cwd, herdrAgentList)
+	}
+	h := &Hook{Store: st, Agent: agent, PaneID: pane, PaneVia: via, NewJudge: NewJudge, Now: time.Now}
 	res, err := h.Run(context.Background(), in)
 	if err != nil {
 		_ = st.AppendLog(time.Now(), fmt.Sprintf("%s pane=%s 実行失敗→停止: %v", agent, h.PaneID, err))
@@ -183,3 +208,54 @@ func RunStopHook(agent string, stdin io.Reader, stdout, stderr io.Writer, getenv
 
 // osGetenv は RunStopHook の既定 getenv。
 func OSGetenv(k string) string { return os.Getenv(k) }
+
+// herdrAgentList は実 herdr の agent.list。socket は env HERDR_SOCKET_PATH > 既定の順で
+// 試し、env の先に繋がらなければ既定パスへ**フォールバック**する（実測 2026-10-29:
+// Codex の共有 app-server デーモンの env には隔離テスト用の /tmp socket が残っていた）。
+func herdrAgentList() ([]herdrapi.AgentInfo, error) {
+	agents, err := herdrapi.New("").AgentList()
+	if err == nil {
+		return agents, nil
+	}
+	def := herdrapi.DefaultSocketPath()
+	if herdrapi.ResolveSocketPath("") == def {
+		return nil, err
+	}
+	agents, err2 := herdrapi.New(def).AgentList()
+	if err2 != nil {
+		return nil, fmt.Errorf("%v; 既定 socket も失敗: %w", err, err2)
+	}
+	return agents, nil
+}
+
+// ResolvePaneByCwd は「種別 agent で cwd が一致する pane」を herdr の agent 一覧から
+// **一意に**引く。↗窓（注入 pane・tokens に drover_inj_sid）は除外。0 件・複数件は
+// 空を返し、via にその理由を入れる（推測で選ばない＝鉄則 3）。
+func ResolvePaneByCwd(agent, cwd string, list func() ([]herdrapi.AgentInfo, error)) (pane, via string) {
+	if cwd == "" {
+		return "", "cwd:empty"
+	}
+	agents, err := list()
+	if err != nil {
+		return "", "cwd:agent.list失敗(" + err.Error() + ")"
+	}
+	var hits []string
+	for _, a := range agents {
+		if a.Agent != agent || a.PaneID == "" {
+			continue
+		}
+		if a.Tokens["drover_inj_sid"] != "" {
+			continue
+		}
+		if a.ForegroundCwd == cwd || (a.ForegroundCwd == "" && a.Cwd == cwd) {
+			hits = append(hits, a.PaneID)
+		}
+	}
+	switch len(hits) {
+	case 1:
+		return hits[0], "cwd"
+	case 0:
+		return "", "cwd:該当なし"
+	}
+	return "", fmt.Sprintf("cwd:曖昧(%d件 %s)", len(hits), strings.Join(hits, ","))
+}

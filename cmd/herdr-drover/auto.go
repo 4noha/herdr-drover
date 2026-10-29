@@ -15,6 +15,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -178,6 +179,7 @@ func autoSet(st *autocontinue.Store, on bool, args []string, w io.Writer) error 
 		return err
 	}
 	fmt.Fprintf(w, "auto: pane %s を enabled=%t にしました（grant=%t phrase=%q）\n", *pane, on, p.Grant, p.Phrase)
+	autoTabMark(herdrapi.New(""), *pane, on, w)
 	if on {
 		home, err := os.UserHomeDir()
 		if err == nil {
@@ -387,8 +389,57 @@ func autoToggle(st *autocontinue.Store, args []string, w io.Writer) error {
 	}
 	fmt.Fprintf(w, "auto: %s — %s\n", title, body)
 	_ = st.AppendLog(time.Now(), fmt.Sprintf("toggle pane=%s → %s", *pane, state))
+	autoTabMark(api, *pane, on, w)
 	if _, err := api.Call("notification.show", map[string]any{"title": title, "body": body}); err != nil {
 		fmt.Fprintf(w, "auto: herdr 通知に失敗（切替自体は完了）: %v\n", err)
 	}
 	return nil
+}
+
+// autoTabMark は Tab ラベルに ON 印「⟳ 」を付け外しする（トーストは消えるので
+// 「いま auto か」が見えるようにする恒久表示）。pane.get→tab_id→tab.get→tab.rename。
+// herdr に届かない時は警告のみ（切替自体は成立）。
+const autoTabPrefix = "⟳ "
+
+func autoTabMark(api *herdrapi.Client, pane string, on bool, w io.Writer) {
+	raw, err := api.Call("pane.get", map[string]any{"pane_id": pane})
+	if err != nil {
+		fmt.Fprintf(w, "auto: Tab 印の更新に失敗（pane.get）: %v\n", err)
+		return
+	}
+	var pg struct {
+		Pane struct {
+			TabID string `json:"tab_id"`
+		} `json:"pane"`
+	}
+	if err := json.Unmarshal(raw, &pg); err != nil || pg.Pane.TabID == "" {
+		fmt.Fprintf(w, "auto: Tab 印の更新に失敗（pane.get 応答に tab_id が無い）\n")
+		return
+	}
+	raw, err = api.Call("tab.get", map[string]any{"tab_id": pg.Pane.TabID})
+	if err != nil {
+		fmt.Fprintf(w, "auto: Tab 印の更新に失敗（tab.get）: %v\n", err)
+		return
+	}
+	var tg struct {
+		Tab struct {
+			Label string `json:"label"`
+		} `json:"tab"`
+	}
+	if err := json.Unmarshal(raw, &tg); err != nil {
+		fmt.Fprintf(w, "auto: Tab 印の更新に失敗（tab.get 応答）: %v\n", err)
+		return
+	}
+	label := strings.TrimPrefix(tg.Tab.Label, autoTabPrefix)
+	if on {
+		label = autoTabPrefix + label
+	}
+	if label == tg.Tab.Label {
+		return
+	}
+	if _, err := api.Call("tab.rename", map[string]any{"tab_id": pg.Pane.TabID, "label": label}); err != nil {
+		fmt.Fprintf(w, "auto: Tab 印の更新に失敗（tab.rename）: %v\n", err)
+		return
+	}
+	fmt.Fprintf(w, "auto: Tab ラベル %q → %q\n", tg.Tab.Label, label)
 }

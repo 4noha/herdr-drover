@@ -53,6 +53,10 @@ func New(socketPath string) *Client {
 // ResolveSocketPath は New と同じ解決規則を単体で提供する（診断表示用）。
 // 既定パスは OS 依存（unix: ~/.config/herdr/herdr.sock、windows:
 // %APPDATA%\herdr\herdr.sock）＝defaultSocketPath（dial_{unix,windows}.go）。
+// DefaultSocketPath は env を見ない既定の socket パス（共有デーモン等、env が信用
+// できないプロセスからのフォールバック用。autocontinue の Codex 経路が使う）。
+func DefaultSocketPath() string { return defaultSocketPath() }
+
 func ResolveSocketPath(explicit string) string {
 	if explicit != "" {
 		return explicit

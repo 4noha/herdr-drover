@@ -62,6 +62,8 @@ type Config struct {
 	GrantCap int `json:"grant_cap,omitempty"`
 	// JudgeCmd は判定器コマンド（argv）。空なら DefaultJudgeCmd。
 	JudgeCmd []string `json:"judge_cmd,omitempty"`
+	// Debug はフック呼出を**全件**（OFF の pane・pane 外も）ログに残す（切り分け用）。
+	Debug bool `json:"debug,omitempty"`
 }
 
 // PaneSetting は pane 単位の設定（<dir>/panes/<pane>.json）。

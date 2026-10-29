@@ -405,7 +405,7 @@ herdr-drover auto judge < msg.txt    # 判定器の動作確認
 herdr-drover auto off / uninstall
 ```
 
-- 続行は画面に `[semi-auto n/cap] つづけて` と出る。1 回のユーザ入力につき 3 回
+- ON の pane は Tab ラベルの先頭に「⟳ 」が付く（OFF で消える）。続行は画面に `[semi-auto n/cap] つづけて` と出る。1 回のユーザ入力につき 3 回
   （裁量あり 10 回）で必ず止まり、そこからは通常どおり通知が飛ぶ。
 - 自動続行した停止は push／webhook 通知を出さない（本当に止まった時だけ通知）。
 - 判定は `~/.herdr-drover/autocontinue/autocontinue.log` に 1 行ずつ残る。
