@@ -70,8 +70,7 @@ func TestOpencodePluginWithNode(t *testing.T) {
 	os.WriteFile(hook, []byte("#!/bin/sh\ncat >> '"+rec+"'; echo >> '"+rec+"'\n[ \"$FAKE_DECISION\" = block ] && printf '%s\\n' '{\"decision\":\"block\",\"reason\":\"[semi-auto 1/3] つづけて\"}'\nexit 0\n"), 0o755)
 	harness := filepath.Join(dir, "run.mjs")
 	os.WriteFile(harness, []byte(`
-import plugin, { collect } from "`+plugin+`";
-const calls = { get: [], messages: [], prompt: [] };
+import plugin from "`+plugin+`";
 const sessions = {
   "ses_root": { id: "ses_root", directory: "/u/proj" },
   "ses_child": { id: "ses_child", directory: "/u/proj", parentID: "ses_root" },
@@ -89,26 +88,70 @@ const messages = {
     { info: { role: "assistant", error: { name: "MessageAbortedError" } }, parts: [{ type: "text", text: "途中" }] },
   ],
 };
-const client = {
-  session: {
-    get: async ({ path }) => { calls.get.push(path.id); return { data: sessions[path.id] }; },
-    messages: async ({ path }) => { calls.messages.push(path.id); return { data: messages[path.id] || [] }; },
-    prompt: async ({ path, body }) => { calls.prompt.push({ id: path.id, text: body.parts[0].text }); return { data: {} }; },
-  },
-  app: { log: async () => ({}) },
-};
-const hooks = await plugin.server({ client, directory: "/u/server" });
-await hooks.event({ event: { type: "session.updated", properties: { info: { id: "ses_child", parentID: "ses_root" } } } });
-await hooks.event({ event: { type: "session.idle", properties: { sessionID: "ses_child" } } });
-await hooks.event({ event: { type: "session.idle", properties: { sessionID: "ses_abort" } } });
-await hooks.event({ event: { type: "session.idle", properties: { sessionID: "ses_root" } } });
-await new Promise((r) => setTimeout(r, 50));
-const c = collect(messages["ses_root"]);
-console.log(JSON.stringify({ calls, collect: c }));
+const mode = process.env.MODE;
+const calls = { get: [], messages: [], prompt: [] };
+if (mode === "v1") {
+  const client = {
+    session: {
+      get: async ({ path }) => { calls.get.push(path.id); return { data: sessions[path.id] }; },
+      messages: async ({ path }) => { calls.messages.push(path.id); return { data: messages[path.id] || [] }; },
+      prompt: async ({ path, body }) => { calls.prompt.push({ id: path.id, text: body.parts[0].text }); return { data: {} }; },
+    },
+    app: { log: async () => ({}) },
+  };
+  const hooks = await plugin.server({ client, directory: "/u/server" });
+  await hooks.event({ event: { type: "session.updated", properties: { info: { id: "ses_child", parentID: "ses_root" } } } });
+  await hooks.event({ event: { type: "session.idle", properties: { sessionID: "ses_child" } } });
+  await hooks.event({ event: { type: "session.idle", properties: { sessionID: "ses_abort" } } });
+  await hooks.event({ event: { type: "session.idle", properties: { sessionID: "ses_root" } } });
+} else {
+  // v2: event.subscribe は AsyncIterable。messages はイベントから組み立てさせる。
+  const queue = [];
+  let wake = null;
+  let closed = false;
+  const push = (ev) => { queue.push(ev); if (wake) { const w = wake; wake = null; w(); } };
+  const iterable = {
+    [Symbol.asyncIterator]() {
+      return { next: async () => {
+        while (queue.length === 0 && !closed) await new Promise((r) => (wake = r));
+        if (queue.length === 0) return { done: true, value: undefined };
+        return { done: false, value: queue.shift() };
+      } };
+    },
+  };
+  const api = {
+    event: { subscribe: ({ types, signal }) => { calls.types = types; signal?.addEventListener("abort", () => { closed = true; push(undefined); }); return iterable; } },
+    session: {
+      get: async ({ sessionID }) => { calls.get.push(sessionID); return sessions[sessionID]; },
+      prompt: async ({ sessionID, parts }) => { calls.prompt.push({ id: sessionID, text: parts[0].text }); return {}; },
+    },
+  };
+  const dispose = await plugin.setup(api);
+  let n = 0;
+  const feed = (sid, list) => {
+    for (const m of list) {
+      const id = "msg_" + (++n);
+      push({ type: "message.updated", properties: { info: { id, sessionID: sid, role: m.info.role, error: m.info.error } } });
+      let k = 0;
+      for (const p of m.parts) push({ type: "message.part.updated", properties: { part: { ...p, id: id + "_p" + (++k), sessionID: sid, messageID: id } } });
+    }
+  };
+  push({ type: "session.created", properties: { info: { id: "ses_child", parentID: "ses_root" } } });
+  feed("ses_root", messages["ses_root"]);
+  feed("ses_abort", messages["ses_abort"]);
+  push({ type: "session.idle", properties: { sessionID: "ses_child" } });
+  push({ type: "session.idle", properties: { sessionID: "ses_abort" } });
+  push({ type: "session.idle", properties: { sessionID: "ses_root" } });
+  await new Promise((r) => setTimeout(r, 300));
+  dispose();
+}
+await new Promise((r) => setTimeout(r, 100));
+console.log(JSON.stringify({ calls }));
 `), 0o644)
-	run := func(decision string) map[string]any {
+	run := func(mode, decision string) map[string]any {
 		cmd := exec.Command(node, harness)
-		cmd.Env = append(os.Environ(), "HERDR_DROVER_BIN="+hook, "FAKE_DECISION="+decision)
+		cmd.Env = append(os.Environ(), "HERDR_DROVER_BIN="+hook, "FAKE_DECISION="+decision, "MODE="+mode,
+			"HERDR_DROVER_AUTO_PLUGIN_LOG="+filepath.Join(dir, "plugin.log"))
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("node: %v\n%s", err, out)
@@ -125,40 +168,44 @@ console.log(JSON.stringify({ calls, collect: c }));
 		}
 		return res
 	}
-	os.Remove(rec)
-	res := run("block")
-	calls := res["calls"].(map[string]any)
-	// 子セッションは get すら呼ばず無視、abort は messages まで見て何もしない。
-	if gets := calls["get"].([]any); len(gets) != 2 || gets[0] != "ses_abort" || gets[1] != "ses_root" {
-		t.Fatalf("get calls: %v", gets)
-	}
-	prompts := calls["prompt"].([]any)
-	if len(prompts) != 1 || prompts[0].(map[string]any)["id"] != "ses_root" || prompts[0].(map[string]any)["text"] != "[semi-auto 1/3] つづけて" {
-		t.Fatalf("prompt calls: %v", prompts)
-	}
-	col := res["collect"].(map[string]any)
-	if col["lastAssistant"] != "途中です。次は検証です。" || col["stopHookActive"] != true || col["lastHuman"] != "改善を続けてください" {
-		t.Fatalf("collect: %v", col)
-	}
-	// fake hook が受けた stdin（1 回だけ・root 分）。
-	b, _ := os.ReadFile(rec)
-	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
-	if len(lines) != 1 {
-		t.Fatalf("hook 呼出回数=%d want 1:\n%s", len(lines), b)
-	}
-	var in Input
-	if err := json.Unmarshal([]byte(lines[0]), &in); err != nil {
-		t.Fatal(err)
-	}
-	if in.SessionID != "ses_root" || in.Cwd != "/u/proj" || !in.StopHookActive || in.LastAssistantMessage == nil ||
-		*in.LastAssistantMessage != "途中です。次は検証です。" || in.LastUserMessage == nil || *in.LastUserMessage != "改善を続けてください" {
-		t.Fatalf("hook stdin: %+v", in)
-	}
-	// 出力なし（停止）なら prompt しない。
-	os.Remove(rec)
-	res = run("none")
-	if n := len(res["calls"].(map[string]any)["prompt"].([]any)); n != 0 {
-		t.Fatalf("停止側なのに prompt %d 回", n)
+	for _, mode := range []string{"v1", "v2"} {
+		os.Remove(rec)
+		res := run(mode, "block")
+		calls := res["calls"].(map[string]any)
+		// 子セッションは get すら呼ばず無視、abort は見て何もしない、root は prompt。
+		gets := calls["get"].([]any)
+		if len(gets) != 2 || gets[0] != "ses_abort" || gets[1] != "ses_root" {
+			t.Fatalf("[%s] get calls: %v", mode, gets)
+		}
+		prompts := calls["prompt"].([]any)
+		if len(prompts) != 1 || prompts[0].(map[string]any)["id"] != "ses_root" || prompts[0].(map[string]any)["text"] != "[semi-auto 1/3] つづけて" {
+			t.Fatalf("[%s] prompt calls: %v", mode, prompts)
+		}
+		if mode == "v2" {
+			if ty, _ := calls["types"].([]any); len(ty) == 0 {
+				t.Fatalf("[v2] subscribe に types が渡っていない: %v", calls["types"])
+			}
+		}
+		// fake hook が受けた stdin（1 回だけ・root 分）。
+		b, _ := os.ReadFile(rec)
+		lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+		if len(lines) != 1 {
+			t.Fatalf("[%s] hook 呼出回数=%d want 1:\n%s", mode, len(lines), b)
+		}
+		var in Input
+		if err := json.Unmarshal([]byte(lines[0]), &in); err != nil {
+			t.Fatal(err)
+		}
+		if in.SessionID != "ses_root" || in.Cwd != "/u/proj" || !in.StopHookActive || in.LastAssistantMessage == nil ||
+			*in.LastAssistantMessage != "途中です。次は検証です。" || in.LastUserMessage == nil || *in.LastUserMessage != "改善を続けてください" {
+			t.Fatalf("[%s] hook stdin: %+v", mode, in)
+		}
+		// 出力なし（停止）なら prompt しない。
+		os.Remove(rec)
+		res = run(mode, "none")
+		if n := len(res["calls"].(map[string]any)["prompt"].([]any)); n != 0 {
+			t.Fatalf("[%s] 停止側なのに prompt %d 回", mode, n)
+		}
 	}
 }
 
