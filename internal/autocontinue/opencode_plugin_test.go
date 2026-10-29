@@ -123,8 +123,8 @@ if (mode === "v1") {
     event: { subscribe: ({ types, signal }) => { calls.types = types; signal?.addEventListener("abort", () => { closed = true; push(undefined); }); return iterable; } },
     session: {
       get: async ({ sessionID }) => { calls.get.push(sessionID); const { directory, ...rest } = sessions[sessionID]; return rest; },
-      // 2.2.0 の形 {prompt:{text}, delivery} だけ受け、旧形 {parts} は拒否する。
-      prompt: async ({ sessionID, prompt, parts }) => { if (!prompt) throw new Error("parts form not accepted"); calls.prompt.push({ id: sessionID, text: prompt.text, delivery: "queue" }); return {}; },
+      // 2.2.0 の形 {sessionID, text, delivery} だけ受け、他の形は SchemaError 風に拒否する。
+      prompt: async ({ sessionID, text, delivery, prompt, parts }) => { if (typeof text !== "string" || prompt || parts) throw new Error("SchemaError(Missing key\n  text)"); calls.prompt.push({ id: sessionID, text, delivery }); return {}; },
     },
   };
   const dispose = await plugin.setup(api);

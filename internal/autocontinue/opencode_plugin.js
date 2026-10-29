@@ -274,17 +274,26 @@ async function setupV2(api) {
     "session.execution.succeeded", "session.execution.failed", "session.execution.interrupted",
   ];
   const TURN_END = new Set(["session.idle", "session.execution.succeeded"]);
+  const oneLine = (e) => String(e).replace(/\s+/g, " ").slice(0, 300);
   const promptSession = async (sid, text) => {
-    // 2.2.0: /api/session/{id}/prompt = {prompt:{text}, delivery}。古い形 {parts} へフォールバック。
-    try {
-      await api.session.prompt({ sessionID: sid, prompt: { text }, delivery: "queue" });
-    } catch (e1) {
+    // 2.2.0 実測: Z API の session.prompt は /api/session/:sessionID/prompt の payload を
+    // フラットに受ける＝{sessionID, text, delivery}（id/files/agents/skills/metadata/resume は任意）。
+    // 他バージョン向けに {prompt:{text}} と {parts} へ順にフォールバック。
+    const forms = [
+      { sessionID: sid, text, delivery: "queue" },
+      { sessionID: sid, prompt: { text }, delivery: "queue" },
+      { sessionID: sid, parts: [{ type: "text", text }] },
+    ];
+    const errs = [];
+    for (const f of forms) {
       try {
-        await api.session.prompt({ sessionID: sid, parts: [{ type: "text", text }] });
-      } catch (e2) {
-        log(`session.prompt 失敗 sid=${sid}: ${e1} / ${e2}`);
+        await api.session.prompt(f);
+        return;
+      } catch (e) {
+        errs.push(oneLine(e));
       }
     }
+    log(`session.prompt 失敗 sid=${sid}: ${errs.join(" | ")}`);
   };
   const onIdle = async (sid, locDir) => {
     if (!sid || tracker.isChild(sid) || busy.has(sid)) return;
@@ -294,7 +303,7 @@ async function setupV2(api) {
       try {
         sess = unwrap(await api.session.get({ sessionID: sid }));
       } catch (e) {
-        log(`session.get 失敗 sid=${sid}: ${e}`);
+        log(`session.get 失敗 sid=${sid}: ${oneLine(e)}`);
       }
       if (sess?.parentID) {
         tracker.markChild(sid, sess.parentID);
