@@ -127,21 +127,24 @@ if (mode === "v1") {
     },
   };
   const dispose = await plugin.setup(api);
+  // opencode 2.2.0 実測のバス形: {id, created, type, location:{directory}, data:{…}}
+  const bus = (type, data) => ({ id: "evt_" + Math.random(), created: Date.now(), type, location: { directory: "/u/proj" }, data });
   let n = 0;
   const feed = (sid, list) => {
     for (const m of list) {
       const id = "msg_" + (++n);
-      push({ type: "message.updated", properties: { info: { id, sessionID: sid, role: m.info.role, error: m.info.error } } });
+      push(bus("message.updated", { info: { id, sessionID: sid, role: m.info.role, error: m.info.error } }));
       let k = 0;
-      for (const p of m.parts) push({ type: "message.part.updated", properties: { part: { ...p, id: id + "_p" + (++k), sessionID: sid, messageID: id } } });
+      for (const p of m.parts) push(bus("message.part.updated", { part: { ...p, id: id + "_p" + (++k), sessionID: sid, messageID: id } }));
     }
   };
-  push({ type: "session.created", properties: { info: { id: "ses_child", parentID: "ses_root" } } });
+  push(bus("integration.updated", {}));
+  push(bus("session.created", { info: { id: "ses_child", parentID: "ses_root" } }));
   feed("ses_root", messages["ses_root"]);
   feed("ses_abort", messages["ses_abort"]);
-  push({ type: "session.idle", properties: { sessionID: "ses_child" } });
-  push({ type: "session.idle", properties: { sessionID: "ses_abort" } });
-  push({ type: "session.idle", properties: { sessionID: "ses_root" } });
+  push(bus("session.idle", { sessionID: "ses_child" }));
+  push(bus("session.idle", { sessionID: "ses_abort" }));
+  push(bus("session.idle", { sessionID: "ses_root" }));
   await new Promise((r) => setTimeout(r, 300));
   dispose();
 }
@@ -183,7 +186,7 @@ console.log(JSON.stringify({ calls }));
 		}
 		if mode == "v2" {
 			b, _ := os.ReadFile(filepath.Join(dir, "plugin.log"))
-			if !strings.Contains(string(b), "event loop 開始") || !strings.Contains(string(b), "idle sid=ses_root") {
+			if !strings.Contains(string(b), "event loop 開始") || !strings.Contains(string(b), "idle sid=ses_root") || !strings.Contains(string(b), "event type=session.idle") {
 				t.Fatalf("[v2] プラグインログ:\n%s", b)
 			}
 		}

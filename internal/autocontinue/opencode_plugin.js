@@ -157,7 +157,9 @@ function makeTracker(maxMsgs = MAX_MSGS_PER_SESSION) {
   return {
     apply(ev) {
       const t = ev?.type;
-      const p = ev?.properties ?? {};
+      // v2 のバス（実測 2.2.0）は {type, location:{directory}, data:{…}}、SDK 型は
+      // {type, properties:{…}}。どちらでも受ける。
+      const p = ev?.properties ?? ev?.data ?? {};
       switch (t) {
         case "session.created":
         case "session.updated": {
@@ -219,7 +221,7 @@ async function setupV2(api) {
     "session.created", "session.updated", "session.deleted", "session.idle",
     "message.updated", "message.part.updated", "message.removed",
   ];
-  const onIdle = async (sid) => {
+  const onIdle = async (sid, locDir) => {
     if (!sid || tracker.isChild(sid) || busy.has(sid)) return;
     busy.add(sid);
     try {
@@ -233,7 +235,7 @@ async function setupV2(api) {
         tracker.markChild(sid, sess.parentID);
         return;
       }
-      const reason = await decide({ sessionID: sid, cwd: sess?.directory, summary: tracker.summary(sid) });
+      const reason = await decide({ sessionID: sid, cwd: sess?.directory || locDir, summary: tracker.summary(sid) });
       if (reason) {
         // prompt はターン完了まで返らないので待たない（イベント処理を塞がない）。
         Promise.resolve(api.session.prompt({ sessionID: sid, parts: [{ type: "text", text: reason }] })).catch((e) =>
@@ -262,22 +264,24 @@ async function setupV2(api) {
       return;
     }
     log("setup(v2): event loop 開始");
-    let seen = 0;
+    const seenTypes = new Set();
     try {
       for await (const raw of events) {
-        // {type, properties} か {event:{type, properties}} のどちらでも受ける。
+        // {type, properties} / {type, data} / {event:{…}} のどれでも受ける。
         const ev = raw && typeof raw === "object" && !raw.type && raw.event ? raw.event : raw;
-        if (seen < 3) {
-          seen++;
-          log(`event[${seen}] ${JSON.stringify(raw).slice(0, 300)}`);
+        if (ev?.type && !seenTypes.has(ev.type)) {
+          // 初出の型だけ生データを残す（型名とキーの実測＝将来の差分検知用）。
+          seenTypes.add(ev.type);
+          log(`event type=${ev.type} ${JSON.stringify(raw).slice(0, 240)}`);
         }
         if (!ev || !TYPES.includes(ev.type)) continue;
         tracker.apply(ev);
         if (ev.type === "session.idle") {
-          const sid = ev.properties?.sessionID;
+          const p = ev.properties ?? ev.data ?? {};
+          const sid = p.sessionID ?? p.id;
           const sm = tracker.summary(sid);
           log(`idle sid=${sid} child=${tracker.isChild(sid)} assistant_len=${(sm.lastAssistant || "").length} active=${sm.stopHookActive} err=${sm.lastAssistantError}`);
-          onIdle(sid);
+          onIdle(sid, ev.location?.directory);
         }
       }
     } catch (e) {
