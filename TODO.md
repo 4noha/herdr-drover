@@ -74,10 +74,11 @@ v0.5.30 で**判定を経過時間ベースへ**変更し、**実 websocket 越�
 - **残課題**: (1) fleet 配信は release が要る＝ユーザー確認後。(4) 判定器は `claude -p`（Haiku・
   4〜5s）＝各 PC に claude ログインが要る。無ければ常に停止側（ログに fallback）。
 
-### 2026-10-30: 全画面 TUI の履歴を transcript から（Claude/Codex）— 実装・ローカル反映済・fleet 未配信
+### 2026-10-30: 全画面 TUI の履歴を transcript から（Claude/Codex/opencode）— 実装・ローカル反映済・fleet 未配信
 - 原因: Claude/Codex/opencode の pane は herdr の scrollback に画面ぶんしか無く（実測）、v2 の履歴（pane.read）が 0 行。
 - `internal/transcripthist`（transcript 末尾 24MB→テキスト行）＋ `bridge.readHistoryDefault`（agent_session があれば transcript、無ければ pane.read）。実 herdr 統合テスト `TestAttachHistoryFromAgentTranscript`（旧コードで落ちる）。
-- **残**: opencode（sqlite `~/.local/share/opencode/opencode.db`）未対応。他 PC は producer 更新が要る。末尾発話が画面と二重に見える。
+- opencode も対応済（`session_message`・sqlite3 コマンド。実セッション 2 件で 0.3〜0.4s）。
+- **残**: 他 PC は producer 更新が要る。末尾発話が画面と二重に見える。
 
 ### 2026-10-29: Web viewer ワイヤ v2（元 pane 実サイズ observe＋履歴先送り）実装・ローカル反映済・fleet 未配信
 

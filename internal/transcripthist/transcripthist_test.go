@@ -2,6 +2,7 @@ package transcripthist
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -44,7 +45,7 @@ func TestRenderClaude(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := Render("claude", path, 1000)
+	got, err := Render("claude", path, "", 1000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +67,7 @@ func TestRenderCodex(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := Render("codex", path, 1000)
+	got, err := Render("codex", path, "", 1000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +85,7 @@ func TestRenderTailOfHugeFile(t *testing.T) {
 		strings.Repeat(pad, 26) + // 26MB > tailBytes
 		`{"type":"user","message":{"role":"user","content":"新しい指示"}}` + "\n"
 	write(t, p, body)
-	got, err := Render("claude", p, 1000)
+	got, err := Render("claude", p, "", 1000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +102,7 @@ func TestRenderMaxLines(t *testing.T) {
 		b.WriteString(`{"type":"user","message":{"role":"user","content":"指示` + strings.Repeat("x", i%3) + `"}}` + "\n")
 	}
 	write(t, p, b.String())
-	got, _ := Render("claude", p, 10)
+	got, _ := Render("claude", p, "", 10)
 	if n := strings.Count(got, "\n"); n != 10 {
 		t.Fatalf("末尾 10 行のはず: %d 行 %q", n, got)
 	}
@@ -115,5 +116,56 @@ func TestFindRejectsBadSid(t *testing.T) {
 	}
 	if _, err := Find("opencode", "x", t.TempDir()); err != ErrNotFound {
 		t.Error("未対応 agent は ErrNotFound")
+	}
+}
+
+// opencode 2.2 の session_message（実測の列・data の形）で実 sqlite を作って描く。
+func TestRenderOpencode(t *testing.T) {
+	bin, err := exec.LookPath("sqlite3")
+	if err != nil {
+		t.Fatalf("sqlite3 コマンドが無い（opencode の履歴に必須）: %v", err)
+	}
+	dir := t.TempDir()
+	db := filepath.Join(dir, "opencode.db")
+	const sid = "ses_ecd098379ffeiAelqU09C1FkeB"
+	sql := `create table session_message (id text primary key, session_id text not null, type text not null, seq integer not null, time_created integer not null, time_updated integer not null, data text not null);
+insert into session_message values
+('1','` + sid + `','user',1,1,1,'{"text":"状況確認","files":[]}'),
+('2','` + sid + `','assistant',2,2,2,'{"content":[{"type":"reasoning","text":"内部の考え"},{"type":"text","text":"確認します。"},{"type":"tool","name":"bash","state":{"status":"completed","input":{"command":"git status"}}}]}'),
+('3','` + sid + `','idle',3,3,3,'{"outcome":"failed"}'),
+('4','` + sid + `','system',4,4,4,'{"text":"The instructions changed"}'),
+('5','ses_other','user',1,5,5,'{"text":"別セッション"}'),
+('6','` + sid + `','user',5,6,6,'{"text":"続けて"}');`
+	if out, err := exec.Command(bin, db, sql).CombinedOutput(); err != nil {
+		t.Fatalf("sqlite3: %v: %s", err, out)
+	}
+	t.Setenv("XDG_DATA_HOME", dir)
+	// Find は <XDG_DATA_HOME>/opencode/opencode.db を探す。
+	if err := os.MkdirAll(filepath.Join(dir, "opencode"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(db, filepath.Join(dir, "opencode", "opencode.db")); err != nil {
+		t.Fatal(err)
+	}
+	path, err := Find("opencode", sid, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := Render("opencode", path, sid, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "\n> 状況確認\n\n● 確認します。\n  ⎿ bash git status\n\n> 続けて\n"
+	if got != want {
+		t.Fatalf("got %q\nwant %q", got, want)
+	}
+	// sid は厳格に検証する（SQL へ渡すため）。
+	for _, bad := range []string{"ses_x'; drop table session_message;--", "x", "ses_", ""} {
+		if _, err := Find("opencode", bad, t.TempDir()); err != ErrNotFound {
+			t.Errorf("sid=%q を受け付けてはいけない: %v", bad, err)
+		}
+		if _, err := Render("opencode", path, bad, 10); err != ErrNotFound {
+			t.Errorf("Render sid=%q を受け付けてはいけない: %v", bad, err)
+		}
 	}
 }

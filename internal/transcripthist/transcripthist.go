@@ -15,12 +15,18 @@ package transcripthist
 
 import (
 	"bufio"
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -35,7 +41,9 @@ const (
 )
 
 // Supported はこの agent 種別を組み立てられるか。
-func Supported(agent string) bool { return agent == "claude" || agent == "codex" }
+func Supported(agent string) bool {
+	return agent == "claude" || agent == "codex" || agent == "opencode"
+}
 
 // Find は agent の会話 id（herdr の agent_session.value）から transcript のパスを返す。
 // home は HOME（テストで差し替える）。
@@ -49,6 +57,12 @@ func Find(agent, sid, home string) (string, error) {
 		pat = filepath.Join(home, ".claude", "projects", "*", sid+".jsonl")
 	case "codex":
 		pat = filepath.Join(home, ".codex", "sessions", "*", "*", "*", "rollout-*-"+sid+".jsonl")
+	case "opencode":
+		// 会話は sqlite（session_message）。ファイル単位ではなく DB のパスを返す。
+		if !reOpencodeSID.MatchString(sid) {
+			return "", ErrNotFound
+		}
+		pat = opencodeDBPattern(home)
 	default:
 		return "", ErrNotFound
 	}
@@ -65,9 +79,21 @@ func Find(agent, sid, home string) (string, error) {
 	return best, nil
 }
 
+var reOpencodeSID = regexp.MustCompile(`^ses_[A-Za-z0-9]+$`)
+
+func opencodeDBPattern(home string) string {
+	if x := os.Getenv("XDG_DATA_HOME"); x != "" {
+		return filepath.Join(x, "opencode", "opencode.db")
+	}
+	return filepath.Join(home, ".local", "share", "opencode", "opencode.db")
+}
+
 // Render は transcript の末尾から会話を素のテキスト行にして、末尾 maxLines 行を返す。
 // 行の形: ユーザ「> …」・エージェント「● …」・ツール呼出「  ⎿ 名前 要約」。
-func Render(agent, path string, maxLines int) (string, error) {
+func Render(agent, path, sid string, maxLines int) (string, error) {
+	if agent == "opencode" {
+		return renderOpencode(path, sid, maxLines)
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return "", err
@@ -304,4 +330,94 @@ func oneLine(s string) string {
 		s = string(r[:toolArgMax]) + "…"
 	}
 	return s
+}
+
+// opencodeMessages は直近のメッセージ数（古い順に並べ替えて描く）。
+const opencodeMessages = 200
+
+// renderOpencode は opencode の sqlite（session_message。2.2 実測）から組み立てる。
+// 行: user {"text"}／assistant {"content":[{"type":"text"|"reasoning"|"tool",…}]}。
+// sqlite3 コマンドが無い・テーブルが空（旧形式）なら ErrNotFound（呼び手は pane.read へ）。
+func renderOpencode(db, sid string, maxLines int) (string, error) {
+	if !reOpencodeSID.MatchString(sid) {
+		return "", ErrNotFound
+	}
+	bin, err := exec.LookPath("sqlite3")
+	if err != nil {
+		if _, serr := os.Stat("/usr/bin/sqlite3"); serr != nil {
+			return "", ErrNotFound
+		}
+		bin = "/usr/bin/sqlite3"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	q := fmt.Sprintf("select type, data from session_message where session_id='%s' and type in ('user','assistant') order by seq desc limit %d", sid, opencodeMessages)
+	cmd := exec.CommandContext(ctx, bin, "-readonly", "-json", db, q)
+	var out, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &stderr
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("sqlite3: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	if out.Len() == 0 {
+		return "", ErrNotFound
+	}
+	var rows []struct {
+		Type string `json:"type"`
+		Data string `json:"data"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &rows); err != nil {
+		return "", err
+	}
+	var lines []string
+	for i := len(rows) - 1; i >= 0; i-- { // 新しい順に取ったので反転
+		for _, b := range opencodeBlocks(rows[i].Type, []byte(rows[i].Data)) {
+			lines = append(lines, b.lines()...)
+		}
+	}
+	if len(lines) > maxLines && maxLines > 0 {
+		lines = lines[len(lines)-maxLines:]
+	}
+	if len(lines) == 0 {
+		return "", ErrNotFound
+	}
+	return strings.Join(lines, "\n") + "\n", nil
+}
+
+func opencodeBlocks(typ string, data []byte) []block {
+	switch typ {
+	case "user":
+		var m struct {
+			Text string `json:"text"`
+		}
+		if json.Unmarshal(data, &m) == nil {
+			if t, ok := humanText(m.Text); ok {
+				return []block{{kUser, t}}
+			}
+		}
+	case "assistant":
+		var m struct {
+			Content []struct {
+				Type  string `json:"type"`
+				Text  string `json:"text"`
+				Name  string `json:"name"`
+				State struct {
+					Input json.RawMessage `json:"input"`
+				} `json:"state"`
+			} `json:"content"`
+		}
+		if json.Unmarshal(data, &m) != nil {
+			return nil
+		}
+		var out []block
+		for _, c := range m.Content {
+			switch c.Type {
+			case "text":
+				out = append(out, block{kAssistant, c.Text})
+			case "tool":
+				out = append(out, block{kTool, toolLine(c.Name, c.State.Input)})
+			}
+		}
+		return out
+	}
+	return nil
 }

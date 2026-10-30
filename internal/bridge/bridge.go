@@ -465,7 +465,7 @@ func (b *Bridge) readHistoryDefault() (*herdrapi.PaneReadInfo, error) {
 		if transcripthist.Supported(agent) && pi.AgentSession.Kind == "id" && sid != "" {
 			if home, herr := os.UserHomeDir(); herr == nil {
 				if path, ferr := transcripthist.Find(agent, sid, home); ferr == nil {
-					if text, rerr := transcripthist.Render(agent, path, HistoryLines*3); rerr == nil {
+					if text, rerr := transcripthist.Render(agent, path, sid, HistoryLines*3); rerr == nil {
 						b.logf("v2: 履歴を %s の transcript から組み立てた（%s）", agent, filepath.Base(path))
 						return &herdrapi.PaneReadInfo{PaneID: b.Sid, Source: SourceTranscript, Format: "text", Text: text}, nil
 					} else {
