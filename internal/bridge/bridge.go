@@ -26,12 +26,14 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/4noha/herdr-drover/internal/herdrapi"
+	"github.com/4noha/herdr-drover/internal/transcripthist"
 )
 
 const (
@@ -450,6 +452,32 @@ func (b *Bridge) effectiveSize(viewer winSize) winSize {
 	return s
 }
 
+// readHistoryDefault は履歴の既定の取得元。Claude Code / Codex のような全画面 TUI は
+// herdr の scrollback に可視画面ぶんしか残らない（pane.read は常に画面分の行数）ので、
+// herdr が検出した agent_session があれば**そのエージェントの transcript**から組み立てる
+// （transcripthist）。取れなければ従来どおり pane.read。
+func (b *Bridge) readHistoryDefault() (*herdrapi.PaneReadInfo, error) {
+	if pi, err := b.Herdr.PaneGet(b.Sid); err == nil {
+		agent, sid := pi.AgentSession.Agent, pi.AgentSession.Value
+		if agent == "" {
+			agent = pi.Agent
+		}
+		if transcripthist.Supported(agent) && pi.AgentSession.Kind == "id" && sid != "" {
+			if home, herr := os.UserHomeDir(); herr == nil {
+				if path, ferr := transcripthist.Find(agent, sid, home); ferr == nil {
+					if text, rerr := transcripthist.Render(agent, path, HistoryLines*3); rerr == nil {
+						b.logf("v2: 履歴を %s の transcript から組み立てた（%s）", agent, filepath.Base(path))
+						return &herdrapi.PaneReadInfo{PaneID: b.Sid, Source: SourceTranscript, Format: "text", Text: text}, nil
+					} else {
+						b.logf("v2: transcript 読取失敗（pane.read に切替）: %v", rerr)
+					}
+				}
+			}
+		}
+	}
+	return b.Herdr.PaneReadLines(b.Sid, "recent", HistoryLines)
+}
+
 // historyPrefix は META＋履歴＋hist_end を組み立てる（history.go）。履歴は
 // HistoryBudget 内に取れた時だけ載せる（取れなければ hist=0 で先に描画し、
 // 読取はキャッシュ側で継続＝次の接続で送る）。META は必ず送る（viewer の
@@ -465,9 +493,7 @@ func (b *Bridge) historyPrefix(size winSize) []byte {
 	}
 	read := b.readHistory
 	if read == nil {
-		read = func() (*herdrapi.PaneReadInfo, error) {
-			return b.Herdr.PaneReadLines(b.Sid, "recent", HistoryLines)
-		}
+		read = b.readHistoryDefault
 	}
 	scrolled := 0
 	if pi, err := b.Herdr.PaneGet(b.Sid); err == nil {
@@ -477,7 +503,7 @@ func (b *Bridge) historyPrefix(size winSize) []byte {
 	hlines := 0
 	e, ok := cache.fetch(b.Sid, budget, read, b.logf)
 	if ok {
-		hist = HistoryPayload(e.text, size.rows)
+		hist = HistoryPayloadPad(e.text, e.dropRows(size.rows), size.rows)
 		if len(hist) > 0 {
 			hlines = strings.Count(string(hist), "\r\n") - size.rows // パディング分を除く
 		}
@@ -509,9 +535,7 @@ func (b *Bridge) historyPlain(viewer winSize) []byte {
 	}
 	read := b.readHistory
 	if read == nil {
-		read = func() (*herdrapi.PaneReadInfo, error) {
-			return b.Herdr.PaneReadLines(b.Sid, "recent", HistoryLines)
-		}
+		read = b.readHistoryDefault
 	}
 	drop := viewer.rows
 	if pi, err := b.Herdr.PaneGet(b.Sid); err == nil && pi.Scroll.ViewportRows > 0 {
@@ -524,7 +548,7 @@ func (b *Bridge) historyPlain(viewer winSize) []byte {
 		b.logf("attach 履歴: %s 内に取れず＝履歴なしで描画（読取は継続）", budget)
 		return nil
 	}
-	hist := HistoryPayloadPad(e.text, drop, viewer.rows)
+	hist := HistoryPayloadPad(e.text, e.dropRows(drop), viewer.rows)
 	b.logf("attach 履歴: %d バイト（pane.read %d 行・truncated=%v・元 pane の可視 %d 行は除外・viewer 行 %d で詰め）",
 		len(hist), strings.Count(e.text, "\n"), e.truncated, drop, viewer.rows)
 	return hist

@@ -38,6 +38,11 @@ const (
 	// DefaultHistoryBudget は履歴読取を初回描画の前に待つ上限（冒頭コメント）。
 	DefaultHistoryBudget = 1500 * time.Millisecond
 
+	// SourceTranscript は履歴がエージェントの transcript 由来であることを示す
+	// PaneReadInfo.Source の値。transcript は可視画面を含まないので、末尾の
+	// 可視行ぶんを落とさない。
+	SourceTranscript = "transcript"
+
 	// HistoryTTL はキャッシュの鮮度。これより古い履歴は読み直す（その間は
 	// 古い履歴も使わない＝末尾 rows 行の除外が現在の画面とズレるため）。
 	HistoryTTL = 60 * time.Second
@@ -78,6 +83,7 @@ func MetaHistEnd() []byte {
 //     **消す**のであって押し上げないので、先に全行を scrollback へ押し込む
 //     （スパイクで実測: これを欠くと最後の 1 画面分の履歴が黙って消える）
 //
+// drop=0 は「落とさない」（可視画面を含まない履歴＝transcript 由来）。
 // 履歴が可視画面ぶん以下しか無ければ nil（何も書かない）。
 func HistoryPayload(text string, rows int) []byte {
 	return HistoryPayloadPad(text, rows, rows)
@@ -88,7 +94,7 @@ func HistoryPayload(text string, rows int) []byte {
 // 元 pane の行数と attach pane の行数が違う: 落とすのは元の可視画面ぶん、詰めるのは
 // attach 側の画面ぶん（足りないと `ESC[2J` で履歴の末尾が消える）。
 func HistoryPayloadPad(text string, drop, pad int) []byte {
-	if drop <= 0 || pad <= 0 || text == "" {
+	if drop < 0 || pad <= 0 || text == "" {
 		return nil
 	}
 	rows := drop
@@ -121,6 +127,8 @@ type HistoryCache struct {
 }
 
 type histEntry struct {
+	// src は履歴の出所。SourceTranscript は可視画面を含まない（落とさない）。
+	src       string
 	text      string
 	truncated bool
 	at        time.Time
@@ -149,7 +157,7 @@ func (c *HistoryCache) fetch(sid string, budget time.Duration,
 			rd, err := read()
 			c.mu.Lock()
 			if err == nil {
-				c.m[sid] = histEntry{text: rd.Text, truncated: rd.Truncated, at: time.Now()}
+				c.m[sid] = histEntry{src: rd.Source, text: rd.Text, truncated: rd.Truncated, at: time.Now()}
 			}
 			delete(c.inflight, sid)
 			c.mu.Unlock()
@@ -172,4 +180,13 @@ func (c *HistoryCache) fetch(sid string, budget time.Duration,
 	e, ok := c.m[sid]
 	c.mu.Unlock()
 	return e, ok
+}
+
+// dropRows は履歴本文から落とす末尾行数。pane.read 由来は末尾が可視画面なので rows
+// 行を落とす。transcript 由来は可視画面を含まないので落とさない。
+func (e histEntry) dropRows(rows int) int {
+	if e.src == SourceTranscript {
+		return 0
+	}
+	return rows
 }

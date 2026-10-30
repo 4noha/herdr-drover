@@ -180,3 +180,81 @@ func TestHistoryPayloadPadSeparatesDropAndPad(t *testing.T) {
 		t.Fatal("HistoryPayload は drop=pad の特殊形のはず")
 	}
 }
+
+// 全画面 TUI のエージェント（Claude Code）は herdr の scrollback に可視画面ぶんしか残らない
+// （2026-10-30 実測: 全 pane で pane.read recent が画面+1 行）。agent_session がある pane は
+// エージェントの transcript から履歴を組み立てて viewer の scrollback へ入れる。
+// source は実 herdr の pane（画面には LIVE だけ）で、過去の会話は transcript にだけある。
+func TestAttachHistoryFromAgentTranscript(t *testing.T) {
+	_, hc := startHerdr(t)
+
+	const uuid = "d135c37f-dd76-4ae5-9cd1-58ec5e1793f1"
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	var tr strings.Builder
+	for i := 1; i <= 80; i++ {
+		fmt.Fprintf(&tr, `{"type":"user","message":{"role":"user","content":"TR_ASK_%d"}}`+"\n", i)
+		fmt.Fprintf(&tr, `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"TR_ANS_%d"}]}}`+"\n", i)
+	}
+	dir := filepath.Join(home, ".claude", "projects", "-proj")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, uuid+".jsonl"), []byte(tr.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ws, err := hc.WorkspaceCreate()
+	if err != nil {
+		t.Fatalf("workspace.create: %v", err)
+	}
+	src := ws.RootPane.PaneID
+	if err := hc.PaneSendText(src, "echo LIVE_SCREEN_ONLY\r"); err != nil {
+		t.Fatalf("send_text: %v", err)
+	}
+	if err := hc.ReportAgent(src, "test-native", "claude", "idle"); err != nil {
+		t.Fatalf("report_agent: %v", err)
+	}
+	if err := hc.ReportAgentSession(src, "herdr:claude", "claude", uuid); err != nil {
+		t.Fatalf("report_agent_session: %v", err)
+	}
+	waitFor(t, 15*time.Second, "source に agent_session が付く", func() (bool, error) {
+		pi, err := hc.PaneGet(src)
+		if err != nil {
+			return false, err
+		}
+		vis, err := hc.PaneRead(src, "visible")
+		if err != nil {
+			return false, err
+		}
+		return pi.AgentSession.Value == uuid && strings.Contains(vis.Text, "LIVE_SCREEN_ONLY"), nil
+	})
+	// 前提: herdr の scrollback には過去の会話が無い（transcript にしか無い）。
+	if rd, _ := hc.PaneReadLines(src, "recent", HistoryLines); strings.Contains(rd.Text, "TR_ASK_1") {
+		t.Fatalf("前提が成立していない: herdr の scrollback に transcript の内容がある")
+	}
+
+	vp, w, rows, cols := viewerPane(t, hc)
+	stop := runAttachBridge(t, hc, src, true, w, rows, cols)
+	defer func() { stop(); w.Close() }()
+	waitFor(t, 20*time.Second, "viewer の scrollback に transcript の古い会話が入る", func() (bool, error) {
+		rd, err := hc.PaneReadLines(vp, "recent", HistoryLines)
+		if err != nil {
+			return false, err
+		}
+		return regexp.MustCompile(`(?m)^> TR_ASK_1\s*$`).MatchString(rd.Text), nil
+	})
+	rd, _ := hc.PaneReadLines(vp, "recent", HistoryLines)
+	// 最新の会話まで欠落なく入る（transcript は可視画面を含まないので末尾も落とさない）。
+	if !regexp.MustCompile(`(?m)^● TR_ANS_80\s*$`).MatchString(rd.Text) {
+		t.Fatalf("transcript の末尾（TR_ANS_80）が viewer の scrollback に無い（可視行を誤って落とした？）")
+	}
+	// 可視画面には source の現在の画面。
+	waitFor(t, 15*time.Second, "viewer の可視画面に source の現在の画面", func() (bool, error) {
+		vis, err := hc.PaneRead(vp, "visible")
+		if err != nil {
+			return false, err
+		}
+		return strings.Contains(vis.Text, "LIVE_SCREEN_ONLY"), nil
+	})
+}
