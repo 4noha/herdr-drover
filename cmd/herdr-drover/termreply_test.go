@@ -137,7 +137,7 @@ func TestAttachInputHelperProcess(t *testing.T) {
 	// リモートの画面データに問い合わせが混ざった状況の再現（herdr が応答を返す）。
 	os.Stdout.WriteString("\x1b[c\x1b[>c\x1b[=c\x1b[5n\x1b[>0q\x1b]4;0;?\x07\x1b[?2026$p\x1b[?u\x1bP$qm\x1b\\")
 	os.WriteFile(outPath+".ready", nil, 0o644)
-	go forwardInput(tee, write, nil)
+	go forwardInput(tee, write, nil, nil)
 	time.Sleep(20 * time.Second)
 	os.Exit(0)
 }

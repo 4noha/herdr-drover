@@ -25,11 +25,13 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -242,6 +244,50 @@ type connHolder struct {
 	// 接続の 1 回だけ**要求する（再接続のたびに要求すると同じ履歴が scrollback に
 	// 何度も積まれる）。フレームを 1 バイトでも受けた接続で立てる。
 	histDone atomic.Bool
+	// imagePaste はリモートの producer が画像貼付を受け付けるか（セッション doc の
+	// image_paste。imagePasteUnknown/On/Off）。Off と分かっている時だけ止める。
+	imagePaste atomic.Int32
+}
+
+const (
+	imagePasteUnknown int32 = iota
+	imagePasteOn
+	imagePasteOff
+)
+
+// maxAttachImageBytes は送る画像の上限（term.js と同じ 8MB。producer も同値で破棄する）。
+const maxAttachImageBytes = 8 << 20
+
+// imageExtPNG は IMAGE frame の ext コード（producer の imageExtClass: 1=png）。
+const imageExtPNG = 1
+
+// imageFrame は IMAGE frame（0xff 0xfd | u32BE len | u8 ext | bytes）。term.js の
+// cmImageFrame と同一（golden は TestAttachImageFrameMatchesBrowserGolden）。
+func imageFrame(ext byte, payload []byte) []byte {
+	f := make([]byte, 7+len(payload))
+	f[0], f[1] = 0xff, 0xfd
+	binary.BigEndian.PutUint32(f[2:6], uint32(len(payload)))
+	f[6] = ext
+	copy(f[7:], payload)
+	return f
+}
+
+// remoteImagePaste はリモート PC の当該 session の image_paste をセッション doc から引く。
+// doc が見つからない／読めない時は Unknown（機能を勝手に塞がない）。
+func remoteImagePaste(ctx context.Context, st *state.Client, remotePC, sid string) int32 {
+	ss, err := st.ListSessions(ctx, remotePC)
+	if err != nil {
+		return imagePasteUnknown
+	}
+	for _, s := range ss {
+		if k, _ := s["key"].(string); k == sid {
+			if v, _ := s["image_paste"].(bool); v {
+				return imagePasteOn
+			}
+			return imagePasteOff
+		}
+	}
+	return imagePasteUnknown
 }
 
 // set は現接続を差し替える。接続確立時（c != nil）に、未接続中へ溜めた入力が
@@ -290,7 +336,12 @@ func (h *connHolder) kickWake() {
 // リモートへ届き、リモートのシェルに打ち込まれる（BUG-14・termreply.go）。除いた応答は
 // onDrop へ渡す（silent にしない）。応答だけだった Read は write しない＝未接続中に
 // 「ユーザーが操作したい合図」（connHolder.write の再接続 wake）を誤って立てない。
-func forwardInput(r io.Reader, write func([]byte) error, onDrop func([][]byte)) {
+//
+// onImage は ↗窓の画像貼付。入力が **Ctrl+V(0x16) 1 バイトだけ**の読みのとき、非 nil の
+// フレームを返したらそれをリモートへ送り 0x16 は送らない（リモートの producer が
+// クリップボードへ載せたうえで Ctrl+V を注入する）。nil なら従来どおり 0x16 を通す。
+// 貼り付け（複数バイト）の途中の 0x16 には触れない。
+func forwardInput(r io.Reader, write func([]byte) error, onDrop func([][]byte), onImage func() []byte) {
 	var f termReplyFilter
 	buf := make([]byte, 4096)
 	for {
@@ -299,6 +350,12 @@ func forwardInput(r io.Reader, write func([]byte) error, onDrop func([][]byte)) 
 			out, dropped := f.Filter(buf[:n])
 			if len(dropped) > 0 && onDrop != nil {
 				onDrop(dropped)
+			}
+			if onImage != nil && len(out) == 1 && out[0] == 0x16 {
+				if fr := onImage(); fr != nil {
+					_ = write(fr)
+					out = nil
+				}
 			}
 			if len(out) > 0 {
 				_ = write(out)
@@ -469,7 +526,27 @@ func cmdAttach(args []string, stdout, stderr io.Writer) error {
 			dropLogged = time.Now()
 		}
 	}
-	go forwardInput(os.Stdin, holder.write, onDrop)
+	onImage := func() []byte {
+		if holder.imagePaste.Load() == imagePasteOff {
+			lg.Printf("画像貼付: リモートが無効（DROVER_WEB_IMAGE_PASTE）なので Ctrl+V をそのまま通す")
+			return nil
+		}
+		png, err := localClipboardPNG()
+		if err != nil {
+			lg.Printf("画像貼付: ローカルのクリップボードを読めない（Ctrl+V をそのまま通す）: %v", err)
+			return nil
+		}
+		if png == nil {
+			return nil // 画像なし＝従来の Ctrl+V
+		}
+		if len(png) > maxAttachImageBytes {
+			lg.Printf("画像貼付: %dB は上限 %dB 超（Ctrl+V をそのまま通す）", len(png), maxAttachImageBytes)
+			return nil
+		}
+		lg.Printf("画像貼付: ローカルのクリップボード画像 %dB をリモートへ送る", len(png))
+		return imageFrame(imageExtPNG, png)
+	}
+	go forwardInput(os.Stdin, holder.write, onDrop, onImage)
 
 	go watchLifecycle(ctx, holder, wakeCh, nil, nil, nil, func(reason string) {
 		fmt.Fprintf(out, "\r\n↗ %s: %s — 再接続します\r\n", remotePC, reason)
@@ -594,6 +671,7 @@ func attachOnce(ctx context.Context, st *state.Client, relayURL, injSid, remoteP
 	if werr := st.Wake(gctx, remotePC, injSid); werr != nil {
 		lg.Printf("Wake 失敗（続行）: %v", werr)
 	}
+	holder.imagePaste.Store(remoteImagePaste(gctx, st, remotePC, strings.TrimSuffix(injSid, "#inj")))
 	gcancel()
 
 	dctx, dcancel := context.WithCancel(ctx)

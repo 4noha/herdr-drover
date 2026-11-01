@@ -21,6 +21,8 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+
+	"github.com/4noha/herdr-drover/internal/bridge"
 )
 
 // timeoutConn は Read が「SetReadDeadline で設定された時刻が来るまで」
@@ -983,5 +985,80 @@ func TestAttachHandshakeHistoryOncePerProcess(t *testing.T) {
 	}
 	if !bytes.Equal(re.Bytes(), wantResize) {
 		t.Fatalf("再接続は RESIZE のみのはず: % x", re.Bytes())
+	}
+}
+
+// ---- ↗窓の画像貼付（Ctrl+V）----
+
+// feedChunks は r が 1 回の Read ごとに 1 要素ずつ返す io.Reader（キー入力の分割を再現）。
+type chunkReader struct{ chunks [][]byte }
+
+func (c *chunkReader) Read(p []byte) (int, error) {
+	if len(c.chunks) == 0 {
+		return 0, io.EOF
+	}
+	n := copy(p, c.chunks[0])
+	c.chunks = c.chunks[1:]
+	return n, nil
+}
+
+func runForward(chunks [][]byte, onImage func() []byte) [][]byte {
+	var got [][]byte
+	forwardInput(&chunkReader{chunks: chunks}, func(b []byte) error {
+		got = append(got, append([]byte{}, b...))
+		return nil
+	}, nil, onImage)
+	return got
+}
+
+func TestForwardInputImagePaste(t *testing.T) {
+	frame := imageFrame(imageExtPNG, []byte{1, 2, 3})
+
+	t.Run("Ctrl+V 単独で画像があれば IMAGE frame を送り 0x16 は送らない", func(t *testing.T) {
+		got := runForward([][]byte{{0x16}}, func() []byte { return frame })
+		if len(got) != 1 || !bytes.Equal(got[0], frame) {
+			t.Fatalf("frame だけが送られるはず: %q", got)
+		}
+	})
+	t.Run("画像なしなら 0x16 をそのまま通す", func(t *testing.T) {
+		got := runForward([][]byte{{0x16}}, func() []byte { return nil })
+		if len(got) != 1 || !bytes.Equal(got[0], []byte{0x16}) {
+			t.Fatalf("0x16 が通るはず: %q", got)
+		}
+	})
+	t.Run("貼り付け（複数バイト）の途中の 0x16 には触れない", func(t *testing.T) {
+		called := false
+		got := runForward([][]byte{[]byte("ab\x16cd")}, func() []byte { called = true; return frame })
+		if called || len(got) != 1 || string(got[0]) != "ab\x16cd" {
+			t.Fatalf("貼り付けは素通しのはず: called=%v got=%q", called, got)
+		}
+	})
+	t.Run("onImage が nil なら従来どおり", func(t *testing.T) {
+		got := runForward([][]byte{{0x16}}, nil)
+		if len(got) != 1 || !bytes.Equal(got[0], []byte{0x16}) {
+			t.Fatalf("got %q", got)
+		}
+	})
+	t.Run("他のキーでは onImage を呼ばない", func(t *testing.T) {
+		called := false
+		runForward([][]byte{[]byte("a"), {0x03}}, func() []byte { called = true; return frame })
+		if called {
+			t.Fatal("Ctrl+V 以外で画像貼付を試みてはいけない")
+		}
+	})
+}
+
+// ブラウザ（term.js cmImageFrame）の golden と同じバイト列（drover-cloud の
+// TestTermJSImageFrame・producer の TestCMWireImageGoldenFromBrowser と同値）。
+func TestAttachImageFrameMatchesBrowserGolden(t *testing.T) {
+	want := []byte{0xff, 0xfd, 0x00, 0x00, 0x00, 0x05, 0x01, 1, 2, 3, 4, 5}
+	if got := imageFrame(imageExtPNG, []byte{1, 2, 3, 4, 5}); !bytes.Equal(got, want) {
+		t.Fatalf("got %x want %x", got, want)
+	}
+	var p bridge.CMWireParser
+	p.KeepImage = true
+	evs := p.Feed(imageFrame(imageExtPNG, []byte{1, 2, 3, 4, 5}))
+	if len(evs) != 1 || evs[0].Kind != bridge.EvImage || !bytes.Equal(evs[0].Image, []byte{1, 2, 3, 4, 5}) {
+		t.Fatalf("producer のパーサが attach の frame を解釈できない: %+v", evs)
 	}
 }
