@@ -83,3 +83,6 @@ func isExecFile(fi os.FileInfo) bool { return !fi.IsDir() && fi.Mode().Perm()&0o
 // shellChildArgvs は shell プロセス配下の子孫の argv を返す。unix の herdr は
 // シェル配下で起動した前景プロセスを process_info にそのまま出す（実測）＝不要。
 func shellChildArgvs(shellPID int) [][]string { return nil }
+// nudgeSelf は自プロセスへ SIGUSR1 を送り、producer の即時 re-scan を起こす
+// （遠隔命令 semi-auto の後に session doc の semi_auto を即反映させるため）。
+func nudgeSelf() error { return syscall.Kill(os.Getpid(), syscall.SIGUSR1) }

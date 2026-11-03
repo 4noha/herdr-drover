@@ -97,6 +97,11 @@ type Producer struct {
 	// （session パッケージはポリシーを持たない＝localIPs と同じ規律）。
 	imagePaste bool
 
+	// semiAuto は「この pane でセミオート続行（autocontinue）が ON か」を返す
+	// （nil=常に false）。true の pane にだけ session doc へ semi_auto=true を載せる
+	//（local_ips / image_paste と同じ「載せない＝false」の後方互換規律）。
+	semiAuto func(paneID string) bool
+
 	// seeded は prev を Firestore 実態（OwnSessionKeys）で初期化済みか。
 	// 初回 tick で seed し、失敗したら tick ごと skip して次回再試行する
 	// （seed 無しで進むと agent 停止中に終了した pane の doc が永久残留）。
@@ -138,6 +143,13 @@ func (p *Producer) WithLocalIPs(fn func() []string) *Producer {
 // WithImagePaste は「この PC が Web からの画像貼付を受け付けるか」を注入する
 // （返り値は self＝method chain 可）。cmd 側が DROVER_WEB_IMAGE_PASTE と
 // role=slave の判定を済ませてから渡す（session パッケージはポリシーを持たない）。
+// WithSemiAuto はセミオート続行の ON 判定関数を注入する（cmd 側が autocontinue の
+// 設定ファイルを読む）。Web はこの値で ⟳ 表示と切替ボタンの状態を出す。
+func (p *Producer) WithSemiAuto(fn func(paneID string) bool) *Producer {
+	p.semiAuto = fn
+	return p
+}
+
 func (p *Producer) WithImagePaste(v bool) *Producer {
 	p.imagePaste = v
 	return p
@@ -200,7 +212,8 @@ func isActive(agentStatus string) bool {
 // local_ips と同じく PC 単位の値を各 session doc に載せる（Web の onSnapshot は
 // session doc を購読しているため。前例＝local_ips）。false のときは載せない
 // （後方互換＝旧 Web/旧 agent は追加キーを知らない）。
-func BuildSessions(panes []herdrapi.PaneInfo, agents []herdrapi.AgentInfo, isInjected func(paneID string) bool, localIPs []string, imagePaste bool) []map[string]any {
+// semiAuto は pane 単位の値（nil=全 false）。true の pane にだけ semi_auto=true を載せる。
+func BuildSessions(panes []herdrapi.PaneInfo, agents []herdrapi.AgentInfo, isInjected func(paneID string) bool, localIPs []string, imagePaste bool, semiAuto func(paneID string) bool) []map[string]any {
 	// pane_id → agent の対応（agent の name/status を優先採用するため）。
 	agentByPane := make(map[string]herdrapi.AgentInfo, len(agents))
 	for _, a := range agents {
@@ -270,6 +283,9 @@ func BuildSessions(panes []herdrapi.PaneInfo, agents []herdrapi.AgentInfo, isInj
 		if kind != "" {
 			sess["agent"] = kind
 		}
+		if semiAuto != nil && semiAuto(p.PaneID) {
+			sess["semi_auto"] = true
+		}
 		if len(localIPs) > 0 {
 			ips := make([]any, len(localIPs))
 			for i, ip := range localIPs {
@@ -337,7 +353,7 @@ func (p *Producer) Tick(ctx context.Context) error {
 	if p.localIPs != nil {
 		ips = p.localIPs()
 	}
-	ss := BuildSessions(panes, agents, p.isInjected, ips, p.imagePaste)
+	ss := BuildSessions(panes, agents, p.isInjected, ips, p.imagePaste, p.semiAuto)
 	cur := make(map[string]bool, len(ss))
 	for _, s := range ss {
 		cur[s["key"].(string)] = true

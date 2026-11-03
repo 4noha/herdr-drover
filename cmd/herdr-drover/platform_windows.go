@@ -207,3 +207,6 @@ func processArgv(pid uint32) ([]string, error) {
 	line := windows.UTF16ToString(unsafe.Slice(us.Buffer, us.Length/2))
 	return windows.DecomposeCommandLine(line)
 }
+
+// nudgeSelf は Windows では無効（SIGUSR1 無し＝周期 tick が拾う）。
+func nudgeSelf() error { return nil }

@@ -26,11 +26,14 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/4noha/herdr-drover/internal/herdrapi"
+	"github.com/4noha/herdr-drover/internal/transcripthist"
 )
 
 const (
@@ -134,6 +137,15 @@ type Bridge struct {
 	// ImagePasteDir は画像の一時ファイル置き場（空なら ~/.herdr-drover/paste）。
 	ImagePasteDir string
 
+	// HistoryCache は v2 の履歴スナップショットの共有キャッシュ（daemon で 1 つ。
+	// nil なら接続ごとの使い捨て＝予算超過の読取結果が次の接続に活きない）。
+	HistoryCache *HistoryCache
+	// HistoryBudget は履歴読取を初回描画の前に待つ上限（0 なら
+	// DefaultHistoryBudget）。テストから短縮する。
+	HistoryBudget time.Duration
+	// readHistory はテスト用 seam（nil なら Herdr.PaneReadLines）。
+	readHistory func() (*herdrapi.PaneReadInfo, error)
+
 	// last は最終通信時刻（UnixNano）。conn の read/write 両方向で bump。
 	last atomic.Int64
 	// gotFirst は conn から**実データを 1 バイトでも受け取ったか**。初期の
@@ -142,6 +154,17 @@ type Bridge struct {
 	// idleClosed は quiescence 自切断を自分で行った印（conn close 起因の
 	// read エラーを「正常切断」へ写像するため）。
 	idleClosed atomic.Bool
+	// v2 は viewer がワイヤ v2 HELLO（cmwire の EvHello）を送ったか。true なら
+	// observe は viewer 要求サイズではなく **元 pane の実サイズ**（pane.layout）
+	// で起動し、ストリーム先頭に META＋履歴（history.go）を流す。HELLO を
+	// 送らない viewer（旧 Web・↗窓 attach）は従来どおり。
+	v2 atomic.Bool
+	// histSent は META＋履歴を conn へ流したか（Bridge＝1 接続につき 1 回。
+	// observe の respawn では再送しない＝viewer の scrollback に重複しない）。
+	histSent atomic.Bool
+	// histOnly は ↗窓 attach の「履歴のみ」HELLO（EvHelloHist）。observe は viewer の
+	// RESIZE サイズのまま、先頭に素のテキストの履歴だけを流す（META/OSC なし）。
+	histOnly atomic.Bool
 
 	// cur は現行 observe サブプロセス（テストの respawn／リーク検査用に
 	// mu 越しで観測する）。
@@ -305,7 +328,7 @@ func (b *Bridge) Run(ctx context.Context) error {
 				return ctx.Err()
 			}
 		}
-		proc, err := b.spawnObserve(size)
+		proc, err := b.spawnObserve(b.effectiveSize(size))
 		if err != nil {
 			// spawn 自体の失敗（herdr バイナリ不在等）も backoff リトライ
 			//（恒久エラーでも conn の idle 自切断が上限を与える）。
@@ -383,6 +406,152 @@ func (b *Bridge) Run(ctx context.Context) error {
 			return ctx.Err()
 		}
 	}
+}
+
+// effectiveSize は observe の起動サイズ。v2 viewer には元 pane の実サイズを
+// 使い、viewer 要求サイズは無視する。viewer 側が xterm を元 pane に合わせる
+// ので RESIZE 往復（＝暴走ループの種）が構造的に消える。
+//
+// サイズの出どころ（herdr 0.9.5・2026-10-29 実測）:
+//   - 行 = `pane.get` の `scroll.viewport_rows`（pty の真値。localview の
+//     control 縮小で layout より小さいことがある: 本番で layout 70 / pty 63）
+//   - 桁 = `pane.layout` の `rect.width`（本番 GUI では全幅塗り TUI の最大行幅
+//     と一致＝pty 桁。headless 隔離サーバでは pty 桁の**上界**（120≥119）に
+//     なるが、observe が広い側に外れる分は右に空き列が出るだけでクリップ
+//     しない＝安全側）。API に桁そのものは無い。
+//
+// 取得失敗時は従来どおり viewer 要求へフォールバックし、必ずログに残す。
+func (b *Bridge) effectiveSize(viewer winSize) winSize {
+	if !b.v2.Load() {
+		return viewer
+	}
+	lay, err := b.Herdr.PaneLayout(b.Sid)
+	if err != nil {
+		b.logf("v2: pane.layout 失敗（viewer 要求 %dx%d にフォールバック）: %v", viewer.cols, viewer.rows, err)
+		return viewer
+	}
+	cols, layRows := 0, 0
+	for _, p := range lay.Panes {
+		if p.PaneID == b.Sid {
+			cols, layRows = p.Rect.Width, p.Rect.Height
+		}
+	}
+	if cols <= 0 {
+		b.logf("v2: pane.layout に %s が無い（viewer 要求 %dx%d にフォールバック）", b.Sid, viewer.cols, viewer.rows)
+		return viewer
+	}
+	rows := layRows
+	if pi, err := b.Herdr.PaneGet(b.Sid); err == nil && pi.Scroll.ViewportRows > 0 {
+		rows = pi.Scroll.ViewportRows
+	} else if err != nil {
+		b.logf("v2: pane.get 失敗（行は layout の %d を使う）: %v", layRows, err)
+	}
+	s := b.clamp(rows, cols)
+	b.logf("v2: 元 pane 実サイズ %dx%d で observe（layout %dx%d・viewer 要求 %dx%d は無視）",
+		s.cols, s.rows, cols, layRows, viewer.cols, viewer.rows)
+	return s
+}
+
+// readHistoryDefault は履歴の既定の取得元。Claude Code / Codex のような全画面 TUI は
+// herdr の scrollback に可視画面ぶんしか残らない（pane.read は常に画面分の行数）ので、
+// herdr が検出した agent_session があれば**そのエージェントの transcript**から組み立てる
+// （transcripthist）。取れなければ従来どおり pane.read。
+func (b *Bridge) readHistoryDefault() (*herdrapi.PaneReadInfo, error) {
+	if pi, err := b.Herdr.PaneGet(b.Sid); err == nil {
+		agent, sid := pi.AgentSession.Agent, pi.AgentSession.Value
+		if agent == "" {
+			agent = pi.Agent
+		}
+		if transcripthist.Supported(agent) && pi.AgentSession.Kind == "id" && sid != "" {
+			if home, herr := os.UserHomeDir(); herr == nil {
+				if path, ferr := transcripthist.Find(agent, sid, home); ferr == nil {
+					if text, rerr := transcripthist.Render(agent, path, sid, HistoryLines*3); rerr == nil {
+						b.logf("v2: 履歴を %s の transcript から組み立てた（%s）", agent, filepath.Base(path))
+						return &herdrapi.PaneReadInfo{PaneID: b.Sid, Source: SourceTranscript, Format: "text", Text: text}, nil
+					} else {
+						b.logf("v2: transcript 読取失敗（pane.read に切替）: %v", rerr)
+					}
+				}
+			}
+		}
+	}
+	return b.Herdr.PaneReadLines(b.Sid, "recent", HistoryLines)
+}
+
+// historyPrefix は META＋履歴＋hist_end を組み立てる（history.go）。履歴は
+// HistoryBudget 内に取れた時だけ載せる（取れなければ hist=0 で先に描画し、
+// 読取はキャッシュ側で継続＝次の接続で送る）。META は必ず送る（viewer の
+// モード判定を欠かさない）。
+func (b *Bridge) historyPrefix(size winSize) []byte {
+	cache := b.HistoryCache
+	if cache == nil {
+		cache = NewHistoryCache()
+	}
+	budget := b.HistoryBudget
+	if budget <= 0 {
+		budget = DefaultHistoryBudget
+	}
+	read := b.readHistory
+	if read == nil {
+		read = b.readHistoryDefault
+	}
+	scrolled := 0
+	if pi, err := b.Herdr.PaneGet(b.Sid); err == nil {
+		scrolled = pi.Scroll.OffsetFromBottom
+	}
+	var hist []byte
+	hlines := 0
+	e, ok := cache.fetch(b.Sid, budget, read, b.logf)
+	if ok {
+		hist = HistoryPayloadPad(e.text, e.dropRows(size.rows), size.rows)
+		if len(hist) > 0 {
+			hlines = strings.Count(string(hist), "\r\n") - size.rows // パディング分を除く
+		}
+		b.logf("v2: 履歴 %d 行 %dB を先頭に送る（pane.read %d 行・truncated=%v・可視 %d 行は除外・取得 %.0fs 前）",
+			hlines, len(hist), strings.Count(e.text, "\n"), e.truncated, size.rows, time.Since(e.at).Seconds())
+	} else {
+		b.logf("v2: 履歴は %s 内に取れず＝履歴なしで先に描画（読取は継続・次の接続で送る）", budget)
+	}
+	if scrolled > 0 {
+		b.logf("v2: 元 pane はローカルで %d 行遡り中（observe はその表示位置を描く）", scrolled)
+	}
+	out := MetaBegin(size.cols, size.rows, e.truncated, ok, hlines, scrolled)
+	out = append(out, hist...)
+	return append(out, MetaHistEnd()...)
+}
+
+// historyPlain は ↗窓 attach 向けの素の履歴（META/OSC なし）。落とす行数は**元 pane の
+// 可視行数**（pane.get viewport_rows。取れなければ viewer の行数）、詰める CRLF は
+// **viewer（attach pane）の行数**。予算内に取れなければ何も送らない（次の接続で送る
+// 設計は無い: attach は再接続のたびに履歴を重ねないよう、最初の 1 回だけ要求する）。
+func (b *Bridge) historyPlain(viewer winSize) []byte {
+	cache := b.HistoryCache
+	if cache == nil {
+		cache = NewHistoryCache()
+	}
+	budget := b.HistoryBudget
+	if budget <= 0 {
+		budget = DefaultHistoryBudget
+	}
+	read := b.readHistory
+	if read == nil {
+		read = b.readHistoryDefault
+	}
+	drop := viewer.rows
+	if pi, err := b.Herdr.PaneGet(b.Sid); err == nil && pi.Scroll.ViewportRows > 0 {
+		drop = pi.Scroll.ViewportRows
+	} else if err != nil {
+		b.logf("attach 履歴: pane.get 失敗（落とす行数は viewer の %d を使う）: %v", drop, err)
+	}
+	e, ok := cache.fetch(b.Sid, budget, read, b.logf)
+	if !ok {
+		b.logf("attach 履歴: %s 内に取れず＝履歴なしで描画（読取は継続）", budget)
+		return nil
+	}
+	hist := HistoryPayloadPad(e.text, e.dropRows(drop), viewer.rows)
+	b.logf("attach 履歴: %d バイト（pane.read %d 行・truncated=%v・元 pane の可視 %d 行は除外・viewer 行 %d で詰め）",
+		len(hist), strings.Count(e.text, "\n"), e.truncated, drop, viewer.rows)
+	return hist
 }
 
 func nextBackoff(d time.Duration) time.Duration {
@@ -476,6 +645,20 @@ func (b *Bridge) readConn(resizeCh chan winSize, connDone chan<- error) {
 						// 入力欠落は無言だと「壊れた窓」誤診の温床
 						//（cm nav-mode 教訓）＝必ずログに残す。
 						b.logf("入力送出失敗 (%dB): %v", len(data), serr)
+					}
+				case EvHello:
+					b.v2.Store(true)
+					b.logf("viewer: ワイヤ v2 HELLO（observe は元 pane 実サイズ・先頭に履歴）")
+				case EvHelloHist:
+					b.histOnly.Store(true)
+					b.logf("viewer: 履歴のみ HELLO（observe は viewer の RESIZE サイズ・先頭に素の履歴）")
+				case EvScrollBottom:
+					// ［最新へ］: 元 pane の実スクロールを最下部へ（共有状態＝
+					// ローカル表示も戻る。viewer の明示操作からのみ届く）。
+					if serr := b.Herdr.PaneScroll(b.Sid, 0); serr != nil {
+						b.logf("viewer: 最新へ（pane.scroll 0）失敗: %v", serr)
+					} else {
+						b.logf("viewer: 最新へ（pane.scroll 0）")
 					}
 				case EvScroll:
 					// v1 は無視（DESIGN: herdr terminal.scroll は共有
@@ -630,6 +813,28 @@ func (b *Bridge) spawnObserve(size winSize) (*observeProc, error) {
 
 	go func() {
 		defer close(p.done)
+		// v2: 最初の observe 世代だけ、フレームより前に META＋履歴を流す
+		// （同じ goroutine で書く＝順序保証・write deadline も同じ規律）。
+		// respawn 世代では histSent 済みなので送らない。
+		if (b.v2.Load() || b.histOnly.Load()) && b.histSent.CompareAndSwap(false, true) {
+			var prefix []byte
+			if b.v2.Load() {
+				prefix = b.historyPrefix(size)
+			} else {
+				prefix = b.historyPlain(size)
+			}
+			// 履歴なし（取れなかった／可視画面ぶん以下）は何も書かない。
+			if len(prefix) > 0 {
+				if wd != nil {
+					_ = wd.SetWriteDeadline(time.Now().Add(writeTimeout))
+				}
+				if _, werr := b.Conn.Write(prefix); werr != nil {
+					p.connErr = fmt.Errorf("conn 書込失敗(META/履歴): %w", werr)
+					return
+				}
+				b.bump()
+			}
+		}
 		// フレームは 160×500 級で base64 2.1MB に達する（実測）ため、
 		// bufio.Scanner（既定 64KB 上限）ではなく ReadBytes を使う。
 		r := bufio.NewReaderSize(stdout, 64*1024)

@@ -16,6 +16,10 @@ cwd 自動 attach／新 Tab 起動を提供する。Python 版 claude-master(cm)
   差分（resume/updater/install）は Spec テーブルでデータとして持つ。
   **別エージェント導入時は `internal/agentid/spec.go` に Spec を足すだけ**
   （BinNames は herdr の lookup_agent 表の要素にすること＝ValidateSpecs が検証）
+- **セミオート続行（「つづけて」自動判定）: SPEC §2.6**（Claude Code / Codex の公式 Stop
+  フック＋`internal/autocontinue`。既定 OFF・判定は 2 値・上限 10/20 回・自動続行は通知を出さない。
+  **判定ルールを変えるときは `RulesVersion` を上げ `RULES_CHANGELOG.md` に根拠の事例を書き、
+  `testdata/judge_cases.json` に事例を足して `TestJudgeCorpus` を通す**）
 - 機能別設計: [DESIGN_SLAVE.md](DESIGN_SLAVE.md)＋[DESIGN_SLAVE_SPEC.md](DESIGN_SLAVE_SPEC.md)
   （共用 PC）／[DESIGN_SSH_FORWARD.md](DESIGN_SSH_FORWARD.md)（SSH 転送）
 - **再開時はまず TODO.md を読む**（in-flight タスク・残課題・デプロイ手順の正）
@@ -71,7 +75,10 @@ cwd 自動 attach／新 Tab 起動を提供する。Python 版 claude-master(cm)
 - `terminal session control` は**隠し CLI**（`--help` 非掲載。`--cols/--rows/
   --takeover`）。ControlTerminal＝attach と同じ **pane resize＋lock**。
   `observe` はロック非取得・観測側サイズへ仮想描画（観測 < grid は上寄せクリップ）。
-- pane grid 桁は API 非公開（`pane.get` の `scroll.viewport_rows`=行のみ）。
+- pane grid 桁は `pane.get` に無い（`scroll.viewport_rows`=行のみ・pty の真値）。
+  桁は **`pane.layout` の `rect.width`**（0.9.5 実測・SPEC §5.1）。
+- **Codex 0.165 のフック（Stop/SessionStart）は共有 app-server デーモン内で走る**＝env の
+  `HERDR_PANE_ID`/`HERDR_SOCKET_PATH` はデーモン起動時の値で信用できない（SPEC §2.6）。
 - **復元（session.json）に残るのは pane 生成時の launch argv だけ**＝あとから前景に
   来た子プロセスは記録されない。既定シェル pane は `cwd` と `agent_session` のみ
   （＝素シェルで打った `claude` は復元 argv にならず、herdr が自前 resume を
@@ -79,18 +86,41 @@ cwd 自動 attach／新 Tab 起動を提供する。Python 版 claude-master(cm)
 - `tab.move` は同一 WS の reorder 専用＝WS 間移動は `pane.move` が唯一。
 - workspace label は重複可＝識別子にしない（workspace_id を使う）。
 
-## herdr 0.9.x（Windows 正式版）で変わった trap（詳細 SPEC.md §5.2）
+## herdr 0.9.5 で変わったこと（実測 2026-10-25・隔離 server）
 
-- `ping` の capabilities に整数が混ざる（型固定で decode すると Ping 全滅）。
-- `agent.start` は「既存 pane で既知 kind を起動」に変わった（任意 argv 不可）。
-- `agent.rename` / `report_agent_session` は**前景が agent と検出された pane**
-  でないと効かない（rename は `agent_not_found`、session は ok なのに黙って捨てる）。
-- `events.subscribe` は過去 event を再送しない（live から）。
-- Windows: socket は named pipe・pane cwd は末尾 `\` 付き・パス区切りは
-  `filepath.Separator`（"/" 固定の比較は Windows で全滅する）。新規ビルドの
-  未署名 exe は Smart App Control に弾かれ得る。実体は `claude.exe`（PATH 探索は同一 dir 内で
-  `.exe`→`.cmd`＝npm 導入の shim も拾う）。テストの偽 agent は**テストバイナリの複製 `<name>.exe`＋spec**
-  （`cmd/herdr-drover/stubagent_test.go`。unix は従来の sh スクリプト）。
+0.7.4 の trap はおおむね有効。次の差分は drover の動作に直結する（BUGS.md BUG-12/13）。
+
+- `ping` の `capabilities` に **bool 以外が混ざる**（`endpoint_protocol_generation`
+  が数値）＝型を決め打ちで decode すると daemon もシムも起動不能になる。
+- **agent 検出は前景プロセス名ベースの非同期処理**。layout.apply 直後の
+  `agent.rename` は `agent_not_found`、本物の claude で約 0.8 秒後に通る＝
+  `herdrapi.RenameWithDetectWait` を使う。`exec sleep` の stub は前景が sleep に
+  置換されて**永久に検出されない**（stub は exec しない sh にする）。
+- `agent.start` は **別 API**（既存の対話シェル pane に kind の正規実行体を起動。
+  必須 `name`/`kind`/`pane_id`）。旧「name+argv で新 pane」は無い＝
+  `herdrapi.LaunchAgent`（layout.apply＋検出待ち rename）で代替。
+- **購読前の event を再送しない**（0.7.4 は再送した）＝「購読→確立を待つ→動く」の
+  順にする（`herdrapi.SubscribeReady`）。
+- `herdr:*` は herdr 自身の統合の**予約ソース**。session は **herdr が検出済みの
+  pane** にしか載らない（素シェルへの種別偽装では付かない）。opencode は検出済みでも
+  外部からの `report_agent_session` では載らない。
+- `layout.apply` の `tab_id` と `workspace_id` は**排他**（両方で `invalid_target`）。
+  workspace ゼロの server で workspace 未指定は `no active workspace`。
+- 隔離 server は **`XDG_CONFIG_HOME` も必ず分ける**。`HERDR_SOCKET_PATH` だけだと
+  実機の `~/.config/herdr/session.json` を**復元して pane を生やす**（実際に踏んだ）。
+- 公式スキーマは `herdr api schema --json`（102 メソッド・protocol 22）で取れる＝
+  API 契約の一次情報。
+
+## Windows（herdr 0.8.2〜 正式版・実測は 0.9.5。詳細 SPEC.md §5.2）
+
+- socket は named pipe（pipe 名＝socket パス文字列）・pane cwd は末尾 `\` 付き・
+  パス区切りは `filepath.Separator`（"/" 固定の比較は Windows で全滅する）。
+- 実体は `claude.exe`（PATH 探索は同一 dir 内で `.exe`→`.cmd`＝npm 導入の shim も拾う）。
+- process_info は**シェルの子の非 agent を前景に出さない**（前景はシェルのまま）＝
+  復活させた ↗窓 の attach はシェルの子孫を OS から見て判定（`injClientRunning`）。
+- 新規ビルドの未署名 exe は Smart App Control に弾かれ得る（配置は
+  `scripts/windows/deploy-local-build.ps1`＝起動確認してから差し替え）。テストの偽 agent は
+  **テストバイナリの複製 `<name>.exe`＋spec**（`cmd/herdr-drover/stubagent_test.go`）。
 - Windows の `herdr server stop` は pane のプロセスを畳み切らない（孤児が cwd を握る）＝
   テストの herdr は `startHerdrForTest` 経由で起こす（子孫回収＋TempDir 削除順の保証）。
 

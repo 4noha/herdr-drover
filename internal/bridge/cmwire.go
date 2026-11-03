@@ -44,7 +44,35 @@ const (
 	// メタ情報（ImageLen/ImageExt）だけを持つ。CMWireParser.KeepImage が
 	// true のときだけ Image に payload を複製する（WebImagePaste オプトイン）。
 	EvImage
+	// EvHello は viewer の「ワイヤ v2 対応」宣言（SCROLL の dy=HelloV2Dy を
+	// 流用）。v1 producer は SCROLL を parse-and-ignore するため、旧 PC に
+	// 送っても入力に漏れない＝新 magic を増やさずに後方互換を保つ唯一の形
+	// （0xff+未知バイトは生入力として素通しされ pane に打鍵化する）。
+	EvHello
+	// EvScrollBottom は元 pane の実スクロールを最下部へ戻す要求（SCROLL の
+	// dy=ScrollBottomDy を流用。v1 producer は無視）。
+	EvScrollBottom
+	// EvHelloHist は「履歴のみ」の v2 HELLO（SCROLL の dy=HelloHistDy）。↗窓 attach
+	// 用: observe は viewer の RESIZE サイズのまま（v1 と同じ描画）、ストリーム先頭に
+	// **素のテキストの履歴**だけを流す（OSC の META は付けない＝端末にそのまま書ける）。
+	EvHelloHist
 )
+
+// HelloV2Dy は SCROLL フレームの dy をワイヤ v2 HELLO として予約する値。
+// 実スクロール要求で int16 最大値が来ることはない（Web/CLI viewer とも
+// 小さな相対値しか送らない＝cm 実コード）。
+const HelloV2Dy = 0x7fff
+
+// ScrollBottomDy は「元 pane の実スクロールを最下部へ戻す」要求（v2）。
+// herdr のスクロールは共有 runtime 状態＝ローカル表示も最下部へ戻る。
+// Web 側は明示ボタン［最新へ］からだけ送る（ホイール連動はしない）。
+// v1 producer は SCROLL として無視する。
+const ScrollBottomDy = 0x7ffe
+
+// HelloHistDy は ↗窓 attach 用の「履歴のみ」HELLO（EvHelloHist）。observe サイズは
+// viewer の RESIZE のまま、先頭に履歴を素のテキストで流す。v1 producer は SCROLL を
+// 無視するので旧 PC に送っても無害（履歴が来ないだけ）。
+const HelloHistDy = 0x7ffd
 
 // maxImageBytes は IMAGE payload の上限（8MiB）。cm と同じく DoS／メモリ
 // 膨張防止で、これを超える長さ宣言は「不正長」としてヘッダごと捨てて
@@ -111,10 +139,17 @@ func (p *CMWireParser) Feed(data []byte) []Event {
 			if len(p.in) < 4 {
 				return evs
 			}
-			evs = append(evs, Event{
-				Kind: EvScroll,
-				Dy:   int(int16(binary.BigEndian.Uint16(p.in[2:4]))),
-			})
+			dy := int(int16(binary.BigEndian.Uint16(p.in[2:4])))
+			kind := EvScroll
+			switch dy {
+			case HelloV2Dy:
+				kind = EvHello
+			case ScrollBottomDy:
+				kind = EvScrollBottom
+			case HelloHistDy:
+				kind = EvHelloHist
+			}
+			evs = append(evs, Event{Kind: kind, Dy: dy})
 			p.in = p.in[4:]
 			continue
 		}

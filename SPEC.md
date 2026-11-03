@@ -223,6 +223,42 @@ Tab ごと自動 close される**。よって差し替え後に生存を確認�
 
 ---
 
+### 2.6 `auto` / `stop-hook`（セミオート続行・2026-10-29）
+
+「作業がすぐ中断して『つづけて』を連打する」ループの自動化。**エージェント公式の
+Stop フック**を使う（herdr の画面監視では「止まった」は分かるが「止まるべきだったか」
+は分からない＝判定はどのみち自前。Stop フックなら最終発話が構造化データで届く）。
+
+| 項目 | 仕様 |
+|---|---|
+| 入口 | Claude Code `~/.claude/settings.json` と Codex `~/.codex/hooks.json` の `hooks.Stop[].hooks[]` に `'<bin>' stop-hook <agent>`（`auto install` が**追記のみ**・他フック温存・冪等・bin 変更は差し替え）。timeout 55s |
+| stdin | `session_id` / `transcript_path` / `cwd` / `stop_hook_active` / `last_assistant_message`（両エージェント共通。2.1.312 / 0.165.0 実測） |
+| stdout | 続行＝`{"decision":"block","reason":"[semi-auto n/cap] <文言>"}`（reason が次のユーザ入力になる）。停止＝無出力。**exit は常に 0**（フック失敗扱いでエージェントを邪魔しない） |
+| pane | Claude Code: `HERDR_PANE_ID`（claude プロセス＝pane 配下なので正しい）。**Codex: env を信用しない**＝Codex 0.165 はフックを共有の app-server デーモン内で実行し、`HERDR_PANE_ID` は最初にデーモンを起動した pane のまま届く（2026-10-29 実測）。`cwd` で herdr `agent.list` から種別 codex・cwd 一致の pane を**一意に**引く（↗窓除外。0 件／複数件は何もせずログ）。socket も同デーモンの `HERDR_SOCKET_PATH` が古い（隔離テストの /tmp が残っていた実測）ことがあるため、env の先に繋がらなければ既定パスへフォールバック。pane 不明なら何もしない。`config.json` の `debug: true` で全呼出をログ |
+| 有効化 | 既定 OFF。`auto on`（今いる pane）／`--pane ID`／`--all`（全体既定）。pane 設定 > 全体 > 既定 |
+| 判定 | 2 値（続行／停止）。ルール先行: 空発話→停止、疑問文＋人にしかできない語（権限・認証情報・実機・デプロイ・push・課金…）→停止、「未完／次は／残り」＋非疑問→続行。残りは判定器（既定 `claude -p --model haiku --max-turns 1`）に CONTINUE/HUMAN/DONE の 1 語。判定器エラー・不明出力は**停止側** |
+| 判定器 env | `HERDR_*`・`CLAUDECODE*` を**必ず外す**（herdr hook が判定器の session を pane に誤報告する／入れ子ガード／再帰）。`HERDR_DROVER_AUTO_JUDGE=1` を立て、フック側はそれを見て即終了 |
+| 回数 | `stop_hook_active=false`（人間入力起点の最初の停止）で 0 にリセット。上限 裁量なし 10・裁量あり 20（config で変更可。初版 3/10 は実運用で少なかった）。上限で停止＝通常の通知が飛ぶ |
+| 裁量 | pane 設定 `--grant`、または transcript の直近の人間入力に「いけるところまで／最後まで／完成まで／自律的に／できることを…」。直近の指示が短い続行系（40 字以内・「つづけて／続けてください／すすめて」等）なら、裁量の有無に関係なく**その言い回しをそのまま**文言に使い（例 `[semi-auto 2/10] 最後まで自律的にすすめて`・`[semi-auto 1/3] 改善を続けてください`）、判定器にも「指示自体が続行要求」を渡して選択肢／計画提示を続行側へ寄せる（ログ `asked=continue`。上限は裁量なしなら 10 のまま） |
+| 文言 | 既定「つづけて」。`--phrase` で pane／全体ごとに差し替え |
+| Web | session doc に `semi_auto: true`（ON の pane だけ・`image_paste` と同じ規律）。Web コンソール: バー右の `⟳ auto` バッジ＋操作パッド 4 段目の ⟳ ボタン（遠隔命令 `semi-auto` を `on=1/0` で投入。表示は doc の onSnapshot に従い、投入中は「…」・15s 無応答で戻す）。devices 一覧は名前の後ろに ⟳ |
+| キー一発 | plugin action `auto-toggle`（`herdr-drover auto toggle`＝フォーカス pane の反転＋`notification.show` トースト）。herdr が action に `HERDR_PANE_ID`（フォーカス pane）を注入する（実測: `herdr plugin action invoke auto-toggle --plugin 4noha.drover` の context に `focused_pane_id`）。キー割当は `~/.config/herdr/config.toml` の `[[keys.command]]`（`key="ctrl+alt+a"`・`type="plugin_action"`・`command="4noha.drover.auto-toggle"`）＋`herdr server reload-config`。manifest 変更後は `herdr plugin link <repo>` で plugins.json を更新 |
+| 事例蓄積 | 判定のたびに `~/.herdr-drover/autocontinue/cases.jsonl` に 1 行（最終発話末尾 4000 字・直近指示 1000 字・grant/asked/count/cap・verdict/source/detail・decision・送った文言・**RulesVersion**）。続行時も残す＝続行直前の文脈から時々ある誤続行を人が見つける。停止後に人が打った最初の指示は `followup` として付く（『つづけて』なら誤停止の示唆）。`auto cases [--last N] [--decision continue|stop|cap] [--sid]`／`auto cases label <id> <continue|human|done> [note]`（`labels.jsonl`）／`auto cases export <id> [origin]`（コーパス用 JSON）。会話内容を含むので**ローカル限定** |
+| コーパス | `internal/autocontinue/testdata/judge_cases.json`（期待ラベル・期待 source・origin・追加日・版）。`TestJudgeCorpus` がルール層の全体整合性を固定（`rule:…` はその規則で決まる／`llm` はルールで決めずに判定器へ渡る）。`HERDR_DROVER_LIVE_JUDGE=1` で `llm` 事例を実判定器でも評価 |
+| 変更履歴 | `judge.go` の `RulesVersion`（ルール・判定器プロンプトを変えたら上げる）＋ `internal/autocontinue/RULES_CHANGELOG.md`（何の事例を根拠に何を変えたか）。各事例とログ行に `rules=vN` |
+| API エラーの自動再開 | Claude Code は API エラー（`API Error: Server error mid-response` 等）で終わるターンでは Stop を呼ばず StopFailure になる＝**フックが走らない**。そこで daemon（`cmd/herdr-drover/apiretry.go`）が、**ON の pane** が working→idle/done になった直後に画面末尾 14 行を読み、一時的な API エラー（5xx・Server error・Overloaded・Connection error・stream disconnected 等）の文言なら、待ち時間 **5s→15s→45s**（連続 3 回まで）後に `[semi-auto api-retry n/3] つづけて` を送る。429／rate limit／usage limit／resets in は対象外（待っても効かない）。送る直前に再確認（まだ idle/done・同じエラー・ON のまま）。エラー以外の停止で連続回数を戻す。送信・見送り・上限到達は autocontinue.log に残す |
+| 可視化 | 恒久表示: ON の pane の **Tab ラベルに「⟳ 」接頭辞**（`tab.rename`。OFF で外す）。トースト: `notification.show`。画面: reason の `[semi-auto n/cap]`。ログ: `~/.herdr-drover/autocontinue/autocontinue.log`（1 フック 1 行: pane/sid/active/count/grant/verdict/src/決定）。`auto status` が直近 5 行を表示 |
+| 通知抑止 | フック開始で `suppress/<pane>.json`（pending）、続行で continue、停止で削除。daemon の push/webhook notifier は**抑止中の working→idle を確定させない**（prev を working のまま保留）＝自動続行なら通知ゼロ、停止側に倒れた（マーク削除）後の tick で通常どおり 1 回。TTL 120s（kill 等で永久抑止しない） |
+| 状態 | `~/.herdr-drover/autocontinue/`（`HERDR_DROVER_AUTO_DIR` で上書き＝テスト隔離）: `config.json`・`panes/`・`sessions/<agent>_<sid>.json`・`suppress/` |
+| Codex 固有 | 非管理フックは各 PC で一度 `/hooks` から trust（未 trust はスキップ＋起動時警告）。設置時に報告する。`codex exec` 用の `--dangerously-bypass-hook-trust` は使わない |
+| opencode | Stop フックが無いので **server プラグイン**（`~/.config/opencode/plugins/herdr-drover-autocontinue.js`・`auto install --agent opencode` が埋め込み JS を設置）。**opencode 2.x のローダーは `default.server`（v1 hooks）を無視し `default.setup(api)`（Promise API）を呼ぶ**（本体コード実測: `Plugin.Event.makeStreams`＝`api.event.subscribe({signal})` は AsyncIterable、`api.session.get({sessionID})`、`api.session.prompt({sessionID, text, delivery:"queue"})`＝`/api/session/:sessionID/prompt` の payload をフラットに受ける。messages 取得 API は無い）。**届くイベントは SDK 形ではなく内部バス** `{id, created, type, location?:{directory}, data:{…}}`（2.2.0 実測）: ユーザ入力＝`session.inbox.enqueued`（`data.item.type=="user"`・`item.payload.text`）、assistant 発話＝`session.step.started`（`assistantMessageID`）＋`session.text.ended`（`ordinal` 付き text ブロック全文）、ターン終了＝`session.execution.succeeded`、失敗/中断＝`session.execution.failed`/`interrupted`（`reason: user|shutdown|superseded|inactivity`）、子セッション＝`session.created` の `data.parentID`。`location` は execution.* に付かないので他イベントで見た `directory` をセッションごとに覚えて cwd にする。**共有 service はプロジェクト（directory）ごとにプラグインを別インスタンスで setup する**（再起動直後に 8 回）のに、イベントはプロセス共通で全インスタンスに届く＝プロセスに 1 本だけループを持つ（`globalThis` の Symbol キー。2 本目以降は api の差し替えのみ。放置すると 1 停止で N 回「つづけて」が入る）。SDK 形（`session.idle`＋`message.*`）の経路も残してある。v1 では `session.get`/`session.messages`（`{path:{id}}` 形・応答 `{data}`）。どちらも `session.idle` → 子セッション除外 → 最終 assistant 発話・直近の人間入力（自分の `[semi-auto` 文は除く）・`stop_hook_active`（直前の入力が自分の文）を組み、`herdr-drover stop-hook opencode` へ stdin JSON（`last_user_message` 付き）。block なら `session.prompt`（完了を待たない）。診断は `~/.herdr-drover/autocontinue/opencode-plugin.log`。最終 assistant が error（中断）なら何もしない。pane は Codex と同じく cwd で解決（共有 background service 内で走るため）。プラグインはサーバ起動時に読まれる＝`opencode reload`／service 再起動／`--standalone` の新セッションから有効。実 node でのロジック検証は `TestOpencodePluginWithNode` |
+
+実測根拠（2026-10-29・このMacの全 transcript 静的解析）: ユーザ入力中の「つづけて」系は
+Claude 1.8%・Codex 10.5%・opencode 6.2%、Codex は打つまでの待ち中央値 6 分。直前の発話は
+「未完／次は」4 割・疑問文終わり 1%。番号付き選択肢にもユーザは「つづけて」で返す＝
+番号を解く必要はない。実 Claude Code で契約を通す live テストは
+`HERDR_DROVER_LIVE_CLAUDE=1 go test ./cmd/herdr-drover -run TestLiveClaudeStopHook`。
+
 ## 3. 遠隔命令仕様
 
 Firestore `commands/{pc}/q/{id}` 経由。owner 認証済み Web が投入し、
@@ -239,6 +275,7 @@ Firestore `commands/{pc}/q/{id}` 経由。owner 認証済み Web が投入し、
 | `restart-agent-session` | 空=全部 | エージェントセッションを会話ごと作り直す | 後 | [一般化済] |
 | `update-agent-cli` | 空=全部 | エージェント本体更新＋セッション反映 | 後 | [一般化済] |
 | `update-all` | — | 上記＋自己更新＋再起動 | **先行**（この後 exit する） | [agent 非依存] |
+| `semi-auto` | 必須 | セミオート続行（§2.6）の pane 単位 ON/OFF。`Args["on"]`=`1`/`0`（無ければ反転）。設定ファイル＋Tab 印＋トースト＋自プロセスへ SIGUSR1（即時 re-scan＝session doc の `semi_auto` を即反映） | 後 | [非依存] |
 
 **旧命令名は alias として allowlist に残す**（`restart-claude` / `update-claude` /
 `restart-agent`）。まだ更新していない PC の Web/CLI から投げられなくなるため、
@@ -631,7 +668,9 @@ workspace.close  workspace.create  workspace.focus  workspace.list  workspace.re
 | 入力注入 | `pane.send_input`(text) は `\r` が落ちる。**`pane.send_text`**（\r 込み）か `pane.send_keys` を使う |
 | `terminal session control` | 隠し CLI（`--help` 非掲載）。attach と同じ **pane resize＋lock** |
 | `terminal session observe` | ロック非取得・観測側サイズへ仮想描画（観測 < grid は上寄せクリップ） |
-| pane grid 桁 | API 非公開（`pane.get` の `scroll.viewport_rows` は行のみ） |
+| pane grid 桁 | `pane.get` は行のみ（`scroll.viewport_rows`＝**pty の真値**。localview の control 縮小で layout より小さくなる）。桁は **`pane.layout` の `rect.width`**（0.9.5・2026-10-29 本番 5 pane で全幅塗り TUI の最大行幅と一致）。headless 隔離サーバでは pty 桁の上界（120≥119）＝observe を広く起動しても右に空き列が出るだけでクリップしない |
+| `pane.read` の履歴 | `format=text` は scrollback を含むが**サーバ側 1000 行固定キャップ**（`truncated=true`）。`format=ansi` は**可視画面のみ**。保持量は pane 次第（codex 上限到達／claude 744・124／Claude Code 自身の pane は可視未満＝実質ゼロ） |
+| `terminal session observe` のフレーム | `ESC[?2026h`＋`?25l`＋**`ESC[2J` 1 回＋絶対座標 CUP のみ**。`3J`/alt-screen/SU/SD/IL/DL/DECSTBM/LF/RI/IND を含まない（full 1＋増分 4 フレーム・300 行スクロールで実測 0）＝viewer の端末に先に書いた履歴（scrollback）を壊さない |
 | `tab.move` | **同一 WS の reorder 専用**。WS 間移動は `pane.move` が唯一 |
 | `tab.list` の `number` | **位置ではない**（w1 が tab 3 枚で number=5/21/23 の実測）。位置は並び順が権威 |
 | workspace label | **重複可**＝識別子にしない（`workspace_id` を使う） |
@@ -675,6 +714,29 @@ macOS fleet は 0.7.4 のまま＝**両方で動く**ように実装している
 attach の exe パスに `"` か `%` を含む場合は復活を見送る（cmd で安全に引用できない＝ログに理由）。
 
 ---
+
+### 5.2 Web viewer ワイヤ v2（元 pane 実サイズ observe＋履歴先送り・2026-10-29）
+
+relay は byte 透過のまま。cm ワイヤ（`internal/bridge/cmwire.go`）の上に **後方互換のまま** 重ねた拡張で、旧 Web／↗窓 attach／旧 PC の producer は一切変わらない。
+
+| 方向 | 形 | 意味 |
+|---|---|---|
+| viewer→producer | `SCROLL` フレーム（`0xff 0xfe`）の `dy=0x7fff`（`bridge.HelloV2Dy`） | **HELLO v2**。SCROLL は v1 producer が parse-and-ignore するので旧 PC に送っても入力に漏れない（0xff＋未知バイトは生入力として pane に打鍵化するため新 magic は使えない）。Web は接続のたび HELLO→従来の `RESIZE(500,160)` の順に送る |
+| viewer→producer | `SCROLL` の `dy=0x7ffe`（`bridge.ScrollBottomDy`） | **最新へ**。producer が `pane.scroll offset_from_bottom=0` を実行（共有状態＝ローカル表示も最下部へ戻る。Web は明示ボタン ⤓ からのみ送る。v1 producer は無視） |
+| producer→viewer | `ESC ] 7707 ; v=2;cols=C;rows=R;trunc=T;hist=H;hlines=L;scrolled=N ESC \` | **META**。observe を**元 pane の実サイズ**（桁=`pane.layout rect.width`・行=`pane.get viewport_rows`）で起動したことの宣言。viewer 要求サイズは無視（ログに残す）。取得失敗は viewer 要求へフォールバック。`hist`=この接続で履歴を**取得できたか**（予算内）、`hlines`=実際に送る履歴の行数（0=scrollback が空。Claude Code 系 pane は常に 0 になり得る）、`scrolled`=元 pane のローカル表示が最下部から遡っている行数（observe はその表示位置を描く） |
+| producer→viewer | 履歴本文（`pane.read source=recent format=text lines=1000` の末尾 R 行＝可視画面を落とし LF→CRLF、非空なら R 行の CRLF パディング） | `ESC[2J` は画面上の行を**消す**のであって押し上げない＝先に全行を scrollback へ押し込むためのパディング（欠くと最後の 1 画面分が黙って消える） |
+| producer→viewer | `ESC ] 7707 ; hist_end ESC \` | 履歴の終端。以後は従来どおり observe のフレーム |
+| viewer→producer | `SCROLL` の `dy=0x7ffd`（`bridge.HelloHistDy`） | **履歴のみ HELLO**（↗窓 attach 用）。observe は viewer の `RESIZE` サイズのまま（v1 と同じ描画）、ストリーム先頭に**素のテキストの履歴だけ**を流す（OSC の META／hist_end なし＝端末にそのまま書ける）。落とす行数＝元 pane の可視行数（`pane.get viewport_rows`）、詰める CRLF＝viewer（attach pane）の行数（`HistoryPayloadPad`）。履歴が予算内に取れない／可視画面ぶん以下なら何も流さない。**RESIZE より前**に送る（producer は RESIZE で observe を起動する）。v1 producer は SCROLL として無視 |
+
+- META＋履歴は **Bridge（＝1 接続）につき 1 回**（`histSent`）。observe の respawn では再送しない。
+- **履歴読取の予算とキャッシュ**（本番実測 2026-10-29: 長寿命 pane では `pane.read` が **4〜16 秒**かかる。返る行数と無関係＝herdr 側）: 読取は `HistoryBudget`（既定 1.5s）だけ待ち、間に合わなければ `hist=0` で先に描画する。読取は daemon 共有の `HistoryCache`（pane ごと同時 1 本・TTL 60s）で継続し、次の接続（quiescence 再接続・リロード）で `hist=1` として送る。
+- Web（`term.js` `cmMakeMetaFilter`）は OSC を xterm に流す前に剥がし、`v=2` で `term.options.scrollback=5000`＋`term.resize(C,R)`＋fontSize を画面高に合わせる（**クライアント内で完結。RESIZE は再送しない**＝不変条件維持）。本文つき履歴（`hist=1`）はページにつき 1 回だけ scrollback に入れ、以降の接続で届いた分は捨てる。`hist=0` の接続は「未受領」のまま＝次の `hist=1` を受け入れ、既に画面を描いていれば `term.reset()` してから履歴→full frame の順で描き直す。`scrolled>0` はステータス欄に案内（⤓ で最新へ）。
+- META が来ない（旧 producer）なら従来の固定 160×500 グリッドのまま。
+- **↗窓の画像貼付（2026-11-01）**: ↗窓（`herdr-drover attach`）で **Ctrl+V** を押すと、この PC のクリップボードに画像があれば PNG で読み（macOS: `osascript`。`clipboard info` の型名 PNGf/TIFF/JPEG で判定）、IMAGE frame（Web と同じ `0xff 0xfd|u32BE len|u8 ext|bytes`）をリモートへ送る＝リモートの producer がクリップボードへ載せて Ctrl+V を注入する（attach 自身は 0x16 を送らない）。画像が無ければ従来どおり 0x16 を通す。貼り付け（複数バイト入力）の途中の 0x16 には触れない。リモートが無効（セッション doc に `image_paste` が無い）と分かっている時は画像を送らず 0x16 を通す。上限 8MB。herdr の `remote_image_paste` は `herdr --remote` 専用で ↗窓には効かない。テスト: 実 herdr の pane で本物の attach に Ctrl+V キーを送る `TestE2EAttachImagePaste`、Web 側 `TestE2EWebTerminalImagePaste`（ブラウザと同じ golden を両端で固定）。
+- **全画面 TUI の履歴は transcript から（2026-10-30）**: Claude Code / Codex の pane は herdr の scrollback に可視画面ぶんしか残らない（実測: 全 pane で `pane.read recent` が画面+1 行・`max_offset_from_bottom=0`。herdr のヘルプにも「alternate-screen の行は通常の scrollback に入らない」）ため、`pane.read` ベースの履歴は 0 行になる。producer は `agent_session`（kind=id）がある pane の履歴を、そのエージェント自身の transcript（Claude: `~/.claude/projects/*/<id>.jsonl`、Codex: `~/.codex/sessions/*/*/*/rollout-*-<id>.jsonl`）の**末尾 24MB**から組み立てる（`internal/transcripthist`。ユーザ `> `・エージェント `● `・ツール呼出 `  ⎿ 名前 要約`。thinking／tool_result／isMeta／サブエージェントは除く。最大 3000 行）。transcript は可視画面を含まないので末尾の可視行を**落とさない**（`histEntry.dropRows`）。取れなければ従来の `pane.read`。Web（META 付き）と ↗窓 attach（素のテキスト）の両方に効く。opencode は sqlite（`$XDG_DATA_HOME` or `~/.local/share/opencode/opencode.db` の `session_message`・2.2 実測。`sqlite3` コマンドで読む＝無い／旧形式なら `pane.read` へ）から直近 200 メッセージ。履歴の末尾の発話は画面にも出ているので、遡ると最後の発話が二重に見える。
+- **↗窓 attach（2026-10-29 対応）**: attach は pane サイズを元 pane に合わせられない（viewer が本物の pane）ので v2 の「元 pane 実サイズ」モードは使わず、**履歴のみ HELLO**（上表）で、herdr のスクロールでリモートの過去ログを遡れるようにした。履歴は attach pane の scrollback に積まれる＝再接続のたびに要求すると重複するため、**プロセスにつき最初の接続の 1 回だけ**要求（`connHolder.histDone`。フレームを 1 バイトでも受けた接続で立てる）。履歴が予算（1.5s）内に取れなかった接続でも histDone は立つ＝その場合その attach では遡れない（本番で `pane.read` が 4〜16s かかる pane がある。次に attach pane を開き直した時に取れる）。
+- 実測ゲート（attach）: `internal/bridge/bridge_attachhist_test.go`（隔離 herdr に実 pane 2 つ: source に scrollback を作り、FIFO を cat する viewer pane に bridge の出力を流して、viewer の herdr scrollback に過去行が重複・逆順なく入ること／HELLO なしの対照では入らないこと／OSC が流れないこと）、`cmd/herdr-drover/attach_test.go TestAttachHandshakeHistoryOncePerProcess`。
+- 実測ゲート: `internal/bridge/bridge_v2_test.go`（実 herdr: argv＝layout 桁×pty 行・ストリーム順序・respawn 非再送・旧 viewer 無影響）、drover-cloud `web/termjs_gate_test.go TestTermJSMetaFilter`（node）。
 
 ## 6. 設定
 

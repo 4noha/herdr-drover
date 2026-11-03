@@ -179,7 +179,7 @@ func physicalDir(t *testing.T) string {
 func installStubClaudeAt(t *testing.T, dir, marker string) string {
 	t.Helper()
 	stub := filepath.Join(dir, "claude")
-	script := "#!/bin/sh\necho " + marker + "\nexec sleep 300\n"
+	script := "#!/bin/sh\necho " + marker + "\nsleep 300\n"
 	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
 		t.Fatalf("stub claude 作成: %v", err)
 	}
@@ -310,13 +310,15 @@ func TestE2EClaudeShimPickerSecondCandidate(t *testing.T) {
 	const markB = "HD_E2E_PICK_MARK_B"
 	stubA := installStubClaudeAt(t, t.TempDir(), markA)
 	stubB := installStubClaudeAt(t, t.TempDir(), markB)
-	agA, err := api.AgentStart("claude", []string{stubA}, &herdrapi.AgentStartOptions{Cwd: work})
+	// 旧 agent.start{name,argv} は herdr 0.9.x で廃止＝LaunchAgent（layout.apply＋
+	// 検出待ち rename）で同じ「名前付き候補 2 件」を作る。
+	agA, err := api.LaunchAgent("claude", []string{stubA}, &herdrapi.LaunchAgentOptions{Cwd: work})
 	if err != nil {
-		t.Fatalf("agent.start A: %v", err)
+		t.Fatalf("LaunchAgent A: %v", err)
 	}
-	agB, err := api.AgentStart("claude-2", []string{stubB}, &herdrapi.AgentStartOptions{Cwd: work})
+	agB, err := api.LaunchAgent("claude-2", []string{stubB}, &herdrapi.LaunchAgentOptions{Cwd: work})
 	if err != nil {
-		t.Fatalf("agent.start B: %v", err)
+		t.Fatalf("LaunchAgent B: %v", err)
 	}
 	markerByPane := map[string]string{agA.PaneID: markA, agB.PaneID: markB}
 	waitShimAgents(t, api, work, 2, "claude", "claude-2")

@@ -23,17 +23,21 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/4noha/drover-cloud/relayclient"
 	"github.com/4noha/drover-cloud/state"
+	"github.com/4noha/herdr-drover/internal/bridge"
 	"github.com/4noha/herdr-drover/internal/herdrapi"
 )
 
@@ -233,6 +237,55 @@ type connHolder struct {
 	// pending は未接続中に打たれた入力。接続確立時に TTL 内なら流す。
 	pending      []byte
 	pendingSince time.Time
+	// histDone は「リモートの履歴をこの pane の scrollback へ入れ終えた」印。↗窓は
+	// 常駐 pane で quiescence 再接続が頻繁に起きるため、履歴は**プロセスにつき最初の
+	// 接続の 1 回だけ**要求する（再接続のたびに要求すると同じ履歴が scrollback に
+	// 何度も積まれる）。フレームを 1 バイトでも受けた接続で立てる。
+	histDone atomic.Bool
+	// imagePaste はリモートの producer が画像貼付を受け付けるか（セッション doc の
+	// image_paste。imagePasteUnknown/On/Off）。Off と分かっている時だけ止める。
+	imagePaste atomic.Int32
+}
+
+const (
+	imagePasteUnknown int32 = iota
+	imagePasteOn
+	imagePasteOff
+)
+
+// maxAttachImageBytes は送る画像の上限（term.js と同じ 8MB。producer も同値で破棄する）。
+const maxAttachImageBytes = 8 << 20
+
+// imageExtPNG は IMAGE frame の ext コード（producer の imageExtClass: 1=png）。
+const imageExtPNG = 1
+
+// imageFrame は IMAGE frame（0xff 0xfd | u32BE len | u8 ext | bytes）。term.js の
+// cmImageFrame と同一（golden は TestAttachImageFrameMatchesBrowserGolden）。
+func imageFrame(ext byte, payload []byte) []byte {
+	f := make([]byte, 7+len(payload))
+	f[0], f[1] = 0xff, 0xfd
+	binary.BigEndian.PutUint32(f[2:6], uint32(len(payload)))
+	f[6] = ext
+	copy(f[7:], payload)
+	return f
+}
+
+// remoteImagePaste はリモート PC の当該 session の image_paste をセッション doc から引く。
+// doc が見つからない／読めない時は Unknown（機能を勝手に塞がない）。
+func remoteImagePaste(ctx context.Context, st *state.Client, remotePC, sid string) int32 {
+	ss, err := st.ListSessions(ctx, remotePC)
+	if err != nil {
+		return imagePasteUnknown
+	}
+	for _, s := range ss {
+		if k, _ := s["key"].(string); k == sid {
+			if v, _ := s["image_paste"].(bool); v {
+				return imagePasteOn
+			}
+			return imagePasteOff
+		}
+	}
+	return imagePasteUnknown
 }
 
 // set は現接続を差し替える。接続確立時（c != nil）に、未接続中へ溜めた入力が
@@ -271,6 +324,44 @@ func (h *connHolder) kickWake() {
 	case h.wake <- struct{}{}:
 		h.lg.Printf("未接続中に入力＝再接続を促す（quiescence からの復帰）")
 	default: // 既に要求済み
+	}
+}
+
+// forwardInput は r（pane 入力）を読み続け、端末応答を除いてから write（現接続への
+// 転送）へ渡す。r が error を返したら戻る（pane close で stdin が閉じる）。
+//
+// ⚠端末応答を除かないと、herdr が返した応答（`ESC[?62;22c` 等）がキー入力と同じ道で
+// リモートへ届き、リモートのシェルに打ち込まれる（BUG-14・termreply.go）。除いた応答は
+// onDrop へ渡す（silent にしない）。応答だけだった Read は write しない＝未接続中に
+// 「ユーザーが操作したい合図」（connHolder.write の再接続 wake）を誤って立てない。
+//
+// onImage は ↗窓の画像貼付。入力が **Ctrl+V(0x16) 1 バイトだけ**の読みのとき、非 nil の
+// フレームを返したらそれをリモートへ送り 0x16 は送らない（リモートの producer が
+// クリップボードへ載せたうえで Ctrl+V を注入する）。nil なら従来どおり 0x16 を通す。
+// 貼り付け（複数バイト）の途中の 0x16 には触れない。
+func forwardInput(r io.Reader, write func([]byte) error, onDrop func([][]byte), onImage func() []byte) {
+	var f termReplyFilter
+	buf := make([]byte, 4096)
+	for {
+		n, rerr := r.Read(buf)
+		if n > 0 {
+			out, dropped := f.Filter(buf[:n])
+			if len(dropped) > 0 && onDrop != nil {
+				onDrop(dropped)
+			}
+			if onImage != nil && len(out) == 1 && out[0] == 0x16 {
+				if fr := onImage(); fr != nil {
+					_ = write(fr)
+					out = nil
+				}
+			}
+			if len(out) > 0 {
+				_ = write(out)
+			}
+		}
+		if rerr != nil {
+			return
+		}
 	}
 }
 
@@ -422,18 +513,38 @@ func cmdAttach(args []string, stdout, stderr io.Writer) error {
 	// 後から holder.wake を代入すると data race になる。
 	wakeCh := make(chan struct{}, 1)
 	holder := &connHolder{wake: wakeCh, lg: lg}
-	go func() {
-		buf := make([]byte, 4096)
-		for {
-			n, rerr := os.Stdin.Read(buf)
-			if n > 0 {
-				_ = holder.write(buf[:n])
-			}
-			if rerr != nil {
-				return
-			}
+	// 端末応答の除去は記録する（初回と、以後は 1 分に 1 回まで＝↗窓 が再接続のたびに
+	// 応答を受けても attach.log を埋めない）。stdin reader goroutine だけが触る。
+	var dropTotal int
+	var dropLogged time.Time
+	onDrop := func(d [][]byte) {
+		dropTotal += len(d)
+		if dropLogged.IsZero() || time.Since(dropLogged) >= time.Minute {
+			lg.Printf("端末応答を入力から除去（リモートへ送らない）: 今回 %q／累計 %d 件", d, dropTotal)
+			dropLogged = time.Now()
 		}
-	}()
+	}
+	onImage := func() []byte {
+		if holder.imagePaste.Load() == imagePasteOff {
+			lg.Printf("画像貼付: リモートが無効（DROVER_WEB_IMAGE_PASTE）なので Ctrl+V をそのまま通す")
+			return nil
+		}
+		png, err := localClipboardPNG()
+		if err != nil {
+			lg.Printf("画像貼付: ローカルのクリップボードを読めない（Ctrl+V をそのまま通す）: %v", err)
+			return nil
+		}
+		if png == nil {
+			return nil // 画像なし＝従来の Ctrl+V
+		}
+		if len(png) > maxAttachImageBytes {
+			lg.Printf("画像貼付: %dB は上限 %dB 超（Ctrl+V をそのまま通す）", len(png), maxAttachImageBytes)
+			return nil
+		}
+		lg.Printf("画像貼付: ローカルのクリップボード画像 %dB をリモートへ送る", len(png))
+		return imageFrame(imageExtPNG, png)
+	}
+	go forwardInput(os.Stdin, holder.write, onDrop, onImage)
 
 	go watchLifecycle(ctx, holder, wakeCh, nil, nil, nil, func(reason string) {
 		fmt.Fprintf(out, "\r\n↗ %s: %s — 再接続します\r\n", remotePC, reason)
@@ -558,6 +669,7 @@ func attachOnce(ctx context.Context, st *state.Client, relayURL, injSid, remoteP
 	if werr := st.Wake(gctx, remotePC, injSid); werr != nil {
 		lg.Printf("Wake 失敗（続行）: %v", werr)
 	}
+	holder.imagePaste.Store(remoteImagePaste(gctx, st, remotePC, strings.TrimSuffix(injSid, "#inj")))
 	gcancel()
 
 	dctx, dcancel := context.WithCancel(ctx)
@@ -588,7 +700,12 @@ func attachOnce(ctx context.Context, st *state.Client, relayURL, injSid, remoteP
 	// 初回 RESIZE（cm-wire magic）で observe サイズを pane 実寸へ。以後 SIGWINCH
 	// で再送。RESIZE を送らないと bridge は初回 full frame を出さない（実測仕様）。
 	rows, cols := termSize(int(out.Fd()))
-	_, _ = conn.Write(resizeMagic(rows, cols))
+	// 履歴のみ HELLO（プロセスにつき最初の接続だけ）。producer は observe を RESIZE の
+	// サイズのまま、先頭にリモートの scrollback を素のテキストで流す＝この pane
+	// （herdr）のスクロールでリモートの過去ログを遡れる。旧 PC は SCROLL として
+	// 無視する（履歴が来ないだけ）。RESIZE より前に送ること（producer は RESIZE で
+	// observe を起動するため、HELLO が後だと履歴フラグが間に合わない）。
+	askHist := attachHandshake(conn, holder, rows, cols)
 
 	winch, stopWinch := notifyResize(int(out.Fd()))
 	defer stopWinch()
@@ -615,6 +732,9 @@ func attachOnce(ctx context.Context, st *state.Client, relayURL, injSid, remoteP
 
 	pumpStart := time.Now()
 	idleClosed, got, why := pumpFrames(conn, out, DefaultIdle)
+	if askHist && got > 0 {
+		holder.histDone.Store(true)
+	}
 	// ⚠張り付き調査の核心行。received=0 が続くなら「dial は通るが source が bridge を
 	// 張っていない」（＝Wake/grant 側の問題）、received>0 なら「流れていた接続が落ちた」
 	// で原因が別れる。**1 サイクル 1 行**に畳んで書く（量の見積もりを外して
@@ -704,6 +824,25 @@ func isQuiescentClose(idle, sinceLastByte time.Duration) bool {
 	}
 	const slack = time.Second
 	return sinceLastByte+slack >= idle
+}
+
+// attachHandshake は接続直後に送るバイト列を書く: 履歴のみ HELLO（プロセスで最初の
+// 接続だけ）→ RESIZE。戻り値は HELLO を送ったか（呼び手が、フレームを受けた時に
+// holder.histDone を立てる判断に使う）。順序が要: producer は RESIZE で observe を起動
+// する＝HELLO が後だと履歴フラグが間に合わない。
+func attachHandshake(w io.Writer, holder *connHolder, rows, cols int) (askedHist bool) {
+	if !holder.histDone.Load() {
+		_, _ = w.Write(helloHistMagic())
+		askedHist = true
+	}
+	_, _ = w.Write(resizeMagic(rows, cols))
+	return askedHist
+}
+
+// helloHistMagic は「履歴のみ」HELLO（SCROLL フレーム 0xff 0xfe + dy=bridge.HelloHistDy）。
+// producer 側の定義は internal/bridge/cmwire.go。
+func helloHistMagic() []byte {
+	return []byte{0xff, 0xfe, byte(bridge.HelloHistDy >> 8), byte(bridge.HelloHistDy & 0xff)}
 }
 
 // resizeMagic は cm-wire の RESIZE（0xff 0xff + rows u16BE + cols u16BE）。

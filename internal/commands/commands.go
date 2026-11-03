@@ -20,6 +20,8 @@
 //	update-claude  → `claude update`＋上記の再起動を 1 コマンドで
 //	                 （DoUpdateClaude seam）。self-update が **herdr-drover 自身**
 //	                 の更新なのに対し、こちらは **claude 本体**の更新＝別物
+//	semi-auto      → セミオート続行（autocontinue）の pane 単位 ON/OFF（DoSemiAuto seam。
+//	                 args["on"]=1/0。Web コンソールの ⟳ ボタン）
 //	update-all     → Web のワンボタン。claude 更新＋セッション反映 → 自己更新 →
 //	                 自身の再起動、を**この順で逐次**（DoUpdateAll seam）。
 //	                 ⚠自身の再起動は exit でしか反映できずハンドラが終わる＝
@@ -88,6 +90,10 @@ type CommandRunner struct {
 	DoSendInput func(ctx context.Context, sid string, args map[string]string) (summary string, err error)
 	// DoInterrupt は Ctrl-C 相当（pane.send_keys C-c）。
 	DoInterrupt func(ctx context.Context, sid string) (summary string, err error)
+	// DoSemiAuto はセミオート続行（autocontinue）の pane 単位 ON/OFF。args["on"] は
+	// "1"/"0"（無ければ反転）。実体は cmd 側（設定ファイル・Tab 印・トースト・即時
+	// re-scan）＝ここは sid と args を渡すだけ。agent 自身は死なないので Ack は実行後。
+	DoSemiAuto func(ctx context.Context, sid string, args map[string]string) (summary string, err error)
 }
 
 // checkExpiry は Args["expires_at"]（RFC3339Nano）を検証する。send-input /
@@ -267,6 +273,22 @@ func (cr *CommandRunner) handle(ctx context.Context, cm state.Command) {
 		summary, err := cr.DoInterrupt(ctx, cm.SID)
 		if err != nil {
 			_ = cr.St.AckCommand(ctx, cm.ID, "error", "中断失敗: "+err.Error())
+			return
+		}
+		_ = cr.St.AckCommand(ctx, cm.ID, "done", summary)
+
+	case "semi-auto":
+		if cr.DoSemiAuto == nil {
+			_ = cr.St.AckCommand(ctx, cm.ID, "error", "semi-auto 未配線")
+			return
+		}
+		if cm.SID == "" {
+			_ = cr.St.AckCommand(ctx, cm.ID, "error", "semi-auto は sid 必須（pane 単位の切替）")
+			return
+		}
+		summary, err := cr.DoSemiAuto(ctx, cm.SID, cm.Args)
+		if err != nil {
+			_ = cr.St.AckCommand(ctx, cm.ID, "error", "semi-auto 失敗: "+err.Error())
 			return
 		}
 		_ = cr.St.AckCommand(ctx, cm.ID, "done", summary)

@@ -184,3 +184,27 @@ func TestHandleImageWithoutPayloadDoesNotInject(t *testing.T) {
 		t.Fatalf("失敗を silent に落としている（ログ: %v）", logs)
 	}
 }
+
+// TestCMWireImageGoldenFromBrowser — ブラウザ（term.js の cmImageFrame）が組む IMAGE frame の
+// バイト列そのもの（drover-cloud の TestTermJSImageFrame と同じ golden）を producer の
+// パーサに食わせる。両端が同じバイトを見ていることの固定（片側だけ直して壊れるのを防ぐ）。
+func TestCMWireImageGoldenFromBrowser(t *testing.T) {
+	golden := []byte{0xff, 0xfd, 0x00, 0x00, 0x00, 0x05, 0x01, 1, 2, 3, 4, 5}
+	var p CMWireParser
+	p.KeepImage = true
+	evs := p.Feed(golden)
+	if len(evs) != 1 || evs[0].Kind != EvImage || evs[0].ImageLen != 5 || evs[0].ImageExt != 1 ||
+		!bytes.Equal(evs[0].Image, []byte{1, 2, 3, 4, 5}) {
+		t.Fatalf("ブラウザの golden を解釈できない: %+v", evs)
+	}
+	// 1 バイトずつ（relay/ws の分割到着）でも同じ。
+	var q CMWireParser
+	q.KeepImage = true
+	var got []Event
+	for _, c := range golden {
+		got = append(got, q.Feed([]byte{c})...)
+	}
+	if len(got) != 1 || !bytes.Equal(got[0].Image, []byte{1, 2, 3, 4, 5}) {
+		t.Fatalf("分割到着で解釈できない: %+v", got)
+	}
+}

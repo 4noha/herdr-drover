@@ -103,6 +103,10 @@ type webTerm struct {
 	//   他人から読めるため。DESIGN_SLAVE の脅威モデル）。
 	imagePaste bool
 
+	// hist は v2 Web viewer 向け履歴スナップショットの共有キャッシュ（全 bridge
+	// で 1 つ。予算超過した pane.read の結果を次の接続で使うため）。
+	hist *bridge.HistoryCache
+
 	mu     sync.Mutex
 	ctx    context.Context       // start() の親 ctx（respawn の再 spawn 用）
 	active map[string]*bridgeRun // 同 sid の二重ブリッジ防止＋respawn ハンドル
@@ -116,6 +120,7 @@ func newWebTerm(relayURL string, idle time.Duration, st agentState, hcli *herdra
 		st:       st,
 		hcli:     hcli,
 		lg:       lg,
+		hist:     bridge.NewHistoryCache(),
 		active:   map[string]*bridgeRun{},
 	}
 }
@@ -269,6 +274,7 @@ func (w *webTerm) handleWake(ctx context.Context, sid string) {
 	b.FirstByteIdle = w.firstByteIdle
 	// 画像貼付（既定 off）。off の間は従来どおり IMAGE frame を破棄する。
 	b.ImagePaste = w.imagePaste
+	b.HistoryCache = w.hist
 	b.Logf = func(format string, args ...any) {
 		w.lg.Printf("webterm: bridge sid=%q: "+format, append([]any{sid}, args...)...)
 	}

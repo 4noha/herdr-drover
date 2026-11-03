@@ -43,6 +43,11 @@ type webhookNotifier struct {
 
 	cachedCfg webhook.Config
 	cachedAt  time.Time
+
+	// suppressed は notify.go の taskNotifier と同じ seam（autocontinue の
+	// 抑止マーク）。true の間は遷移を保留する（prev を working のまま保つ）。
+	suppressed func(key string) bool
+	supLogged  map[string]bool
 }
 
 func newWebhookNotifier(pcName string, lg *log.Logger) *webhookNotifier {
@@ -81,6 +86,18 @@ func (wn *webhookNotifier) check(ctx context.Context, st webhookConfigStore, ses
 		prevStatus, known := wn.prev[key]
 		wn.prev[key] = status
 		if !webhook.NotifyStates[status] || !known || prevStatus != "working" {
+			delete(wn.supLogged, key)
+			continue
+		}
+		if wn.suppressed != nil && wn.suppressed(key) {
+			wn.prev[key] = "working" // 遷移を保留（マークが消えれば次 tick で確定）
+			if wn.supLogged == nil {
+				wn.supLogged = map[string]bool{}
+			}
+			if !wn.supLogged[key] {
+				wn.supLogged[key] = true
+				wn.lg.Printf("[webhook] semi-auto 処理中のため通知を保留 sid=%s status=%s", key, status)
+			}
 			continue
 		}
 		if !cfgLoaded {

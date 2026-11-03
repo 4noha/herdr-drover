@@ -276,7 +276,7 @@ func TestSummarizeRestart(t *testing.T) {
 // 同名でも「別バイナリ」を作れる（曖昧判定のテストが成立する）。
 func writeStubClaude(t *testing.T) string {
 	t.Helper()
-	return sleepStub(t, filepath.Join(t.TempDir(), "claude"), "#!/bin/sh\nexec sleep 300\n", 300)
+	return sleepStub(t, filepath.Join(t.TempDir(), "claude"), "#!/bin/sh\nsleep 300\n", 300)
 }
 
 // writeResumeRejectingStub は「--resume を渡されたら即 exit 1」する stub を作る
@@ -287,7 +287,7 @@ func writeResumeRejectingStub(t *testing.T) string {
 		"for a in \"$@\"; do\n" +
 		"  if [ \"$a\" = \"--resume\" ]; then echo 'No conversation found' >&2; exit 1; fi\n" +
 		"done\n" +
-		"exec sleep 300\n"
+		"sleep 300\n"
 	return writeAgentStub(t, filepath.Join(t.TempDir(), "claude"), script, stubSpec{
 		AnyArg:   map[string]stubReply{"--resume": {Stderr: "No conversation found", Exit: 1}},
 		SleepSec: 300,
@@ -837,6 +837,17 @@ func reportTestSession(t *testing.T, api *herdrapi.Client, pane, agent, ref stri
 // でもあり、どちらも「メッセージに種別名を焼く」ことが原因。
 //
 // 旧コード（固定文字列）ではこのテストは FAIL する。
+//
+// ⚠herdr 0.9.x で組み方を変えた（実測 2026-10-25）:
+//   - `herdr:*` は herdr 自身の統合の予約ソース（公式文書 add-herdr-support）で、
+//     **herdr が前景プロセスから agent を検出済みの pane** にしか session を載せない。
+//     旧テストの「素シェル pane に report_agent で種別を偽装」では agent_session が
+//     付かず、ref 無し skip に落ちて目的の分岐へ届かない。
+//   - opencode は検出済み pane でも外部からの report_agent_session で session が
+//     載らない（公式統合と同じ順序・形でも不可）。claude 以外の種別という性質は
+//     同じなので **codex** で検証する（codex は検出済み pane なら載る実測）。
+//   - 「launch argv 無し（shell から起動）」は、素シェル pane で stub を
+//     send_text 起動して作る（layout.apply の command で起動すると argv が付く）。
 func TestRestartSkipMessageUsesActualAgentKind(t *testing.T) {
 	sock := startHerdrForTest(t)
 	api := herdrapi.New(sock)
@@ -889,5 +900,8 @@ func TestRestartSkipMessageUsesActualAgentKind(t *testing.T) {
 	}
 	if strings.Contains(d, "claude") {
 		t.Errorf("skip 理由に claude が焼き込まれている（別種別なのに嘘を表示する）: %q", d)
+	}
+	if !strings.Contains(d, "launch argv が無い") {
+		t.Errorf("目的の分岐（launch argv 無し）に届いていない: %q", d)
 	}
 }

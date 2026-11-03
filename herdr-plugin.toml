@@ -48,6 +48,18 @@ id = "mv-tab"
 title = "Move Tab to another Workspace..."
 command = ["bin/herdr-drover", "mv-tab-launch"]
 
+# セミオート続行（SPEC §2.6）のキー一発トグル。herdr が action にフォーカス pane の
+# HERDR_PANE_ID を注入する（plugins.mdx）。結果は notification.show のトーストで出す。
+# キー割当は ~/.config/herdr/config.toml:
+#   [[keys.command]]
+#   key = "ctrl+alt+a"
+#   type = "plugin_action"
+#   command = "4noha.drover.auto-toggle"
+[[actions]]
+id = "auto-toggle"
+title = "Toggle semi-auto continue (つづけて自動入力) for focused pane"
+command = ["bin/herdr-drover", "auto", "toggle"]
+
 # events は常駐不可のため nudge（SIGUSR1 → daemon 即時 re-scan）専用。
 # 発火は合図でしかなく差分の権威ではない（周期 poll backstop が daemon 側に常設）。
 # 網羅の根拠（herdr 0.7.4 実測）:

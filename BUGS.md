@@ -703,3 +703,147 @@ env 未設定なら `bridge.DefaultFirstByteIdle`（5s）のまま＝**本番の
 `TestResolveConfigEnvOverrides`（`DROVER_FIRST_BYTE_IDLE=10s` の反映）・
 `TestResolveConfigBadFirstByteIdle`（不正値/0 以下を拒否）。gofmt/build/vet/test
 全緑（`go test ./... -count=1`）。
+
+---
+
+## BUG-12【P0】herdr 0.9.5 で daemon とシムが起動しない（ping の decode 失敗）（2026-10-25）
+
+### ✅ 解決（2026-10-25・`internal/herdrapi/types.go`／**未 release**）
+`PongInfo.UnmarshalJSON` で capabilities の bool 値だけを拾い、他の型は捨てる
+（bool に捏造しない）。capabilities は情報として保持するだけで分岐に使っていない。
+
+### 症状
+再起動後に daemon が起動直後 exit 1 を繰り返す（launchd `runs = 186`）。`claude` シムは
+「herdr server が 10s 以内に応答しない」と表示して起動しない（server 自体は応答している）。
+
+### 真因（確定）
+herdr 0.9.5 の ping が `capabilities` に数値（`endpoint_protocol_generation:1`）を含む。
+`map[string]bool` の decode が `cannot unmarshal number into Go struct field
+PongInfo.capabilities of type bool` で失敗。herdr は brew で 10/25 04:24 に 0.9.5 化済みで、
+server が 0.9.5 で起動し直した再起動を機に顕在化した。
+
+### テスト
+`internal/herdrapi/pong_test.go`（実 0.9.5 の ping 原文を固定。**旧型で実機と同一の
+エラー文で FAIL を確認済み**）。
+
+---
+
+## BUG-13【P1】herdr 0.9.5 でシム・restart-agent-session・update-all が命名で失敗する（2026-10-25）
+
+### ✅ 解決（2026-10-25・`internal/herdrapi/agentlaunch.go`／**未 release**）
+`agent.rename` を `RenameWithDetectWait`（`agent_not_found` の exact-match のみ上限
+15 秒で待つ）経由にした。旧 `agent.start{name,argv}` 相当は `LaunchAgent`
+（layout.apply＋検出待ち rename）に置き換え、廃止 API のラッパ `AgentStart` は削除。
+購読は `SubscribeReady` で確立を通知し、learn ループは確立をログに出す。
+
+### 真因（確定・実測）
+0.9.5 は agent 検出が前景プロセス名ベースの非同期処理になり、生成直後の pane への
+`agent.rename` が `agent_not_found`（本物の claude で約 0.76 秒後に通る）。あわせて
+`agent.start` の意味変更・購読前 event の再送廃止・`herdr:*` 予約ソースの扱いが
+テスト基盤を壊していた（CLAUDE.md「herdr 0.9.5 で変わったこと」）。
+
+### 踏まないようにしたこと
+- **購読前 event の再送に頼っていた race**: learn・events のテストは再送が race を
+  覆っていた。確立を待ってから動く形に直した（3 回連続で安定を確認）。
+- **再送を捨てる防御**（learn の snapshot 照合）は 0.7.4 互換のため残したが、
+  実 herdr 0.9.x のテストでは**踏まれない**（再送が来ない）。
+- **「名前だけ付いて検出されていない pane」**は 0.9.x では作れない（命名に検出が必須）。
+  organize の (a) 経路は検出済み pane への命名で検証している。
+
+### テスト（実 herdr 0.9.5・`go test ./... -count=1` 全緑）
+`internal/herdrapi/agentlaunch_test.go`（検出待ちの純関数 4 件＋`TestLaunchAgent`／
+検出されない argv で loud に失敗）、events の確立待ち 2 件、organize capture/learn、
+restart の skip 文言（codex で再構成）、e2e picker・間借り正規化。
+⚠ Firestore エミュレータ（Java 21+）を要する 15 件はこの機で skip＝0.9.5 では未検証。
+
+---
+
+## BUG-14【P1】↗窓 の向こうのシェルに `62;22c` が打ち込まれる（端末応答の転送）（2026-10-26）
+
+### ✅ 解決（2026-10-26・`cmd/herdr-drover/termreply.go` 新設＋`attach.go`／**未 release**）
+attach の入力経路（`forwardInput`）で、herdr が返した**端末応答**を、リモートへ送る前に
+捨てる。捨てるのはキー入力・マウス・貼り付けと構造的に区別できる形だけ（DA1/DA2・
+DSR・DECRPM・kitty フラグ応答・完結した OSC/DCS）。カーソル位置応答（`ESC[1;1R`）は
+修飾付き F3（`ESC[1;2R`）と同形なので通す。途中で切れた列は保留せず通す（単独 Esc を
+遅らせない）。貼り付け（`ESC[200~ … ESC[201~`）の中身は触らない。除去は attach.log に
+記録する（初回と、以後 1 分に 1 回まで）。
+
+### 症状
+mac-studio の素シェル 17 枚の入力行に `62;22c62;22c…` が最大 197 回（直近 200 行）
+打ち込まれていた。agent が動いている 29 枚では混入は見つからなかった。
+
+### 真因（確定・実測）
+1. ↗窓 の attach は herdr の pane の中で動き、pane 入力を raw のまま全部リモートへ転送する。
+2. herdr 0.9.5 は pane 内のプログラムが端末へ問い合わせると、**応答を pane の入力として
+   返す**（隔離 server で採取: `ESC[c` → `ESC[?62;22c` ほか 9 種）。
+3. その応答がキー入力と同じ道でリモートへ届き、リモートのシェルに打ち込まれた。
+   リモートの問い合わせにはリモート側の端末が既に答えている＝こちらの応答は重複。
+⚠ リモートの画面データにどの問い合わせがいつ含まれるかは確かめていない（応答の発生源
+が何であれ、入力側で捨てれば足りる）。
+
+### 踏まないようにしたこと
+- 応答だけだった Read は write しない＝未接続中に `connHolder.write` の再接続 wake
+  （「ユーザーが操作したい合図」）を誤って立てない。
+
+### 追記（2026-10-28）: `localview.go` 側も同じ形で対応済み
+`readStdinLoop`（ローカル端末の応答が pane.send_text で pane に入り得る経路）も
+`termReplyFilter` を通すよう修正。mac-studio のローカル pane（w2K:p5・dmm-kabu の
+codex、↗窓でも slave でもない通常 workspace）で同症状（`62;22c` が死んだ pane の
+入力行に literal に残る）を実際に確認して対応。除去は msg（stderr の診断経路）に
+初回と以後 1 分に 1 回まで記録（attach.go と同じ rate-limit）。
+
+### テスト
+`cmd/herdr-drover/termreply_test.go`: 採取した応答 9 種の除去／打鍵 16 種の素通し／混在／
+貼り付け／途中列を保留しない。`TestAttachInputDropsHerdrTermRepliesRealHerdr` は実 herdr
+0.9.5 の pane 内で attach と同じ入力経路を動かす（子プロセス方式）。**フィルタ未接続の
+旧挙動では 9 種すべてがリモート行きに流れて FAIL することを確認済み**。
+
+---
+
+## BUG-15【P2・herdr/codex 側・drover は無関係】codex の native resume が常に効かない（2026-10-28）
+
+### ❌ 未解決（herdr-drover では修正不能。manual `codex resume --last` を前提にする）
+
+### 症状
+herdr integration が `codex: current (v10)` でも、サーバの実再起動（live-handoff ではない
+`herdr server stop`→cold start）で codex pane は常に素シェルに戻る。実機 dmm-kabu
+（w2K:p5）でも、隔離サーバでの再現実験でも、再起動前から既に `agent_session` が
+一度も付かない（`agent="codex"` の検出だけは前景プロセス名で通る）。
+
+### 真因（確定・実測）
+1. `herdr integration install codex` が仕込む `~/.codex/hooks.json`（SessionStart）
+   と `~/.codex/herdr-agent-state.sh` は**正しく登録・起動されている**（hook_input
+   の JSON も `hook_event_name/session_id/transcript_path` が期待形そのもの）。
+2. hook は `pane.report_agent_session` を herdr の Unix socket へ送ろうとするが、
+   **codex 自身のサンドボックス（`permission_mode: default` の workspace-write）が
+   herdr の socket への `connect()` を拒否する**。hook に一時的にデバッグ出力を
+   仕込んで確認（実機で確認後、元の内容に復元済み・差分無し）:
+   ```
+   socket_path='/tmp/.../h.sock' exists=False
+   SEND_EXC=FileNotFoundError(2, 'No such file or directory')
+   ```
+   socket ファイルは実在する（同じ path に herdrapi.Client は普通に繋がる）＝
+   macOS Seatbelt がスコープ外アクセスを ENOENT に偽装する典型パターン。herdr の
+   socket は常にプロジェクトの workspace 外（`~/.config/herdr/` 配下）にあるため、
+   **どの PC・どのプロジェクトでも再現する**（隔離サーバの `/tmp` socket でも
+   本番 `~/.config/herdr/herdr.sock` でも同じ理由で失敗するはず＝実機でも
+   `agent_session` が一度も付いた例がない事実と整合）。
+3. 一度は「`~/.codex/config.toml` の `notify` が別プログラム（Computer Use の
+   `SkyComputerUseClient`）を向いている衝突」を真因と誤診断した（notify 単一枠の
+   衝突に見えた）。**誤り**: codex の herdr 統合は `notify` ではなく `hooks.json`
+   を使う別経路で、両者は無関係・衝突していない。hook は正しく発火している。
+
+### 踏まないようにしたこと
+- `layout.apply` の `command` で codex を直接 exec する検証方法は `HERDR_ENV`/
+  `HERDR_PANE_ID` 等の伝播を誤って疑わせた（実際はシェル経由でも同じ結果＝
+  env 伝播は無関係だったと判明するまで再現方法を切り替えて確かめた）。
+- サンドボックス回避（`sandbox_permissions` 等のグローバル設定変更）は**codex の
+  全セッションのサンドボックスを弱める**ため、ユーザー判断待ちで実装しなかった
+  （2026-10-28 時点ではこのまま＝manual resume を前提にする、との意思決定）。
+
+### 対処
+herdr-drover 側に取れる対処は無い（herdr の socket 経路を codex のサンドボックス
+内に持ち込む・codex 側のサンドボックス設定を緩める、のいずれも herdr/codex 側の
+変更が要る）。運用上は、codex pane が素シェルに戻ったら手動で
+`<実 codex バイナリ> resume --last` を該当 pane に送る（本件の実機対応と同じ手順）。
+

@@ -31,7 +31,7 @@ func writeUpdatableStub(t *testing.T, dir, from, to string) (bin, verFile string
 		"  --version) cat \"$VF\"; echo; exit 0 ;;\n" +
 		"  update) echo \"updated to " + to + "\"; printf %s '" + to + "' > \"$VF\"; exit 0 ;;\n" +
 		"esac\n" +
-		"exec sleep 300\n"
+		"sleep 300\n"
 	bin = writeAgentStub(t, filepath.Join(dir, "claude"), script, stubSpec{
 		Arg1: map[string]stubReply{
 			"--version": {StdoutFile: verFile},
@@ -51,7 +51,7 @@ func writeFailingUpdateStub(t *testing.T, path string) string {
 		"  --version) echo '2.1.214'; exit 0 ;;\n" +
 		"  update) echo 'network unreachable' >&2; exit 1 ;;\n" +
 		"esac\n" +
-		"exec sleep 300\n"
+		"sleep 300\n"
 	return writeAgentStub(t, path, script, stubSpec{
 		Arg1: map[string]stubReply{
 			"--version": {Stdout: "2.1.214"},

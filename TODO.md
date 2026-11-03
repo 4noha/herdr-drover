@@ -30,7 +30,7 @@ v0.5.30 で**判定を経過時間ベースへ**変更し、**実 websocket 越�
 > できない* の記述は**すべて解消済み**（PR #1 merge・`e9bab96` で release に windows 資産。
 > Windows 機の self-update 成功を 7/25 15:52 の Ack で実確認）。
 
-### 2026-10-17: herdr Windows 正式版（0.9.5）への移植（branch `feat/windows-official`・未コミット）
+### 2026-10-17: herdr Windows 正式版（0.9.5）への移植（branch `feat/windows-official`・**main 未マージ**）
 
 herdr は **0.8.2 で Windows GA**、現行 **0.9.5（protocol 22）**。この Windows 機
 （desktop-djb9pfr）の herdr を 7/21 preview → **0.9.5 stable** へ更新（公式
@@ -170,6 +170,84 @@ install.ps1 を `-LocalPackagePath` で実行・zip は GitHub digest と sha256
 復活経路が POSIX シェル前提）。`main.go` の argv[0] multi-call（`claude` という名前のシム）は
 Windows の `claude.exe` を認識しない（未対応・未検証）。
 
+### 2026-10-29: セミオート続行（`auto` / Stop フック）実装・ローカル反映済・fleet 未配信
+
+ユーザー報告「作業がすぐ中断して『つづけて』を連打するループ」の自動化。仕様は
+**SPEC §2.6**。実装は `internal/autocontinue`（状態・判定・transcript・フック・設置）＋
+`cmd/herdr-drover/auto.go`（CLI）＋ notify.go / webhooknotify.go の抑止 seam。
+
+- 実測根拠: このMacの全 transcript 静的解析（Claude 1.8%・Codex 10.5%・opencode 6.2% が
+  「つづけて」系。Codex は待ち中央値 6 分）。判定は 2 値（番号付き選択肢も「つづけて」で
+  よい＝ユーザ自身がそうしている）。
+- 検証: 実 Claude Code 2.1.312 で `claude -p --settings` 経由の Stop フック契約を live で
+  確認（`TestLiveClaudeStopHook`・opt-in）。**Codex も実機で確認済**（/hooks trust 後、
+  pane w1:p5B で「次はステップ 5 です」→ `Blocked by hook └ [semi-auto 1/3] つづけて` →
+  続行 → 次の停止は判定器 HUMAN で停止）。
+- ⚠ **Codex 0.165 のフックは共有 app-server デーモン内で走る**＝`HERDR_PANE_ID` も
+  `HERDR_SOCKET_PATH` もデーモン起動時の値（別 pane・隔離テストの /tmp socket）が届く。
+  pane は cwd で `agent.list` から一意に引き、socket は既定パスへフォールバック（SPEC §2.6）。
+  herdr の codex integration（SessionStart→`pane.report_agent_session`）も同じ理由で
+  codex pane に `agent_session` が付いていない可能性が高い（`herdr agent list` 実測:
+  codex 行に agent_session 無し）＝BUG-15 と併せて herdr 側の課題。
+- このMacの状態: plugin 再リンク済（action `auto-toggle`）・`~/.config/herdr/config.toml` に
+  `[[keys.command]] ctrl+alt+a` 追加＋reload 済（backup `.bak-2026-10-29-autokey`）。
+  **`herdr-drover auto install`（~/.claude/settings.json 書込）は auto mode の classifier が
+  Self-Modification で止めるためユーザー実行**。codex は `/hooks` trust も要る。
+- 「いま auto か分からない」対応: ON の pane の **Tab ラベルに「⟳ 」**（`tab.rename`・
+  OFF で外す）。Ctrl+Alt+A は実機で動作確認済（ユーザー操作のログで確認）。
+- opencode: server プラグイン実装済（`internal/autocontinue/opencode_plugin.js`・実 node
+  テスト）。**`auto install --agent opencode`（~/.config/opencode/plugins/ 書込）は classifier が
+  Unauthorized Persistence で止めるためユーザー実行**。**実機で確認済**（2026-10-29・
+  `--standalone` の新 Tab で「次は…」→ `[semi-auto 1/3] つづけて` → `[semi-auto 2/3]` →
+  判定器 DONE で停止）。到達までに踏んだ罠は SPEC §2.6 の opencode 行（ローダーは
+  `default.setup(api)` のみ／イベントは内部バス形／`session.prompt` はフラット）。
+  background service への反映は service の再起動が要る（`opencode reload` はユーザー環境の
+  `opencode-openai-codex-auth` のローカル修正が v1 形の hooks を返すため落ちる＝別件）。
+- Web 連携（2026-10-29 午後）: session doc `semi_auto`（producer.WithSemiAuto）＋遠隔命令
+  `semi-auto`（DoSemiAuto・drover-cloud allowlist・web `on=` 引数）＋Web コンソールのバッジ／⟳
+  ボタン＋devices 一覧の印。**Cloud Run を先にデプロイ**（allowlist）→ daemon。
+- 判定の改善サイクル（ユーザー方針 2026-10-29「修正前も合理的だった。データを貯めて全体
+  整合性のあるテストを」）: 判定ごとに `cases.jsonl`（続行時も）・停止後の人の反応を followup・
+  `auto cases` で閲覧/ラベル/export・`testdata/judge_cases.json`＋`TestJudgeCorpus`・
+  `RulesVersion`＋`RULES_CHANGELOG.md`。運用: 続行事例はユーザーが時々眺めて誤続行を
+  label、誤停止はユーザーが報告 → export してコーパスへ → ルール/プロンプト変更は版を上げる。
+- **残課題**: (1) fleet 配信は release が要る＝ユーザー確認後。(4) 判定器は `claude -p`（Haiku・
+  4〜5s）＝各 PC に claude ログインが要る。無ければ常に停止側（ログに fallback）。
+
+### 2026-11-01: 画像送信の通し試験＋↗窓の画像貼付
+- Web の窓: 実 relay・実 agent・実 herdr の pane に Ctrl+V が届くところまで `TestE2EWebTerminalImagePaste`。実クリップボードは `HERDR_DROVER_REAL_CLIPBOARD=1` の `TestRealClipboardImage`（既定 skip＝上書きするため）。ブラウザ側 frame は drover-cloud の node golden。
+- ↗窓: Ctrl+V で画像を送る機能を実装（SPEC §5.2）。macOS のみ。ブラウザ実機（実際のクリップボードから貼る）は未確認。
+- **残**: 他 PC は両側（attach する PC・される PC）の更新が要る。実 Chrome での貼り付けは未自動化。
+
+### 2026-10-30: 全画面 TUI の履歴を transcript から（Claude/Codex/opencode）— 実装・ローカル反映済・fleet 未配信
+- 原因: Claude/Codex/opencode の pane は herdr の scrollback に画面ぶんしか無く（実測）、v2 の履歴（pane.read）が 0 行。
+- `internal/transcripthist`（transcript 末尾 24MB→テキスト行）＋ `bridge.readHistoryDefault`（agent_session があれば transcript、無ければ pane.read）。実 herdr 統合テスト `TestAttachHistoryFromAgentTranscript`（旧コードで落ちる）。
+- opencode も対応済（`session_message`・sqlite3 コマンド。実セッション 2 件で 0.3〜0.4s）。
+- **残**: 他 PC は producer 更新が要る。末尾発話が画面と二重に見える。
+
+### 2026-10-29: Web viewer ワイヤ v2（元 pane 実サイズ observe＋履歴先送り）実装・ローカル反映済・fleet 未配信
+
+ユーザー報告「別 PC のログが表示領域以上遡れない／Web で一発描画されない」の根治。
+仕様は **SPEC §5.2**、実測根拠は SPEC §5.1 の追記 3 行（observe フレームは `2J`＋CUP
+のみ・`pane.read` text は 1000 行キャップ／ansi は可視のみ・桁は `pane.layout rect.width`）。
+
+- producer: `internal/bridge/cmwire.go`（`EvHello`＝SCROLL dy=0x7fff・`EvScrollBottom`＝
+  dy=0x7ffe）・`bridge.go`（`effectiveSize`/`historyPrefix`・`histSent` で 1 接続 1 回）・
+  `history.go`（META/履歴変換・`HistoryCache`＝予算 1.5s＋TTL 60s。**本番で pane.read が
+  4〜16s かかる pane がある**ため）・`herdrapi.PaneReadLines`/`PaneScroll`。実 herdr ゲート
+  `bridge_v2_test.go`（サイズ・順序・予算フォールバック→キャッシュ・最新へ・旧 viewer）。
+- Web（drover-cloud）: `term.js` `cmMakeMetaFilter`/`cmParseMeta`（node ゲート
+  `TestTermJSMetaFilter`）・HELLO 送出・v2 で scrollback 5000＋`resize`＋fontSize 合わせ。
+- ↗窓 attach: **履歴のみ HELLO**（dy=0x7ffd）で対応済（SPEC §5.2。実 herdr 2 pane の統合テスト）。
+  実機の他 PC 間での確認は配信後。
+- API エラーで落ちた停止の自動再開（2026-10-29 ユーザー指摘「すぐ『つづけて』で続くパターン」）:
+  daemon 側 `apiretry.go`（SPEC §2.6）。**実機で本物の API エラー画面での確認は未**（文言は
+  ユーザーの貼り付けと Claude Code/Codex の既知文言からの照合）。外れる文言が出たら
+  `reAPIError` に足す（テスト `TestAPIErrorLine` に追記）。
+- **残課題**: (1) ↗窓 attach の履歴は、取得予算超過の接続では入らない（本番で pane.read が 4〜16s の pane）。(2) fleet 配信は release（tag）が要る＝ユーザー確認後。(3) 履歴は
+  text（モノクロ）・最大 1000 行・Claude Code 系 pane はほぼ空＝「会話全文」は
+  エージェント自身の transcript から引く別機能。(4) 実ブラウザでの最終確認は Cloud Run
+  デプロイ後（headless Chrome では xterm の runtime 切替と履歴重ね書きのみ検証済）。
 
 ### 2026-10-16: MCP Phase 2（画面取得/入力/中断・last_seen）実装・未デプロイ
 

@@ -446,9 +446,23 @@ func nameClaudePane(api *herdrapi.Client, paneID string) (*herdrapi.AgentInfo, e
 func nameAgentPane(api *herdrapi.Client, agent, paneID string) (*herdrapi.AgentInfo, error) {
 	for i := 1; i <= maxClaudeAgents; i++ {
 		name := agentid.Encode(agent, i)
-		ag, err := api.AgentRename(paneID, name)
+		// herdr 0.9.x は agent の検出が非同期（生成直後は agent_not_found）なので
+		// 検出待ちつきで rename する（herdrapi/agentlaunch.go・BUG-13）。
+		raw, waited, err := herdrapi.RenameWithDetectWait(api.AgentRename, paneID, name,
+			herdrapi.AgentDetectTimeout, herdrapi.AgentDetectPoll)
+		if waited >= time.Second {
+			// 待った事実は残す（silent にしない）。0.7.4 では 0 のまま出ない。
+			fmt.Fprintf(os.Stderr, "herdr-drover: agent 検出待ち %s（pane %s）\n",
+				waited.Truncate(time.Millisecond), paneID)
+		}
 		if err == nil {
-			return ag, nil
+			var out struct {
+				Agent herdrapi.AgentInfo `json:"agent"`
+			}
+			if err := json.Unmarshal(raw, &out); err != nil {
+				return nil, fmt.Errorf("agent_info decode: %w", err)
+			}
+			return &out.Agent, nil
 		}
 		var apiErr *herdrapi.APIError
 		if errors.As(err, &apiErr) && apiErr.Code == "agent_name_taken" {

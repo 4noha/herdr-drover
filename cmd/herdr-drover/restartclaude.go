@@ -347,9 +347,17 @@ func moveTabTo(api *herdrapi.Client, tabID string, index int) error {
 // （silent に無名のままにしない）。
 func renameClaudePaneTo(api *herdrapi.Client, paneID, preferred string) (string, error) {
 	if preferred != "" {
-		ag, err := api.AgentRename(paneID, preferred)
+		// herdr 0.9.x は agent 検出が非同期＝検出待ちつきで rename（BUG-13）。
+		raw, _, err := herdrapi.RenameWithDetectWait(api.AgentRename, paneID, preferred,
+			herdrapi.AgentDetectTimeout, herdrapi.AgentDetectPoll)
 		if err == nil {
-			return ag.Name, nil
+			var out struct {
+				Agent herdrapi.AgentInfo `json:"agent"`
+			}
+			if err := json.Unmarshal(raw, &out); err != nil {
+				return "", fmt.Errorf("agent_info decode: %w", err)
+			}
+			return out.Agent.Name, nil
 		}
 		var apiErr *herdrapi.APIError
 		if !errors.As(err, &apiErr) || apiErr.Code != "agent_name_taken" {

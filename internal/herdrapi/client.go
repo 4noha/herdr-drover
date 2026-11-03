@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 	"sync/atomic"
 	"time"
 )
@@ -54,6 +53,10 @@ func New(socketPath string) *Client {
 // ResolveSocketPath は New と同じ解決規則を単体で提供する（診断表示用）。
 // 既定パスは OS 依存（unix: ~/.config/herdr/herdr.sock、windows:
 // %APPDATA%\herdr\herdr.sock）＝defaultSocketPath（dial_{unix,windows}.go）。
+// DefaultSocketPath は env を見ない既定の socket パス（共有デーモン等、env が信用
+// できないプロセスからのフォールバック用。autocontinue の Codex 経路が使う）。
+func DefaultSocketPath() string { return defaultSocketPath() }
+
 func ResolveSocketPath(explicit string) string {
 	if explicit != "" {
 		return explicit
@@ -149,9 +152,18 @@ func (c *Client) call(method string, params, out any) error {
 // DESIGN の hidden CLI リスク対応: agent 起動時に version を実測し、
 // 未検証 version へは警告する用途の一次情報源。
 func (c *Client) Ping() (*PongInfo, error) {
-	var out PongInfo
-	if err := c.call("ping", nil, &out); err != nil {
+	var raw json.RawMessage
+	if err := c.call("ping", nil, &raw); err != nil {
 		return nil, err
+	}
+	return decodePong(raw)
+}
+
+// decodePong は ping 応答の result を PongInfo に読む（テスト可能にするため切り出し）。
+func decodePong(raw []byte) (*PongInfo, error) {
+	var out PongInfo
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("herdr decode ping result: %w", err)
 	}
 	return &out, nil
 }
@@ -271,127 +283,35 @@ func (c *Client) PaneRead(paneID, source string) (*PaneReadInfo, error) {
 	return &out.Read, nil
 }
 
-// AgentStartOptions は agent.start の任意パラメータ（実測で受理・反映を
-// 確認したフィールドのみ。cwd は起動 pane の cwd に反映されることを実測）。
-type AgentStartOptions struct {
-	Cwd         string `json:"cwd,omitempty"`
-	WorkspaceID string `json:"workspace_id,omitempty"`
+// PaneScroll は pane の表示スクロール位置を設定する（pane.scroll）。
+// ⚠ herdr のスクロールは共有 runtime 状態＝ローカル表示にも効く。
+func (c *Client) PaneScroll(paneID string, offsetFromBottom int) error {
+	return c.call("pane.scroll", struct {
+		PaneID string `json:"pane_id"`
+		Offset int    `json:"offset_from_bottom"`
+	}{paneID, offsetFromBottom}, nil)
 }
 
-// AgentStart は名前付き agent を新 pane で起動する。name と argv は必須
-// （実測: 欠くと "missing field `argv`" 等）。
-// result: {"type":"agent_started","agent":{...},"argv":[...]}
-func (c *Client) AgentStart(name string, argv []string, opts *AgentStartOptions) (*AgentInfo, error) {
-	params := struct {
-		Name        string   `json:"name"`
-		Argv        []string `json:"argv"`
-		Cwd         string   `json:"cwd,omitempty"`
-		WorkspaceID string   `json:"workspace_id,omitempty"`
-	}{Name: name, Argv: argv}
-	if opts != nil {
-		params.Cwd = opts.Cwd
-		params.WorkspaceID = opts.WorkspaceID
+// PaneReadLines は pane.read を format=text・行数上限付きで呼ぶ（scrollback
+// 取得用）。実測（herdr 0.9.5・2026-10-29）: text は scrollback を含むが
+// サーバ側で 1000 行に固定キャップ（lines を超えて指定しても Truncated=true
+// で 1000 行）。format=ansi は**可視画面しか返さない**ので履歴には使えない。
+// 保持量は pane により大きく違う（TUI の再描画様式に依存。Claude Code の
+// pane は可視画面未満のこともある）。
+func (c *Client) PaneReadLines(paneID, source string, lines int) (*PaneReadInfo, error) {
+	var out struct {
+		Read PaneReadInfo `json:"read"`
 	}
-	var out AgentStarted
-	err := c.call("agent.start", params, &out)
-	if isAgentStartKindRequired(err) {
-		return c.agentStartViaLayout(name, argv, opts)
-	}
+	err := c.call("pane.read", struct {
+		PaneID string `json:"pane_id"`
+		Source string `json:"source"`
+		Format string `json:"format"`
+		Lines  int    `json:"lines"`
+	}{paneID, source, "text", lines}, &out)
 	if err != nil {
 		return nil, err
 	}
-	return &out.Agent, nil
-}
-
-// isAgentStartKindRequired は「新 wire の agent.start（kind+pane_id 必須）を持つ
-// server に旧 wire を送った」ことを示す応答か。0.9.x で agent.start は
-// 「既存 pane で既知 kind の agent を起動」に変わり、任意 argv・cwd を受けない
-// （実測 0.9.5: invalid_request "missing field `kind`"）。
-func isAgentStartKindRequired(err error) bool {
-	var apiErr *APIError
-	return errors.As(err, &apiErr) && apiErr.Code == "invalid_request" &&
-		strings.Contains(apiErr.Message, "missing field `kind`")
-}
-
-// agentStartViaLayout は旧 agent.start 相当（任意 argv＋cwd の pane に名前を
-// 付ける）を、シム本体と同じ layout.apply＋agent.rename で組み立てる。
-// workspace 未指定なら workspace.create し、その root tab を layout.apply{tab_id}
-// で argv pane に差し替える（素シェル pane を残さない）。
-func (c *Client) agentStartViaLayout(name string, argv []string, opts *AgentStartOptions) (*AgentInfo, error) {
-	var cwd, wsID string
-	if opts != nil {
-		cwd, wsID = opts.Cwd, opts.WorkspaceID
-	}
-	type layoutPane struct {
-		Type    string   `json:"type"`
-		Cwd     string   `json:"cwd,omitempty"`
-		Command []string `json:"command"`
-	}
-	req := struct {
-		WorkspaceID string     `json:"workspace_id,omitempty"`
-		TabID       string     `json:"tab_id,omitempty"`
-		Focus       bool       `json:"focus"`
-		Root        layoutPane `json:"root"`
-	}{WorkspaceID: wsID, Root: layoutPane{Type: "pane", Cwd: cwd, Command: argv}}
-	if wsID == "" {
-		var created WorkspaceCreated
-		if err := c.call("workspace.create", struct {
-			Cwd   string `json:"cwd,omitempty"`
-			Focus bool   `json:"focus"`
-		}{cwd, false}, &created); err != nil {
-			return nil, fmt.Errorf("agent.start fallback: %w", err)
-		}
-		req.TabID = created.Tab.TabID
-	}
-	var applied struct {
-		Layout struct {
-			Root struct {
-				PaneID string `json:"pane_id"`
-			} `json:"root"`
-		} `json:"layout"`
-	}
-	if err := c.call("layout.apply", req, &applied); err != nil {
-		return nil, fmt.Errorf("agent.start fallback: %w", err)
-	}
-	paneID := applied.Layout.Root.PaneID
-	if paneID == "" {
-		return nil, errors.New("agent.start fallback: layout.apply 応答に root pane_id が無い")
-	}
-	ag, err := c.AgentRename(paneID, name)
-	if err != nil {
-		return nil, fmt.Errorf("agent.start fallback (pane %s 作成済み): %w", paneID, err)
-	}
-	return ag, nil
-}
-
-// AgentDetectWait は AgentRename が「まだ agent と認識されていない pane」を
-// 待つ上限。実測 0.9.5（Windows）で layout.apply 直後の検出は約 1 秒。
-var AgentDetectWait = 10 * time.Second
-
-// AgentRename は agent.rename（target は pane_id 可）。0.9.x では target が
-// **herdr に agent と認識された pane**でないと agent_not_found が返る
-// （0.7.4 は任意 pane を命名できた）。生成直後の pane は前景プロセス検出まで
-// 約 1 秒かかるので、agent_not_found の間だけ AgentDetectWait まで再試行する。
-// 待っても agent にならない（検出対象外の argv）ならその agent_not_found を返す。
-func (c *Client) AgentRename(target, name string) (*AgentInfo, error) {
-	deadline := time.Now().Add(AgentDetectWait)
-	for {
-		var out struct {
-			Agent AgentInfo `json:"agent"`
-		}
-		err := c.call("agent.rename", struct {
-			Target string `json:"target"`
-			Name   string `json:"name"`
-		}{target, name}, &out)
-		if err == nil {
-			return &out.Agent, nil
-		}
-		var apiErr *APIError
-		if !errors.As(err, &apiErr) || apiErr.Code != "agent_not_found" || time.Now().After(deadline) {
-			return nil, err
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
+	return &out.Read, nil
 }
 
 // ReportMetadata は pane.report_metadata で設定する値。少なくとも 1 つの

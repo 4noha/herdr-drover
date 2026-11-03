@@ -389,6 +389,44 @@ Web からはセッション行とターミナル画面の「⟳」ボタン（1
 - 起動コマンドは herdr が保持する実 argv をそのまま再利用する（PATH を引き直さない）
   ＝daemon 経由でも手元の CLI と同じバイナリが起動する。
 
+### auto（セミオート続行＝「つづけて」の自動判定）
+
+エージェントがターンを終える瞬間に公式の Stop フックで「人にしか答えられない状態か」を
+判定し、違えば「つづけて」を自動入力する（Claude Code / Codex / opencode）。既定 OFF。
+
+```sh
+herdr-drover auto install            # ~/.claude/settings.json と ~/.codex/hooks.json に追記
+herdr-drover auto on                 # 今いる pane で有効化（--pane ID / --all で全体）
+herdr-drover auto on --grant         # 裁量あり＝上限 20 回（「いけるところまで」相当）
+herdr-drover auto on --phrase "改善を続けてください"
+herdr-drover auto toggle             # フォーカス pane を反転（herdr トースト付き。Ctrl+Alt+A 用）
+herdr-drover auto status             # 設定・フック設置状況・直近の判定ログ
+herdr-drover auto judge < msg.txt    # 判定器の動作確認
+herdr-drover auto cases --decision continue   # 判定事例（続行だけ）。誤続行を見つけたら label
+herdr-drover auto cases label <id> human "本当は止めるべき"   # 正解ラベル → export でコーパスへ
+herdr-drover auto off / uninstall
+```
+
+- ON の pane は Tab ラベルの先頭に「⟳ 」が付く（OFF で消える）。Web コンソールにも `⟳ auto`
+  バッジが出て、操作パッドの ⟳ ボタンで Web から ON/OFF できる（devices 一覧にも ⟳）。続行は画面に `[semi-auto n/cap] つづけて` と出る。1 回のユーザ入力につき 10 回
+  （裁量あり 20 回）で必ず止まり、そこからは通常どおり通知が飛ぶ。
+- 自動続行した停止は push／webhook 通知を出さない（本当に止まった時だけ通知）。
+- 判定は `~/.herdr-drover/autocontinue/autocontinue.log` に 1 行ずつ残る。判定の材料（最終発話・
+  指示）と結果は `cases.jsonl` に貯まり、ルールの版と変更理由は
+  `internal/autocontinue/RULES_CHANGELOG.md`、整合性テストは `testdata/judge_cases.json`。
+- キー一発: `~/.config/herdr/config.toml` に次を足して `herdr server reload-config`
+  （plugin action `auto-toggle` がフォーカス pane を反転し、トーストで ON/OFF を出す）。
+
+  ```toml
+  [[keys.command]]
+  key = "ctrl+alt+a"
+  type = "plugin_action"
+  command = "4noha.drover.auto-toggle"
+  ```
+- ⚠ フックは**設置後に新しく始めたセッション**から有効。Codex は各 PC で一度
+  `/hooks` から trust が要る。opencode は server プラグイン方式（`auto install` が
+  `~/.config/opencode/plugins/` に設置。サーバ再起動か `opencode reload` 後に有効）。
+
 ### ssh-forward（slave へ owner の SSH エージェントを一時転送）
 
 共用 slave 上で **owner の SSH 秘密鍵をディスクに置かず**、一時的に git/gh の

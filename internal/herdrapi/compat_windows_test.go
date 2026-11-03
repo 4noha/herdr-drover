@@ -81,8 +81,9 @@ func TestWindowsHerdrCompatibility(t *testing.T) {
 	// cmd.exe を claude.exe という名前で複製して起動する（herdr の agent 検出は
 	// 前景プロセス名基準＝claude と認識される。MS 署名のまま＝Smart App Control
 	// にも弾かれない。新規ビルドの stub exe は SAC にブロックされる）。
-	// 0.9.x の agent.start 非互換（kind 必須）→ layout.apply＋検出待ち rename の
-	// fallback を、シム本体と同じ経路で通す。出力マーカーは echo 除外のため分割。
+	// 0.9.x で agent.start は任意 argv を受けない（kind 必須）→ LaunchAgent
+	// （layout.apply＋検出待ち rename＝シム本体と同じ経路）で通す。出力マーカーは
+	// echo 除外のため分割。
 	fakeClaude := filepath.Join(root, "claude.exe")
 	cmdExe, err := os.ReadFile(os.Getenv("COMSPEC"))
 	if err != nil {
@@ -91,7 +92,7 @@ func TestWindowsHerdrCompatibility(t *testing.T) {
 	if err := os.WriteFile(fakeClaude, cmdExe, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	agent, err := api.AgentStart("claude", []string{fakeClaude, "/Q", "/D"}, &herdrapi.AgentStartOptions{Cwd: root})
+	agent, err := api.LaunchAgent("claude", []string{fakeClaude, "/Q", "/D"}, &herdrapi.LaunchAgentOptions{Cwd: root})
 	if err != nil {
 		t.Fatal(err)
 	}

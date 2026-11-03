@@ -12,6 +12,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/4noha/herdr-drover/internal/autocontinue"
 	"io"
 	"log"
 	"os"
@@ -345,6 +346,8 @@ func runOneCloud(ctx context.Context, cfg Config, cl Cloud, primary bool, hcli *
 		}),
 		DoSendInput: newDoSendInput(hcli),
 		DoInterrupt: newDoInterrupt(hcli),
+		// セミオート続行の pane 単位 ON/OFF（Web コンソールの ⟳ ボタン。auto.go）。
+		DoSemiAuto: newDoSemiAuto(hcli, lg),
 	}
 	if wt != nil {
 		cr.DoProxy = func(_ context.Context, sid string) error {
@@ -393,6 +396,8 @@ func runOneCloud(ctx context.Context, cfg Config, cl Cloud, primary bool, hcli *
 	if cfg.ShareLocalIPs {
 		prod = prod.WithLocalIPs(localIPs)
 	}
+	// セミオート続行が ON の pane に semi_auto=true を載せる（Web の ⟳ 表示）。
+	prod = prod.WithSemiAuto(autoSemiAutoEnabled)
 
 	// タスク完了 push 通知（Web Push・任意機能）＋セッション状態 Webhook 通知
 	// （drover-cloud-mcp-design.md とは別件・owner が /api/webhook で設定。
@@ -414,10 +419,26 @@ func runOneCloud(ctx context.Context, cfg Config, cl Cloud, primary bool, hcli *
 		if primary {
 			wn = newWebhookNotifier(cl.PCName, lg)
 		}
+		// セミオート続行（autocontinue）が処理中／自動続行した停止は通知しない。
+		// 状態ディレクトリが解決できない構成では seam が常に false＝従来どおり。
+		if autoDir, err := autocontinue.ResolveDir(); err == nil {
+			sup := autocontinue.SuppressFunc(autoDir, time.Now)
+			tn.suppressed = sup
+			if wn != nil {
+				wn.suppressed = sup
+			}
+		} else {
+			lg.Printf("[autocontinue] 状態ディレクトリ解決失敗（通知抑止なし）: %v", err)
+		}
+		ar := newAPIRetrier(hcli, lg)
 		prod = prod.WithOnSessions(func(sessions []map[string]any) {
 			tn.check(ctx, scConcrete, sessions)
 			if wn != nil {
 				wn.check(ctx, scConcrete, sessions)
+			}
+			// API エラーで落ちた停止の自動再開（セミオート ON の pane のみ。apiretry.go）。
+			if primary {
+				ar.check(ctx, sessions)
 			}
 		})
 	}

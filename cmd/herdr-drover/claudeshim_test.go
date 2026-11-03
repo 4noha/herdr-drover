@@ -33,7 +33,7 @@ import (
 // agent.start」経路だけを実 herdr で通す。
 func installStubClaude(t *testing.T) string {
 	t.Helper()
-	script := "#!/bin/sh\necho HD_SHIM_STUB\nexec sleep 300\n"
+	script := "#!/bin/sh\necho HD_SHIM_STUB\nsleep 300\n"
 	stub := writeAgentStub(t, filepath.Join(t.TempDir(), "claude"), script,
 		stubSpec{Stdout: "HD_SHIM_STUB", SleepSec: 300})
 	t.Setenv("PATH", filepath.Dir(stub)+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -221,9 +221,12 @@ func TestClaudeShimViewerSeamTTY(t *testing.T) {
 
 	api := herdrapi.New(sock)
 	// 既存 1 件を API 直で用意（接続経路だけを切り出して検証）。
-	ag, err := api.AgentStart("claude", []string{stub}, &herdrapi.AgentStartOptions{Cwd: work})
+	// 旧 agent.start（name+argv で新 pane）は herdr 0.9.x で「既存の対話シェル pane に
+	// agent を起動する」別 API に変わった。本番のシムと同じ layout.apply →
+	// agent.rename（検出待ちつき）で用意する＝本番の命名経路も同時に踏む。
+	ag, err := startClaudeAgent(api, "claude", []string{stub}, work)
 	if err != nil {
-		t.Fatalf("agent.start: %v", err)
+		t.Fatalf("startClaudeAgent: %v", err)
 	}
 	waitClaudeAgents(t, api, work, 1)
 
