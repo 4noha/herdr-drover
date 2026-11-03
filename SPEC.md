@@ -713,6 +713,7 @@ relay は byte 透過のまま。cm ワイヤ（`internal/bridge/cmwire.go`）�
 | `~/.herdr-drover/inject-index.json` | 注入 pane の identity index |
 | `~/.herdr-drover/attach-version` | 注入 pane を最後に作り直した drover 版数（600）。§6.3 |
 | `~/.herdr-drover/attach.log` | ↗窓 viewer の接続ログ（600・全 viewer 共有）。§6.4 |
+| `~/.herdr-drover/agent.log` | daemon のログ。launchd の StandardOut/ErrorPath と同じパスだが、daemon が自分で開いて書き、**16MB を超えたら `agent.log.1` へ 1 世代退避**する（2026-11-03・`agentlog.go`。それまでは誰も切らず 828MB まで育った）。退避したことは新ファイルの先頭に書く。端末から手動起動した時は stderr だけ |
 | `~/.herdr-drover/agent.log` | daemon ログ |
 
 ### 6.4 ↗窓 viewer の接続ログ（`attach.log`）

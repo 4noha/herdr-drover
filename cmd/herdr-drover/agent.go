@@ -63,6 +63,16 @@ const knownProtocol = 16
 
 func cmdAgent(stdout, stderr io.Writer) error {
 	lg := log.New(stderr, "", log.LstdFlags)
+	// agent.log はサイズ上限で 1 世代ローテートする（agentlog.go）。端末からの手動起動は
+	// 従来どおり stderr だけ。開けなくても daemon は止めない（stderr に理由を残す）。
+	if w, note, err := agentLogWriter(stderr); err != nil {
+		lg.Printf("agent.log を開けない（stderr だけに書く）: %v", err)
+	} else if w != nil {
+		lg = log.New(w, "", log.LstdFlags)
+		if note != "" {
+			lg.Printf("ローテート %s", note)
+		}
+	}
 
 	cfg, err := resolveConfig()
 	if err != nil {

@@ -79,7 +79,11 @@ v0.5.30 で**判定を経過時間ベースへ**変更し、**実 websocket 越�
 - 済（デプロイ・配信済）: Cloud Run 同時接続 80→250（1 台に集約・CPU 1/3）、relay の permessage-deflate（relay→viewer のみ・drover-cloud v0.2.5・v0.5.47）。
 - **BUG-16**（BUGS.md）: ↗窓の relay sid に viewer PC が無く、4 台が 1 枠を奪い合い 32 秒周期で切断していた（relay ログで確定）。修正 = `#inj@<viewer pc>`（版ゲート付き）＋ **見ていない ↗窓は繋がない**（`attachvis.go`）。E2E 2 本（旧コードで落ちる）。
 - **v0.5.48 release・fleet 配信済（2026-11-03 17:00）**: Mac 4 台は v0.5.48。Windows（desktop-djb9pfr）は `self-update` が pending のまま（daemon が命令を拾っていない＝要確認）。配信直後にこの Mac の agent の bridge 開始が 1 分 1,700 回 → 1〜3 回に激減。
-- **残**: (1) Windows PC の更新確認。(2) egress の実数での効果確認（`sent_bytes_count`）。(3) 候補: herdr の observe フレームの冗長なカーソル移動を source で間引く（1 フレーム実測で圧縮後 53% 減）、フレームの間引き（全画面再描画なら最新だけ送る＝要確認）、Safari 向けアプリ層圧縮、relay を Cloud Run から e2-micro へ（CPU ¥8k→≈0）。(4) `agent.log` のローテートが効いていない（828MB）。
+- **効果（配信後 30 分）**: egress 1.1GB/30 分 → 0.03GB/30 分。relay の CPU 使用率 中央値 15% → 3%（課金は 1 vCPU 固定＝下限）。
+- **圧縮の追加実測（drover-cloud v0.2.6）**: ContextTakeover で 1000B 級 47%→37%。100B 級の差分フレームはどの設定でも縮まない（閾値 1 は 105%＝増える）＝source 側でまとめるしかないが、残 egress が月 ¥1k 弱なので見送り。カーソル移動の除去も同様に見送り（圧縮後でさらに 6 割減だが金額は月 ¥300 程度）。
+- **CPU**: Cloud Run で 1 vCPU 未満は「同時接続 1」が条件＝WS relay には不可。下げるなら VM 移行（別途判断）。メモリは 512Mi→256Mi（実測 p99 13%・deploy.sh）。
+- **agent.log のローテート**（`agentlog.go`・16MB で 1 世代）。
+- **残**: (1) Windows PC の更新確認。(2) egress の実数での効果確認（`sent_bytes_count`）。(3) v0.5.49（drover-cloud v0.2.6 の viewer 側 ContextTakeover＋agent.log ローテート）の release と relay デプロイ。(3) 候補: herdr の observe フレームの冗長なカーソル移動を source で間引く（1 フレーム実測で圧縮後 53% 減）、フレームの間引き（全画面再描画なら最新だけ送る＝要確認）、Safari 向けアプリ層圧縮、relay を Cloud Run から e2-micro へ（CPU ¥8k→≈0）。(4) `agent.log` のローテートが効いていない（828MB）。
 
 ### 2026-11-01: 画像送信の通し試験＋↗窓の画像貼付
 - Web の窓: 実 relay・実 agent・実 herdr の pane に Ctrl+V が届くところまで `TestE2EWebTerminalImagePaste`。実クリップボードは `HERDR_DROVER_REAL_CLIPBOARD=1` の `TestRealClipboardImage`（既定 skip＝上書きするため）。ブラウザ側 frame は drover-cloud の node golden。
