@@ -37,6 +37,9 @@ import (
 // 慣習＝実 GCP に絶対に当たらない名前空間）。
 const projectID = "demo-hd-e2e"
 
+// e2eVersion は E2E で build するバイナリの版（v0.5.47 より後の describe 形）。
+const e2eVersion = "v0.5.47-99-ge2e0000"
+
 // pcID は本ゲートの決め打ち PC id。-herdr サフィックスは DESIGN 決定事項
 // （cm agent と同一 id にすると DeleteSession 削除合戦）＝warnConfig も沈黙。
 const pcID = "e2e-herdr"
@@ -212,7 +215,9 @@ func moduleRoot(t *testing.T) string {
 func buildBinary(t *testing.T) string {
 	t.Helper()
 	bin := filepath.Join(t.TempDir(), "herdr-drover")
-	cmd := exec.Command("go", "build", "-o", bin, "./cmd/herdr-drover")
+	// 版は release 後の git describe 形にする（agent が pcs/{pc}.cm_version に登録し、
+	// attach が relay sid の形式を決める版ゲートに使う＝attachsid.go）。
+	cmd := exec.Command("go", "build", "-ldflags", "-X main.version="+e2eVersion, "-o", bin, "./cmd/herdr-drover")
 	cmd.Dir = moduleRoot(t)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("go build: %v\n%s", err, out)

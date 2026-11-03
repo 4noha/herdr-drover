@@ -74,6 +74,12 @@ v0.5.30 で**判定を経過時間ベースへ**変更し、**実 websocket 越�
 - **残課題**: (1) fleet 配信は release が要る＝ユーザー確認後。(4) 判定器は `claude -p`（Haiku・
   4〜5s）＝各 PC に claude ログインが要る。無ければ常に停止側（ログに fallback）。
 
+### 2026-11-03: Cloud Run 費用（10 月 ¥77k）の対策 — BUG-16 修正・表示判定・圧縮・同時接続
+- 請求の内訳: egress ¥51k（10/20〜26 に 1 日 200〜330GB・10/27 以降 10GB → BUG-14 修正と時期一致）、CPU ¥24k（WS 常時接続で 3〜4 台張り付き）。
+- 済（デプロイ・配信済）: Cloud Run 同時接続 80→250（1 台に集約・CPU 1/3）、relay の permessage-deflate（relay→viewer のみ・drover-cloud v0.2.5・v0.5.47）。
+- **BUG-16**（BUGS.md）: ↗窓の relay sid に viewer PC が無く、4 台が 1 枠を奪い合い 32 秒周期で切断していた（relay ログで確定）。修正 = `#inj@<viewer pc>`（版ゲート付き）＋ **見ていない ↗窓は繋がない**（`attachvis.go`）。E2E 2 本（旧コードで落ちる）。
+- **残**: (1) v0.5.48 の release（両側更新が要る）。(2) egress の実数での効果確認（`sent_bytes_count`）。(3) 候補: herdr の observe フレームの冗長なカーソル移動を source で間引く（1 フレーム実測で圧縮後 53% 減）、フレームの間引き（全画面再描画なら最新だけ送る＝要確認）、Safari 向けアプリ層圧縮、relay を Cloud Run から e2-micro へ（CPU ¥8k→≈0）。(4) `agent.log` のローテートが効いていない（828MB）。
+
 ### 2026-11-01: 画像送信の通し試験＋↗窓の画像貼付
 - Web の窓: 実 relay・実 agent・実 herdr の pane に Ctrl+V が届くところまで `TestE2EWebTerminalImagePaste`。実クリップボードは `HERDR_DROVER_REAL_CLIPBOARD=1` の `TestRealClipboardImage`（既定 skip＝上書きするため）。ブラウザ側 frame は drover-cloud の node golden。
 - ↗窓: Ctrl+V で画像を送る機能を実装（SPEC §5.2）。macOS のみ。ブラウザ実機（実際のクリップボードから貼る）は未確認。

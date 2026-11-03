@@ -247,7 +247,7 @@ func (w *webTerm) handleWake(ctx context.Context, sid string) {
 	// リモート pane 注入の viewer 用）は exact-match の suffix 剥がしのみ
 	//（ヒューリスティック禁止）。通常の Web /term は sid=pane_id そのまま。
 	paneID := sid
-	if base, found := strings.CutSuffix(sid, "#inj"); found {
+	if base, ok := injPaneID(sid); ok {
 		paneID = base
 	}
 
@@ -335,4 +335,19 @@ func (w *webTerm) drain(timeout time.Duration) {
 	case <-time.After(timeout):
 		w.lg.Printf("webterm: 停止待ち timeout（%s）＝bridge が ctx cancel に応答していない疑い", timeout)
 	}
+}
+
+// injPaneID は派生 sid `<pane_id>#inj`（従来）／`<pane_id>#inj@<viewer pc>`（v0.5.48・
+// 見る側 PC ごとに relay の枠を分ける＝BUG-16）から pane_id を取り出す。
+// exact-match のみ: 区切り `#inj` の直後が末尾か `@` の時だけ成立（ヒューリスティック禁止）。
+// viewer PC 部は pane 解決に使わない（sid 全体が bridge の鍵＝PC ごとに別 bridge/observe）。
+func injPaneID(sid string) (paneID string, ok bool) {
+	base, rest, found := strings.Cut(sid, "#inj")
+	if !found || base == "" {
+		return "", false
+	}
+	if rest == "" || strings.HasPrefix(rest, "@") {
+		return base, true
+	}
+	return "", false
 }

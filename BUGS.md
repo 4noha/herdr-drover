@@ -847,3 +847,52 @@ herdr-drover 側に取れる対処は無い（herdr の socket 経路を codex �
 変更が要る）。運用上は、codex pane が素シェルに戻ったら手動で
 `<実 codex バイナリ> resume --last` を該当 pane に送る（本件の実機対応と同じ手順）。
 
+## BUG-16【P1・↗窓 全 PC】同じリモートセッションの ↗窓が PC 間で relay の枠を奪い合い、約 32 秒ごとに互いを切断（2026-11-03）
+
+### ✅ 修正済（v0.5.48 予定・`cmd/herdr-drover/attachsid.go` / `webterm.go injPaneID` ＋ `attachvis.go`）
+
+### 症状（実測）
+- ↗窓の画面が約 32 秒ごとに止まり、全画面が描き直される（どの PC でも）。
+- source 側 `agent.log`: 同じ sid の `observe spawn` が 33 秒おきに**別サイズで交互**に出る
+  （`size=133x71` と `size=119x40`＝見ている PC が違う）。この Mac では bridge 開始が
+  1 分に約 1,700 回（`agent.log` 828MB）。
+- viewer 側 `attach.log`: `dial 70ms → 接続=32.1s received=〜900KB idleClosed=false ／ EOF`
+  が延々と続く（データが流れている接続が相手側から閉じられる）。
+- Cloud Run（claude-master-relay）: egress 1 日 55GB・request 65 万/日。10 月の請求 ¥77k の主因
+  （egress ¥51k・CPU ¥24k）。
+
+### 真因（確定・relay の Cloud Run ログで確認）
+- 派生 sid `<pane_id>#inj` に**見る側の PC が入っていない**。relay は sid ごとに viewer 枠 1 つ
+  （新しい viewer が来ると旧 conn を close＝置換）。
+- 各 PC の reconcile は**他 PC の全セッション**に ↗窓を作るので、5 台構成では 1 セッションに
+  4 つの viewer が同じ sid で来る。
+- relay ログ（`sid=w1:p4F#inj`・25 分）: 4 つの IP が交互に接続。1 台が 32s 保持 → 別 PC が
+  接続して奪う（0.75s で確立）→ 奪われた側は cycle>5s なので backoff が 500ms にリセットされ
+  即再接続して奪い返す → 奪った側は cycle<5s なので backoff が伸びて上限 30s で再接続 …の
+  定常状態。32s ＝ backoff 上限 30s ＋ dial/HELLO。
+- BUG-3（v0.5.30）で「observe 再 spawn ~31s 周期」は観測されていたが backoff 側の問題と
+  解釈され、真因（複数 viewer の枠の奪い合い）は未発見だった。
+
+### 修正
+1. **relay sid を PC ごとに分ける**: `<pane_id>#inj@<viewer pc>`。source（`webterm.injPaneID`）は
+   旧形式と新形式を exact-match で解釈（区切り `#inj` の直後が末尾か `@` の時だけ）。
+   viewer（attach）は `pcs/{pc}.cm_version` を読み、source が **v0.5.47 より後**（`git describe`
+   形 `v0.5.47-N-g…` を含む）なら新形式、読めない／古い／`dev` なら旧形式＝旧 PC が相手でも
+   ↗窓が空にならない。形式は `attach.log` の `relay sid=` 行に出る。
+2. 枠を分けると全 PC が**同時に**ストリームして egress が増える（従来は交代で 1 本だった）ため、
+   同時に**「見ていない ↗窓は繋がない」**（`attachvis.go`）: 自 pane の Tab がその Workspace の
+   アクティブ Tab でなければ接続を閉じ、戻るまで繋がない（herdr の `tab.focused` 等の購読＋30s の
+   周期判定・判定不能／`HERDR_PANE_ID` 無しは表示扱い＝従来どおり）。source は viewer 切断で
+   bridge/observe を畳むので source 側の変更は不要。表示に戻ると再接続して全画面を 1 回描く。
+   エージェントの状態（`agent_status`）は Firestore の session doc で別経路＝影響なし。
+
+### 検証（実 herdr×2・実 relay・Firestore エミュレータ・実 agent・本物の attach）
+- `TestE2EAttachTwoViewersNoContention`: 2 PC が同じセッションを同時に見て 45 秒、接続終了 0 回・
+  両方が最新画面に追いつく。旧コードは落ちる（枠を奪い合って切断される）。
+- `TestE2EAttachHiddenTabDisconnects`: Tab を切り替えると attach が自分から切り、非表示の間は
+  画面が進まず（source は進む）、戻すと再接続して追いつく。旧コードは落ちる（非表示でも流れ続ける）。
+
+### 配信
+- viewer 側（attach する PC）と source 側（見られる PC）の**両方**の更新が要る。片側だけなら
+  旧形式で従来どおり動く（奪い合いは残る）。表示判定は viewer 側だけで効く。
+

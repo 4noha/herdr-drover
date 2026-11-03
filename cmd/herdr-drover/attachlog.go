@@ -178,6 +178,8 @@ func (l *attachLogger) Close() {
 // キーにしない**（可変部分＝バイト数や時刻が混ざると畳めず量が減らない）。
 func cycleKind(idleClosed bool, why string) string {
 	switch {
+	case strings.Contains(why, "非表示で切断"):
+		return "hidden" // 表示判定（attachvis.go）で自分から切った＝正常
 	case idleClosed:
 		return "quiescence" // 自分の read deadline＝near-$0 設計どおりの正常
 	case strings.Contains(why, "pane への書込"):

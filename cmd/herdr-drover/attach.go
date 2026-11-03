@@ -31,7 +31,6 @@ import (
 	"net"
 	"os"
 	"os/signal"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -239,6 +238,8 @@ type connHolder struct {
 	// pending は未接続中に打たれた入力。接続確立時に TTL 内なら流す。
 	pending      []byte
 	pendingSince time.Time
+	// sidForm は直近に使った relay sid（形式が変わった時だけログする・attachsid.go）。
+	sidForm string
 	// histDone は「リモートの履歴をこの pane の scrollback へ入れ終えた」印。↗窓は
 	// 常駐 pane で quiescence 再接続が頻繁に起きるため、履歴は**プロセスにつき最初の
 	// 接続の 1 回だけ**要求する（再接続のたびに要求すると同じ履歴が scrollback に
@@ -318,6 +319,17 @@ func (h *connHolder) set(c net.Conn) {
 
 // kickWake は「今すぐ再接続」を非ブロッキングで promote する。capacity 1 なので
 // 連打しても 1 回に集約される（ログもその 1 回だけ＝打鍵ごとに書かない）。
+// noteSidForm は relay sid の形式を記録し、変わった時だけ attach.log に残す。
+func (h *connHolder) noteSidForm(injSid, srcVer string) {
+	h.mu.Lock()
+	prev := h.sidForm
+	h.sidForm = injSid
+	h.mu.Unlock()
+	if prev != injSid && h.lg != nil {
+		h.lg.Printf("relay sid=%q（リモートの版 %q）", injSid, srcVer)
+	}
+}
+
 func (h *connHolder) kickWake() {
 	if h.wake == nil {
 		return
@@ -459,7 +471,6 @@ func cmdAttach(args []string, stdout, stderr io.Writer) error {
 		return fmt.Errorf("%w: herdr-drover attach <pc> <sid>（reconcile が注入 pane 内で起動する内部コマンド）", errUsage)
 	}
 	remotePC, sid := args[0], args[1]
-	injSid := sid + "#inj"
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
@@ -563,14 +574,27 @@ func cmdAttach(args []string, stdout, stderr io.Writer) error {
 	// Read err→attachOnce return→backoff sleep 中なら wakeCh で早期脱出、の経路で
 	// 自動復旧する。watchLifecycle は cmdAttach ctx 寿命＝backoff 中も生存
 	// （dctx に紐付けると backoff 30s に伸びた区間で検知漏れ＝あえて cmdAttach 側）。
+	// 表示判定（attachvis.go）: 非表示の ↗窓は relay に繋がない。herdr に繋げない／
+	// HERDR_PANE_ID が無い場合は nil＝従来どおり常時接続。
+	vis := startVisWatcher(ctx, os.Getenv("HERDR_PANE_ID"), herdrapi.New(""), lg)
 	backoff := 500 * time.Millisecond
 	for {
 		if ctx.Err() != nil {
 			lg.Printf("ctx 終了＝正常終了（pane close / SIGTERM）")
 			return nil
 		}
+		if vis != nil {
+			if visible, _ := vis.state(); !visible {
+				if !vis.waitVisible(ctx) {
+					lg.Printf("ctx 終了＝正常終了（pane close / SIGTERM）")
+					return nil
+				}
+				// 表示に戻った＝待たせない（非表示で切った直後の backoff を引きずらない）。
+				backoff = 500 * time.Millisecond
+			}
+		}
 		start := time.Now()
-		idleClosed := attachCycle(ctx, injSid, remotePC, holder, out, lg)
+		idleClosed := attachCycle(ctx, sid, remotePC, holder, out, lg, vis)
 		if ctx.Err() != nil {
 			lg.Printf("ctx 終了＝正常終了（pane close / SIGTERM）")
 			return nil
@@ -622,7 +646,7 @@ func attachBackoffReset(cur, cycle time.Duration, idleClosed bool) time.Duration
 // env が無くても config.json / clouds.json から解決を試みる）。
 // 戻り値 idleClosed は attachOnce から伝播する（無通信 quiescence 切断＝BUG-3）。
 // 接続前段の失敗（設定/クラウド/Firestore）は idle ではない＝false。
-func attachCycle(ctx context.Context, injSid, remotePC string, holder *connHolder, out *os.File, lg *attachLogger) (idleClosed bool) {
+func attachCycle(ctx context.Context, sid, remotePC string, holder *connHolder, out *os.File, lg *attachLogger, vis *visWatcher) (idleClosed bool) {
 	cfg, err := resolveConfig()
 	if err != nil {
 		fmt.Fprintf(out, "\x1b[2J\x1b[H↗ %s: 設定解決失敗（再試行）: %v\r\n", remotePC, err)
@@ -652,26 +676,38 @@ func attachCycle(ctx context.Context, injSid, remotePC string, holder *connHolde
 	}
 	defer st.Close()
 
-	return attachOnce(cctx, st, cl.RelayURL, injSid, remotePC, holder, out, lg)
+	viewerPC := cl.PCName
+	if viewerPC == "" {
+		viewerPC = cfg.PCID
+	}
+	return attachOnce(cctx, st, cl.RelayURL, sid, viewerPC, remotePC, holder, out, lg, vis)
 }
 
 // attachOnce は 1 接続の生存（grant→wake→dial→frame/input pump）。conn 切断か
 // ctx 終了で戻る。エラーは画面に控えめに出し、上位の backoff ループが再接続する。
 // 戻り値 idleClosed は「無通信 quiescence（idle 超過）で pumpFrames が戻った」印
 // （BUG-3: cmdAttach の backoff 判断に使う）。dial 前段の失敗は false。
-func attachOnce(ctx context.Context, st *state.Client, relayURL, injSid, remotePC string, holder *connHolder, out *os.File, lg *attachLogger) (idleClosed bool) {
+func attachOnce(ctx context.Context, st *state.Client, relayURL, sid, viewerPC, remotePC string, holder *connHolder, out *os.File, lg *attachLogger, vis *visWatcher) (idleClosed bool) {
+	gctx, gcancel := context.WithTimeout(ctx, 10*time.Second)
+	// relay sid の形式（attachsid.go）: リモートの版が新形式を解釈できるなら
+	// `#inj@<viewer pc>`（PC ごとに relay の枠を分ける＝BUG-16）、でなければ `#inj`。
+	srcVer, verr := st.PCVersion(gctx, remotePC)
+	if verr != nil {
+		lg.Printf("リモートの版取得 失敗（旧形式 #inj で続行）: %v", verr)
+	}
+	injSid := injSidFor(sid, viewerPC, srcVer)
+	holder.noteSidForm(injSid, srcVer)
 	// viewer 許可を先に置き、リモート agent を起こす（source を bridge させる）。
 	// ⚠ 元から戻り値を捨てている（best-effort）。ここが黙って失敗し続けると source が
 	// bridge を張らず「dial は通るのにフレームが来ない」形の張り付きになるので、
 	// **失敗をログにだけは残す**（画面には出さない＝従来の見た目を変えない）。
-	gctx, gcancel := context.WithTimeout(ctx, 10*time.Second)
 	if gerr := st.PutRelayGrant(gctx, injSid, "viewer", injGrantTTL); gerr != nil {
 		lg.Printf("PutRelayGrant 失敗（続行）: %v", gerr)
 	}
 	if werr := st.Wake(gctx, remotePC, injSid); werr != nil {
 		lg.Printf("Wake 失敗（続行）: %v", werr)
 	}
-	holder.imagePaste.Store(remoteImagePaste(gctx, st, remotePC, strings.TrimSuffix(injSid, "#inj")))
+	holder.imagePaste.Store(remoteImagePaste(gctx, st, remotePC, sid))
 	gcancel()
 
 	dctx, dcancel := context.WithCancel(ctx)
@@ -698,6 +734,27 @@ func attachOnce(ctx context.Context, st *state.Client, relayURL, injSid, remoteP
 	// stdin reader を作ると前 reader が残ってキーを奪い合う＝敵対的レビューで確認。
 	holder.set(conn)
 	defer holder.set(nil)
+
+	// 表示判定（attachvis.go）: 接続中に非表示になったら自分から切る（source は
+	// viewer 切断で bridge/observe を畳む）。表示に戻るまで cmdAttach のループが待つ。
+	var hiddenClose atomic.Bool
+	if vis != nil {
+		go func() {
+			for {
+				visible, ch := vis.state()
+				if !visible {
+					hiddenClose.Store(true)
+					conn.Close()
+					return
+				}
+				select {
+				case <-dctx.Done():
+					return
+				case <-ch:
+				}
+			}
+		}()
+	}
 
 	// 初回 RESIZE（cm-wire magic）で observe サイズを pane 実寸へ。以後 SIGWINCH
 	// で再送。RESIZE を送らないと bridge は初回 full frame を出さない（実測仕様）。
@@ -737,6 +794,9 @@ func attachOnce(ctx context.Context, st *state.Client, relayURL, injSid, remoteP
 	idleClosed, got, why := pumpFrames(conn, out, DefaultIdle)
 	if askHist && got > 0 {
 		holder.histDone.Store(true)
+	}
+	if hiddenClose.Load() {
+		why = "非表示で切断（表示に戻るまで接続しない）／ " + why
 	}
 	// ⚠張り付き調査の核心行。received=0 が続くなら「dial は通るが source が bridge を
 	// 張っていない」（＝Wake/grant 側の問題）、received>0 なら「流れていた接続が落ちた」
