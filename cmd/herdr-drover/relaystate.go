@@ -63,6 +63,13 @@ const wakePollTimeout = 40 * time.Second
 // 失効を権威判定するので、ここは軽い backoff で十分）。
 const wakeBackoff = 2 * time.Second
 
+// shortPollThreshold より速く 204 が返る＝relay が long-poll を保持していない（SLAVE_POLL_HOLD=0）。
+// その時は shortPollInterval ごとの間隔ポーリングにする（即 re-poll の連打で relay を叩かない）。
+var (
+	shortPollThreshold = 2 * time.Second
+	shortPollInterval  = 10 * time.Second
+)
+
 // slaveFile は ~/.herdr-drover/slave.json のスキーマ（enroll --slave が書く）。
 // SA 鍵は**含まない**（refresh secret だけが持続認証情報）。
 type slaveFile struct {
@@ -109,9 +116,11 @@ type relayState struct {
 	secret   string       // durable refresh secret
 	hc       *http.Client // /slave/* 通常 HTTP（30s timeout）
 	wakeHC   *http.Client // long-poll 専用（timeout 無し・per-request ctx で制御）
-	// urls は WS 中継の接続先（relayurl.go）。/slave/revoked の ws_url で切り替わる。
-	urls *relayURLSource
-	lg   *log.Logger
+	// urls は WS 中継の接続先、httpURLs は /slave/* の接続先（relayurl.go）。
+	// どちらも /slave/revoked の応答（ws_url / http_url）で切り替わる。
+	urls     *relayURLSource
+	httpURLs *relayURLSource
+	lg       *log.Logger
 
 	tokMu    sync.Mutex
 	token    string
@@ -152,6 +161,7 @@ func newRelayState(relayURL, pcName string, cfg Config, lg *log.Logger) (*relayS
 	return &relayState{
 		wsBase:   wss,
 		urls:     newRelayURLSource(wss, lg),
+		httpURLs: newHTTPURLSource(httpBase, lg),
 		httpBase: httpBase,
 		pc:       pc,
 		secret:   sf.RefreshSecret,
@@ -166,12 +176,17 @@ func newRelayState(relayURL, pcName string, cfg Config, lg *log.Logger) (*relayS
 
 // bearer は現行 bearer を返す（exp まで <5min or force なら refresh）。
 func (rs *relayState) bearer(ctx context.Context, force bool) (string, error) {
+	return rs.bearerAt(ctx, force, rs.httpBaseNow())
+}
+
+// bearerAt は base（/slave/token の鋳造先）を指定した bearer。
+func (rs *relayState) bearerAt(ctx context.Context, force bool, base string) (string, error) {
 	rs.tokMu.Lock()
 	defer rs.tokMu.Unlock()
 	if !force && rs.token != "" && time.Until(rs.tokenExp) > tokenRefreshLead {
 		return rs.token, nil
 	}
-	return rs.refreshLocked(ctx)
+	return rs.refreshLocked(ctx, base)
 }
 
 // invalidateToken は 401 応答時にキャッシュを捨てる（次 bearer で再取得）。
@@ -203,9 +218,9 @@ func slaveStatus(err error) int {
 
 // refreshLocked は POST /slave/token（refresh-secret gated・bearer 不要）で
 // 1h bearer を鋳造する。tokMu 保持前提。
-func (rs *relayState) refreshLocked(ctx context.Context) (string, error) {
+func (rs *relayState) refreshLocked(ctx context.Context, base string) (string, error) {
 	body, _ := json.Marshal(map[string]string{"pc": rs.pc, "secret": rs.secret})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, rs.httpBase+"/slave/token", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/slave/token", bytes.NewReader(body))
 	if err != nil {
 		return "", err
 	}
@@ -242,9 +257,14 @@ func (rs *relayState) refreshLocked(ctx context.Context) (string, error) {
 // --- generic /slave/* call（bearer 付き・401 で 1 回だけ refresh 再試行）---
 
 func (rs *relayState) call(ctx context.Context, method, path string, reqBody, out any) error {
+	return rs.callAt(ctx, rs.httpBaseNow(), method, path, reqBody, out)
+}
+
+// callAt は base を指定した call（settings/relay の切替先に届かない時に設定の URL で読み直す用）。
+func (rs *relayState) callAt(ctx context.Context, base, method, path string, reqBody, out any) error {
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
-		tok, err := rs.bearer(ctx, attempt == 1)
+		tok, err := rs.bearerAt(ctx, attempt == 1, base)
 		if err != nil {
 			return err
 		}
@@ -256,7 +276,7 @@ func (rs *relayState) call(ctx context.Context, method, path string, reqBody, ou
 			}
 			rdr = bytes.NewReader(b)
 		}
-		req, err := http.NewRequestWithContext(ctx, method, rs.httpBase+path, rdr)
+		req, err := http.NewRequestWithContext(ctx, method, base+path, rdr)
 		if err != nil {
 			return err
 		}
@@ -294,6 +314,14 @@ func (rs *relayState) call(ctx context.Context, method, path string, reqBody, ou
 
 func (rs *relayState) Close() error { return nil }
 
+// httpBaseNow は /slave/* の現在の接続先（settings/relay の http_url を反映。無ければ設定値）。
+func (rs *relayState) httpBaseNow() string {
+	if rs.httpURLs != nil {
+		return rs.httpURLs.get()
+	}
+	return rs.httpBase
+}
+
 // wsURL は WS 中継の現在の接続先（settings/relay の切替を反映。urls 無し＝テストの素の構造体なら設定値）。
 func (rs *relayState) wsURL() string {
 	if rs.urls != nil {
@@ -307,11 +335,23 @@ func (rs *relayState) wsURL() string {
 func (rs *relayState) IsSelfRevoked(ctx context.Context) bool {
 	var resp struct {
 		Revoked bool   `json:"revoked"`
-		WSURL   string `json:"ws_url"` // WS 中継の接続先（settings/relay・空＝設定どおり）
+		WSURL   string `json:"ws_url"`   // WS 中継の接続先（settings/relay・空＝設定どおり）
+		HTTPURL string `json:"http_url"` // /slave/* の接続先（同上）
 	}
 	err := rs.call(ctx, http.MethodGet, "/slave/revoked", nil, &resp)
-	if err == nil && rs.urls != nil {
-		rs.urls.set(resp.WSURL)
+	// 切替先（http_url）に届かない時は、設定の URL（Cloud Run）で settings を読み直す＝切替先が
+	// 死んでいても解除（http_url 空）が届く。
+	if err != nil && rs.httpURLs != nil && rs.httpURLs.overridden() && slaveStatus(err) == 0 {
+		rs.lg.Printf("slave API %s に届かない（%v）→ 設定の %s で settings を読み直す", rs.httpURLs.get(), err, rs.httpURLs.fallbackURL())
+		err = rs.callAt(ctx, rs.httpURLs.fallbackURL(), http.MethodGet, "/slave/revoked", nil, &resp)
+	}
+	if err == nil {
+		if rs.urls != nil {
+			rs.urls.set(resp.WSURL)
+		}
+		if rs.httpURLs != nil {
+			rs.httpURLs.set(resp.HTTPURL)
+		}
 	}
 	if err == nil {
 		return resp.Revoked
@@ -412,6 +452,7 @@ func (rs *relayState) WatchWake(ctx context.Context, cb func(sid string)) error 
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		pollStart := time.Now()
 		sid, ts, status, err := rs.pollWake(ctx, since)
 		if err != nil {
 			if ctx.Err() != nil {
@@ -432,7 +473,13 @@ func (rs *relayState) WatchWake(ctx context.Context, cb func(sid string)) error 
 			}
 			// 即 re-poll（lossless catch-up）。
 		case 204:
-			// hold 窓で wake 無し。即 re-poll。
+			// hold 窓で wake 無し。即 re-poll。ただし relay が保持せず即 204 を返す設定
+			// （SLAVE_POLL_HOLD=0＝Cloud Run の CPU 課金を避ける）なら、間隔ポーリングに落とす。
+			if time.Since(pollStart) < shortPollThreshold {
+				if !sleepCtx(ctx, shortPollInterval) {
+					return ctx.Err()
+				}
+			}
 		default: // 403（mid-hold 失効）/ その他は backoff。
 			if !sleepCtx(ctx, wakeBackoff) {
 				return ctx.Err()
@@ -449,7 +496,7 @@ func (rs *relayState) pollWake(ctx context.Context, since string) (sid, ts strin
 			return "", "", 0, e
 		}
 		pollCtx, cancel := context.WithTimeout(ctx, wakePollTimeout)
-		u := rs.httpBase + "/slave/wake?since=" + url.QueryEscape(since)
+		u := rs.httpBaseNow() + "/slave/wake?since=" + url.QueryEscape(since)
 		req, e := http.NewRequestWithContext(pollCtx, http.MethodGet, u, nil)
 		if e != nil {
 			cancel()
@@ -492,6 +539,7 @@ func (rs *relayState) WatchCommands(ctx context.Context, fn func(state.Command))
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		pollStart := time.Now()
 		cmds, status, err := rs.pollCommands(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
@@ -509,7 +557,12 @@ func (rs *relayState) WatchCommands(ctx context.Context, fn func(state.Command))
 			}
 			// 即 re-poll（次の命令の catch-up）。
 		case 204:
-			// hold 窓で命令無し。即 re-poll。
+			// hold 窓で命令無し。即 re-poll（relay が保持しない設定なら間隔ポーリング・WatchWake と同じ）。
+			if time.Since(pollStart) < shortPollThreshold {
+				if !sleepCtx(ctx, shortPollInterval) {
+					return ctx.Err()
+				}
+			}
 		default: // 403（mid-hold 失効）/ その他は backoff。
 			if !sleepCtx(ctx, wakeBackoff) {
 				return ctx.Err()
@@ -527,7 +580,7 @@ func (rs *relayState) pollCommands(ctx context.Context) (cmds []state.Command, s
 			return nil, 0, e
 		}
 		pollCtx, cancel := context.WithTimeout(ctx, wakePollTimeout)
-		u := rs.httpBase + "/slave/commands"
+		u := rs.httpBaseNow() + "/slave/commands"
 		req, e := http.NewRequestWithContext(pollCtx, http.MethodGet, u, nil)
 		if e != nil {
 			cancel()

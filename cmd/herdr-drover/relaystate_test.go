@@ -44,6 +44,8 @@ type fakeRelay struct {
 	revoked      bool
 	registerVer  string
 	wsURL        string // /slave/revoked に載せる WS 中継先（settings/relay 相当）
+	httpURL      string // 同 /slave/* の接続先（http_url）
+	fast204      bool   // /slave/wake を保持せず即 204 で返す（SLAVE_POLL_HOLD=0 模擬）
 
 	force401Once atomic.Bool // 次の /slave/revoked を 1 回だけ 401 にする
 	wakeN        atomic.Int32
@@ -170,9 +172,9 @@ func newFakeRelay(t *testing.T, secret string) (*fakeRelay, *httptest.Server) {
 		rev := fr.revoked
 		fr.mu.Unlock()
 		fr.mu.Lock()
-		wsURL := fr.wsURL
+		wsURL, httpURL := fr.wsURL, fr.httpURL
 		fr.mu.Unlock()
-		writeJSON(w, map[string]any{"revoked": rev, "ws_url": wsURL})
+		writeJSON(w, map[string]any{"revoked": rev, "ws_url": wsURL, "http_url": httpURL})
 	})
 
 	mux.HandleFunc("/slave/wake", func(w http.ResponseWriter, r *http.Request) {
@@ -180,6 +182,13 @@ func newFakeRelay(t *testing.T, secret string) (*fakeRelay, *httptest.Server) {
 			return
 		}
 		n := fr.wakeN.Add(1)
+		fr.mu.Lock()
+		fast := fr.fast204
+		fr.mu.Unlock()
+		if fast {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		if n == 1 {
 			writeJSON(w, map[string]any{"sid": "w1:p1", "ts": "2026-07-18T00:00:00.000000001Z"})
 			return
@@ -498,5 +507,82 @@ func TestSlaveFollowsRelayWSURL(t *testing.T) {
 	_ = rs.IsSelfRevoked(ctx)
 	if got := rs.wsURL(); got != rs.wsBase {
 		t.Fatalf("空なら設定値へ戻るはず: %q", got)
+	}
+}
+
+// /slave/revoked の http_url で /slave/* の接続先が切り替わり（token も新しい先で鋳造）、空で戻り、
+// 切替先に届かない時は設定の URL で settings を読み直す。
+func TestSlaveFollowsRelayHTTPURLAndFallsBack(t *testing.T) {
+	frA, tsA := newFakeRelay(t, "sec")
+	defer tsA.Close()
+	frB, tsB := newFakeRelay(t, "sec")
+	defer tsB.Close()
+	rs := newTestRelayState(tsA, "sec")
+	rs.urls = newRelayURLSource(rs.wsBase, rs.lg)
+	rs.httpURLs = newHTTPURLSource(rs.httpBase, rs.lg)
+	ctx := context.Background()
+
+	// A が http_url=B を返す → 以後の API は B へ（RegisterPCVersion が B に届く）。
+	frA.mu.Lock()
+	frA.httpURL = tsB.URL
+	frA.mu.Unlock()
+	_ = rs.IsSelfRevoked(ctx)
+	if got := rs.httpBaseNow(); got != tsB.URL {
+		t.Fatalf("http_url に切り替わるはず: %q", got)
+	}
+	if err := rs.RegisterPCVersion(ctx, "v9"); err != nil {
+		t.Fatal(err)
+	}
+	frB.mu.Lock()
+	regB := frB.registerVer
+	frB.mu.Unlock()
+	if regB != "v9" {
+		t.Fatalf("切替後の API が B に届いていない: %q", regB)
+	}
+	// B が空を返す → 設定（A）へ戻る。
+	frB.mu.Lock()
+	frB.httpURL = ""
+	frB.mu.Unlock()
+	_ = rs.IsSelfRevoked(ctx)
+	if got := rs.httpBaseNow(); got != tsA.URL {
+		t.Fatalf("空なら設定へ戻るはず: %q", got)
+	}
+	// A が死んだ先を返す → 次の判定は届かないので A で読み直し、A の最新値（空）で解除される。
+	frA.mu.Lock()
+	frA.httpURL = "http://127.0.0.1:9"
+	frA.mu.Unlock()
+	_ = rs.IsSelfRevoked(ctx)
+	if got := rs.httpBaseNow(); got != "http://127.0.0.1:9" {
+		t.Fatalf("切替値が入るはず: %q", got)
+	}
+	frA.mu.Lock()
+	frA.httpURL = ""
+	frA.mu.Unlock()
+	if rs.IsSelfRevoked(ctx) {
+		t.Fatal("失効扱いになってはいけない")
+	}
+	if got := rs.httpBaseNow(); got != tsA.URL {
+		t.Fatalf("届かない切替先は設定の URL で読み直して解除されるはず: %q", got)
+	}
+}
+
+// relay が long-poll を保持せず即 204 を返す時（SLAVE_POLL_HOLD=0）、間隔ポーリングに落ちる
+// （即 re-poll の連打にならない）。
+func TestSlaveWakeShortPollWhenRelayDoesNotHold(t *testing.T) {
+	fr, ts := newFakeRelay(t, "sec")
+	defer ts.Close()
+	fr.mu.Lock()
+	fr.fast204 = true
+	fr.mu.Unlock()
+	rs := newTestRelayState(ts, "sec")
+	oldI := shortPollInterval
+	shortPollInterval = 500 * time.Millisecond
+	t.Cleanup(func() { shortPollInterval = oldI })
+	ctx, cancel := context.WithTimeout(context.Background(), 2200*time.Millisecond)
+	defer cancel()
+	_ = rs.WatchWake(ctx, func(string) {})
+	n := fr.wakeN.Load()
+	if n < 3 || n > 6 {
+		t.Fatalf("2.2 秒で 500ms 間隔なら 3〜6 回のはず（連打していない）: %d", n)
 	}
 }

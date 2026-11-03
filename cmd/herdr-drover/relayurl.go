@@ -22,17 +22,39 @@ func validRelayURL(u string) bool {
 	return strings.HasPrefix(u, "wss://") || strings.HasPrefix(u, "ws://")
 }
 
+// validHTTPURL は http:// / https:// だけを認める（slave の API 先）。
+func validHTTPURL(u string) bool {
+	return strings.HasPrefix(u, "https://") || strings.HasPrefix(u, "http://")
+}
+
 // relayURLSource は「設定の URL」と「切替で来た URL」を持ち、get で現在の接続先を返す。
 type relayURLSource struct {
 	mu       sync.Mutex
 	fallback string
 	override string
 	lg       *log.Logger
+	valid    func(string) bool
+	label    string
 }
 
+// newRelayURLSource は WS 中継（ws:// / wss://）の接続先。
 func newRelayURLSource(fallback string, lg *log.Logger) *relayURLSource {
-	return &relayURLSource{fallback: fallback, lg: lg}
+	return &relayURLSource{fallback: fallback, lg: lg, valid: validRelayURL, label: "relay URL"}
 }
+
+// newHTTPURLSource は slave の HTTP API（/slave/*・http:// / https://）の接続先。
+func newHTTPURLSource(fallback string, lg *log.Logger) *relayURLSource {
+	return &relayURLSource{fallback: fallback, lg: lg, valid: validHTTPURL, label: "slave API URL"}
+}
+
+// overridden は切替値が効いているか。fallbackURL は設定の URL（切替先に届かない時の読み直し先）。
+func (s *relayURLSource) overridden() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.override != ""
+}
+
+func (s *relayURLSource) fallbackURL() string { return s.fallback }
 
 func (s *relayURLSource) get() string {
 	s.mu.Lock()
@@ -45,9 +67,9 @@ func (s *relayURLSource) get() string {
 
 // set は切替で来た URL を取り込む（空＝解除）。接続先が変わった時だけログする。
 func (s *relayURLSource) set(url string) {
-	if url != "" && !validRelayURL(url) {
+	if url != "" && !s.valid(url) {
 		if s.lg != nil {
-			s.lg.Printf("relay URL の切替値が不正（無視）: %q", url)
+			s.lg.Printf("%s の切替値が不正（無視）: %q", s.label, url)
 		}
 		return
 	}
@@ -63,6 +85,6 @@ func (s *relayURLSource) set(url string) {
 	}
 	s.mu.Unlock()
 	if before != after && s.lg != nil {
-		s.lg.Printf("relay URL 切替: %s → %s（settings/relay）", before, after)
+		s.lg.Printf("%s 切替: %s → %s（settings/relay）", s.label, before, after)
 	}
 }
