@@ -29,6 +29,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 )
 
@@ -50,15 +51,46 @@ func imageExtClass(code byte) (ext, asClass string, ok bool) {
 }
 
 // setClipboardImage は差し替え可能な seam（テストで実クリップボードを
-// 汚さないため）。既定は macOS の osascript 経路。
-var setClipboardImage = setMacClipboardImage
+// 汚さないため）。既定は OS ごとの実装（macOS=osascript・Windows=PowerShell）。
+var setClipboardImage = setOSClipboardImage
+
+// setOSClipboardImage は OS に応じてクリップボードへ画像を載せる。Linux は未対応＝
+// 明示エラーを返し、呼び出し側がログに残して注入しない。
+func setOSClipboardImage(path, ext string) error {
+	switch runtime.GOOS {
+	case "darwin":
+		return setMacClipboardImage(path, ext)
+	case "windows":
+		return setWindowsClipboardImage(path, ext)
+	}
+	return fmt.Errorf("画像ペーストは macOS / Windows のみ対応（GOOS=%s）", runtime.GOOS)
+}
+
+// setWindowsClipboardImage は画像ファイルを Windows のクリップボードへ載せる
+// （PowerShell・STA の System.Windows.Forms.Clipboard.SetImage。png/jpg/gif とも Image.FromFile で読める）。
+func setWindowsClipboardImage(path, ext string) error {
+	if runtime.GOOS != "windows" {
+		return fmt.Errorf("Windows 用の経路（GOOS=%s）", runtime.GOOS)
+	}
+	out, err := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-STA", "-Command", WinClipboardSetScript(path)).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("powershell（クリップボード投入）: %v (%s)", err, out)
+	}
+	return nil
+}
+
+// WinClipboardSetScript は path の画像をクリップボードへ載せる PowerShell（純関数＝テストで引用符を固定）。
+func WinClipboardSetScript(path string) string {
+	q := "'" + strings.ReplaceAll(path, "'", "''") + "'"
+	return "Add-Type -AssemblyName System.Windows.Forms,System.Drawing; " +
+		"$img = [System.Drawing.Image]::FromFile(" + q + "); " +
+		"[System.Windows.Forms.Clipboard]::SetImage($img); $img.Dispose()"
+}
 
 // setMacClipboardImage は画像ファイルを macOS の OS クリップボードへ載せる。
-// Linux/Windows は未対応（cm と同じく v1 は macOS 主対象）＝明示エラーを返し、
-// 呼び出し側がログに残して注入しない。
 func setMacClipboardImage(path, ext string) error {
 	if runtime.GOOS != "darwin" {
-		return fmt.Errorf("画像ペーストは macOS のみ対応（GOOS=%s）", runtime.GOOS)
+		return fmt.Errorf("macOS 用の経路（GOOS=%s）", runtime.GOOS)
 	}
 	var asClass string
 	switch ext {

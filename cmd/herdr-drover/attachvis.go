@@ -1,5 +1,3 @@
-//go:build unix
-
 // attachvis.go — ↗窓（attach）の表示判定。
 //
 // ↗窓は reconcile が**他 PC の全セッション**ぶん作る常駐 pane で、ほとんどは

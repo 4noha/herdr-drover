@@ -57,7 +57,7 @@ type Config struct {
 	InjectRemotePanes bool
 	// WebImagePaste は DROVER_WEB_IMAGE_PASTE（Web ターミナルから届いた画像を
 	// この PC の OS クリップボードへ載せて pane に Ctrl+V 注入するか）。
-	// 既定 false=opt-in（cm の WebImagePaste と同じ既定）。macOS 専用。
+	// 既定 false=opt-in（cm の WebImagePaste と同じ既定）。macOS / Windows（PowerShell）対応。
 	//
 	// ⚠ **slave（共用 PC）では強制 false**。クリップボードは同一アカウントの
 	//   他人も読める＝画像が第三者に露出する（DESIGN_SLAVE の脅威モデル）。

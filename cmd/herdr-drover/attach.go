@@ -1,5 +1,3 @@
-//go:build unix
-
 package main
 
 // attach — リモート pane 注入の viewer client（Phase 3・↗窓相当）。reconcile が
@@ -33,7 +31,6 @@ import (
 	"os/signal"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/4noha/drover-cloud/relayclient"
@@ -485,7 +482,7 @@ func cmdAttach(args []string, stdout, stderr io.Writer) error {
 	}
 	remotePC, sid := args[0], args[1]
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	ctx, stop := signal.NotifyContext(context.Background(), termSignals()...)
 	defer stop()
 
 	out, _ := stdout.(*os.File)
@@ -786,18 +783,16 @@ func attachOnce(ctx context.Context, st *state.Client, relayURL, sid, viewerPC, 
 	// observe を起動するため、HELLO が後だと履歴フラグが間に合わない）。
 	askHist := attachHandshake(conn, holder, rows, cols)
 
-	winch := make(chan os.Signal, 1)
-	signal.Notify(winch, syscall.SIGWINCH)
-	defer signal.Stop(winch)
+	winch := watchWinch(dctx) // term_{unix,windows}.go（unix=SIGWINCH / Windows=ポーリング）
 
-	// SIGWINCH: 最新サイズを RESIZE 再送（bridge が observe respawn＝新 full frame）。
+	// リサイズ: 最新サイズを RESIZE 再送（bridge が observe respawn＝新 full frame）。
 	go func() {
 		for {
 			select {
 			case <-dctx.Done():
 				return
 			case <-winch:
-				drainSignals(winch)
+				drainWinch(winch)
 				r, c := termSize(int(out.Fd()))
 				if _, werr := conn.Write(resizeMagic(r, c)); werr != nil {
 					return
