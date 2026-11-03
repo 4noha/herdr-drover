@@ -479,17 +479,17 @@ func TestSlaveFollowsRelayWSURL(t *testing.T) {
 		t.Fatalf("未設定なら設定値: %q", got)
 	}
 	fr.mu.Lock()
-	fr.wsURL = "wss://relay.4noha.org"
+	fr.wsURL = "wss://relay.example.org"
 	fr.mu.Unlock()
 	_ = rs.IsSelfRevoked(ctx)
-	if got := rs.wsURL(); got != "wss://relay.4noha.org" {
+	if got := rs.wsURL(); got != "wss://relay.example.org" {
 		t.Fatalf("ws_url に切り替わるはず: %q", got)
 	}
 	fr.mu.Lock()
 	fr.wsURL = "http://bad" // ws:// 以外は無視
 	fr.mu.Unlock()
 	_ = rs.IsSelfRevoked(ctx)
-	if got := rs.wsURL(); got != "wss://relay.4noha.org" {
+	if got := rs.wsURL(); got != "wss://relay.example.org" {
 		t.Fatalf("不正値は無視のはず: %q", got)
 	}
 	fr.mu.Lock()
