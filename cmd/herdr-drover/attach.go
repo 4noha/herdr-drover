@@ -43,9 +43,12 @@ import (
 // 同値＝relay grant 検証窓を対称に保つ）。
 const injGrantTTL = 60 * time.Second
 
-// DefaultIdle は attachOnce の quiescence 読取りタイムアウト（internal/bridge
-// の DefaultIdle=30s と同値。無通信 30s で「切断」とみなし backoff 再接続へ渡す）。
-const DefaultIdle = 30 * time.Second
+// DefaultIdle は attachOnce の quiescence 読取りタイムアウト（internal/bridge の
+// DefaultIdle と同値。無通信がこれだけ続いたら「切断」とみなし backoff 再接続へ渡す）。
+// 2026-11-03 に 30s → 15 分（relay の VM 化で常時接続の課金が無くなった。30s だと
+// 止まっている画面でも 30〜60 秒ごとに全画面を描き直していた）。死んだ接続を 15 分
+// 抱えないよう、別途 viewerPingInterval ごとの WS ping で生存を確かめる（attachlive.go）。
+const DefaultIdle = 15 * time.Minute
 
 // inputWriteTimeout は connHolder.write（stdin→relay conn）1 回の書込上限
 // （internal/bridge.writeTimeout と同値・同クラスの対処）。実運用フィードバック
@@ -84,8 +87,9 @@ const watchLifecycleClockJump = 15 * time.Second
 // なりがちで、両者を 30s 窓で束ねて 1 回だけの再接続に集約する。
 // (2) Wi-Fi 切替は「旧 set→空→新 set」の 2 段遷移で NIC diff が 2 回来るが、
 // 同じ cooldown で 2 回目を抑止する。
-// (3) pumpFrames の DefaultIdle=30s と同じ長さにして、正常な quiescence 再接続
-// の頻度以上には切らないよう保つ。
+// (3) 正常時の再接続より高い頻度では切らない（DefaultIdle が 30s だった頃は
+// それと同じ長さ。15 分に伸びた後も、スリープ/NIC 変化は 30s に 1 回を上限に
+// 集約できれば十分）。
 const watchLifecycleCooldown = 30 * time.Second
 
 // watchLifecycle は cmdAttach の goroutine として常駐し、スリープ復帰・NIC 変化を
@@ -805,6 +809,16 @@ func attachOnce(ctx context.Context, st *state.Client, relayURL, sid, viewerPC, 
 	// この attachOnce が終了し backoff ループが再接続する。
 	go func() { <-dctx.Done(); conn.Close() }()
 
+	// 生存確認（attachlive.go）: 無通信自切断が 15 分なので、黙って死んだ TCP（relay
+	// VM の再起動・NAT 消失）をその間ずっと「接続中」と誤認しないよう定期 WS ping。
+	// pong は下の pumpFrames（読み手）が受ける。失敗したら自分から閉じて backoff 再接続へ。
+	var pingFail atomic.Bool
+	go watchLiveness(dctx, conn, viewerPingInterval, viewerPingTimeout, func(err error) {
+		pingFail.Store(true)
+		lg.Printf("生存確認（ping）失敗＝切断して再接続: %v", err)
+		conn.Close()
+	})
+
 	pumpStart := time.Now()
 	idleClosed, got, why := pumpFrames(conn, out, DefaultIdle)
 	if askHist && got > 0 {
@@ -812,6 +826,9 @@ func attachOnce(ctx context.Context, st *state.Client, relayURL, sid, viewerPC, 
 	}
 	if hiddenClose.Load() {
 		why = "非表示で切断（表示に戻るまで接続しない）／ " + why
+	}
+	if pingFail.Load() {
+		why = "生存確認（ping）失敗／ " + why
 	}
 	// ⚠張り付き調査の核心行。received=0 が続くなら「dial は通るが source が bridge を
 	// 張っていない」（＝Wake/grant 側の問題）、received>0 なら「流れていた接続が落ちた」

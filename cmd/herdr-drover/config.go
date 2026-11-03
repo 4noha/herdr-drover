@@ -29,7 +29,7 @@ type Config struct {
 	PCID        string        // PC_ID（既定 <hostname 短縮小文字>-herdr）
 	SocketPath  string        // HERDR_SOCKET_PATH（解決は herdrapi.ResolveSocketPath と同一規則）
 	Tick        time.Duration // DROVER_TICK（既定 5s）
-	Idle        time.Duration // DROVER_IDLE（Web ターミナル quiescence 自切断。0=bridge 既定 30s）
+	Idle        time.Duration // DROVER_IDLE（Web ターミナル quiescence 自切断。0=bridge 既定 15 分）
 	// FirstByteIdle は DROVER_FIRST_BYTE_IDLE（Web ターミナルの「初回データ未着」
 	// 自切断猶予。0=bridge 既定 5s＝BUG-8 対策値）。既定を動かす根拠（relay 往復が
 	// 5s を超える実測）がまだ無いので env 未設定なら挙動を変えない＝計測用の knob。
@@ -135,17 +135,17 @@ func resolveConfig() (Config, error) {
 		cfg.Tick = d
 	}
 	// DROVER_IDLE は Web ターミナルの quiescence 自切断（無通信でデータ線を
-	// 自分から閉じる＝near-$0 の要）。未設定=0 は bridge 既定 30s（cm 本番
-	// IdleClose と同値）。負値（quiescence 無効）は env からは許さない:
-	// 常時接続化は near-$0 設計を壊すため、無効化はテストが bridge.Idle を
-	// 直接触る時だけの内部 knob とする。
+	// 自分から閉じる）。未設定=0 は bridge 既定 15 分（2026-11-03 まで 30s＝cm 本番
+	// IdleClose と同値。relay の VM 化で常時接続の課金が無くなったので伸ばした）。
+	// 負値（quiescence 無効）は env からは許さない: 死んだ接続を永久に抱える
+	// ため、無効化はテストが bridge.Idle を直接触る時だけの内部 knob とする。
 	if v := os.Getenv("DROVER_IDLE"); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil {
 			return cfg, fmt.Errorf("DROVER_IDLE が不正（Go duration 形式。例 30s）: %q: %w", v, err)
 		}
 		if d <= 0 {
-			return cfg, fmt.Errorf("DROVER_IDLE は正の期間であること（quiescence 無効化は不可＝near-$0 設計）: %q", v)
+			return cfg, fmt.Errorf("DROVER_IDLE は正の期間であること（quiescence 無効化は不可）: %q", v)
 		}
 		cfg.Idle = d
 	}

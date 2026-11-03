@@ -55,7 +55,23 @@ type bridgeRun struct {
 	b *bridge.Bridge
 }
 
-// yieldToNewWake は「稼働中の bridge を止めて新しい wake に譲るか」。
+// wake の重複判定の閾値（wakeShouldYield）。
+const (
+	// wakeAliveRecent: 直近これ以内にバイトが流れていれば生きている（ping 不要）。
+	wakeAliveRecent = 10 * time.Second
+	// wakePingTimeout: それより無通信なら WS ping で確かめ、この時間内に pong が
+	// 無ければ死んでいる（黙って死んだ TCP）とみなして張り直す。
+	wakePingTimeout = 3 * time.Second
+)
+
+// liveBridge は wake の重複判定が bridge に求める最小 seam（fake でテストする）。
+type liveBridge interface {
+	ReceivedAny() bool
+	LastTraffic() time.Time
+	Ping(ctx context.Context) error
+}
+
+// yieldToNewWake は「稼働中の bridge を止めて新しい wake に譲るか」と、その理由。
 //
 // 旧実装の dedup は「その sid の bridge が**在るか**」だけで wake を捨てていた。
 // ところが**在ることは繋がっていることを意味しない**（BUG-1 / BUG-6 と同じ型）:
@@ -66,20 +82,47 @@ type bridgeRun struct {
 //
 // ⚠ **繋がっている bridge は絶対に止めない**（見ている画面を切ることになる）。
 // ⚠ **生成途中（b==nil）も止めない**。不明なものを壊さない＝従来どおり無視する。
-func yieldToNewWake(h *bridgeRun) bool {
+func yieldToNewWake(ctx context.Context, h *bridgeRun, now time.Time) (bool, string) {
 	if h == nil {
-		return true // そもそも稼働していない
+		return true, "稼働していない"
 	}
 	if h.b == nil {
-		return false // 生成途中＝不明。触らない
+		return false, "生成途中" // 不明。触らない
 	}
-	return !h.b.ReceivedAny() // 空振り（相手から 1 バイトも来ていない）なら譲る
+	return wakeShouldYield(ctx, h.b, now)
+}
+
+// wakeShouldYield は稼働中（生成済み）の bridge について「止めて譲るか」を決める。
+//
+//   - 相手から 1 バイトも来ていない（空振り）→ 譲る（従来どおり）
+//   - 直近 wakeAliveRecent 以内に通信あり → 生きている＝無視（relay が新 viewer を
+//     この source と対にする。viewer の RESIZE で observe が respawn＝full frame）
+//   - それより無通信 → WS ping。pong が返れば生きている＝無視。返らなければ
+//     黙って死んだ接続（source PC のスリープ復帰・relay 再起動）＝譲って張り直す
+//
+// 無通信自切断が 30s だった頃は、死んだ接続も 30s で勝手に畳まれていたので
+// この判定は要らなかった。15 分へ伸ばした（2026-11-03）ので、死んだ bridge が
+// sid を 15 分塞ぎ wake が全部捨てられる事故を ping で防ぐ。
+func wakeShouldYield(ctx context.Context, lb liveBridge, now time.Time) (bool, string) {
+	if !lb.ReceivedAny() {
+		return true, "相手から 1 バイトも来ていない"
+	}
+	age := now.Sub(lb.LastTraffic())
+	if age < wakeAliveRecent {
+		return false, fmt.Sprintf("直近 %s に通信あり", age.Round(time.Millisecond))
+	}
+	pctx, cancel := context.WithTimeout(ctx, wakePingTimeout)
+	defer cancel()
+	if err := lb.Ping(pctx); err != nil {
+		return true, fmt.Sprintf("無通信 %s・ping 失敗（黙って死んだ接続）: %v", age.Round(time.Second), err)
+	}
+	return false, fmt.Sprintf("無通信 %s だが pong あり", age.Round(time.Second))
 }
 
 // webTerm は Web ターミナル経路の agent 側状態（WatchWake＋sid 毎 bridge）。
 type webTerm struct {
 	relayURL func() string // WS 中継の接続先（relayurl.go・実行中に切り替わる）
-	idle     time.Duration // quiescence 自切断（0=bridge 既定 30s。DROVER_IDLE 由来）
+	idle     time.Duration // quiescence 自切断（0=bridge 既定 15 分。DROVER_IDLE 由来）
 	// firstByteIdle は「初回データ未着」の自切断猶予（0=bridge 既定 5s。
 	// DROVER_FIRST_BYTE_IDLE 由来）。BUG-8（v0.5.38）で新設した閾値で、当時は
 	// env knob を用意せず bridge.DefaultFirstByteIdle 固定にした。2026-09-16
@@ -180,33 +223,36 @@ func (w *webTerm) handleWake(ctx context.Context, sid string) {
 	defer bcancel()
 	done := make(chan struct{})
 	w.mu.Lock()
-	if h := w.active[sid]; h != nil {
-		if !yieldToNewWake(h) {
-			w.mu.Unlock()
+	h := w.active[sid]
+	w.mu.Unlock()
+	if h != nil {
+		// 判定は lock の外で行う（ping は最長 wakePingTimeout 待つ＝他 sid の wake を
+		// 止めない）。判定後に再 lock して「その間に誰かが張り直していないか」を見る。
+		yield, why := yieldToNewWake(ctx, h, time.Now())
+		if !yield {
 			bcancel()
-			w.lg.Printf("webterm: 多重 wake 無視 sid=%q（bridge 稼働中）", sid)
+			w.lg.Printf("webterm: 多重 wake 無視 sid=%q（bridge 稼働中: %s）", sid, why)
 			return
 		}
-		// 空振り bridge が居座っている＝この wake を捨てると画面が出ない。
+		// 空振り／死んだ bridge が居座っている＝この wake を捨てると画面が出ない。
 		// 旧 bridge を止めてから張り直す（respawn と同じ規律: done を待って
 		// から再登録＝同 sid に 2 本を作らない）。
-		w.mu.Unlock()
-		w.lg.Printf("webterm: 空振り bridge を停止して張り直す sid=%q（相手から 1 バイトも来ていない）", sid)
+		w.lg.Printf("webterm: 稼働中の bridge を停止して張り直す sid=%q（%s）", sid, why)
 		h.cancel()
 		select {
 		case <-h.done:
 		case <-time.After(respawnStopWait):
 			bcancel()
-			w.lg.Printf("webterm: 空振り bridge が %s 以内に止まらない sid=%q（今回の wake は見送り）", respawnStopWait, sid)
+			w.lg.Printf("webterm: 旧 bridge が %s 以内に止まらない sid=%q（今回の wake は見送り）", respawnStopWait, sid)
 			return
 		}
-		w.mu.Lock()
-		if w.active[sid] != nil { // 待っている間に誰かが張り直していたら譲る
-			w.mu.Unlock()
-			bcancel()
-			w.lg.Printf("webterm: 多重 wake 無視 sid=%q（停止待ちの間に別の bridge が張られた）", sid)
-			return
-		}
+	}
+	w.mu.Lock()
+	if w.active[sid] != nil { // 判定／停止待ちの間に誰かが張り直していたら譲る
+		w.mu.Unlock()
+		bcancel()
+		w.lg.Printf("webterm: 多重 wake 無視 sid=%q（判定の間に別の bridge が張られた）", sid)
+		return
 	}
 	run := &bridgeRun{cancel: bcancel, done: done}
 	w.active[sid] = run
@@ -258,7 +304,7 @@ func (w *webTerm) handleWake(ctx context.Context, sid string) {
 	// 契約 = bridge.New(sid, conn, herdrClient) → Run(ctx)（着地形で確定）:
 	//   - conn は dial 済み source 役バイトストリーム（io.Closer なら Run
 	//     終了/quiescence 自切断で bridge が close。ここの defer は二重で無害）
-	//   - quiescence（無通信 30s 自切断＝cm idlePump 相当）は bridge の
+	//   - quiescence（無通信 15 分の自切断＝cm idlePump 相当）は bridge の
 	//     Idle 既定値が担い、Run は nil（正常）で戻る＝次の wake 待ちへ
 	//   - ctx cancel（SIGTERM）で必ず戻り observe サブプロセスを残さない
 	w.lg.Printf("webterm: bridge 開始 sid=%q", sid)
@@ -269,7 +315,7 @@ func (w *webTerm) handleWake(ctx context.Context, sid string) {
 	run.b = b
 	w.mu.Unlock()
 	// quiescence（無通信自切断）は DROVER_IDLE で調整可（0 なら bridge 既定
-	// 30s＝cm 本番 IdleClose と同値）。e2e が短い idle で実切断を検証する。
+	// 15 分）。e2e が短い idle で実切断を検証する。
 	b.Idle = w.idle
 	b.FirstByteIdle = w.firstByteIdle
 	// 画像貼付（既定 off）。off の間は従来どおり IMAGE frame を破棄する。

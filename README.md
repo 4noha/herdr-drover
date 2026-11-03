@@ -17,8 +17,8 @@
   セッションが漏れないよう、制限クレデンシャルで動く slave モード
 - 🔑 **一時 SSH エージェント転送**: owner の SSH 鍵を slave のディスクに置かず、
   relay 越しに一時的に貸して GitHub 操作（署名は owner 側で実行）
-- 💤 **near-$0**: 無通信 30s で自動切断、Firestore push で自動復帰。
-  アイドル時のクラウド課金ほぼゼロ
+- 💤 **near-$0**: relay は VM（任意）か Cloud Run。無通信 15 分で自動切断、
+  Firestore push で自動復帰。アイドル時のクラウド課金ほぼゼロ
 
 ## 仕組み（要点）
 

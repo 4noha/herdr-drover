@@ -315,3 +315,148 @@ func TestBridgeLegacyViewerGetsNoMeta(t *testing.T) {
 	cancel()
 	<-runDone
 }
+
+// TestBridgeV2NoHistHelloSendsMetaOnly — Web viewer の「履歴なし v2」HELLO（HelloNoHistDy。
+// 本文つき履歴を受け取った後の再接続）では、producer は META＋hist_end だけ流して
+// 履歴本文（pane.read の scrollback）を省く。2026-11-03 までは再接続のたびに最大
+// 1000 行の履歴を流して viewer が捨てていた（30s の quiescence ごとに数百 KB）。
+// 対照: 同じ pane に HELLO だけで繋ぐと履歴本文が載る（旧来どおり）。
+func TestBridgeV2NoHistHelloSendsMetaOnly(t *testing.T) {
+	_, hc := startHerdr(t)
+	ws, err := hc.WorkspaceCreate()
+	if err != nil {
+		t.Fatalf("workspace.create: %v", err)
+	}
+	paneID := ws.RootPane.PaneID
+	if err := hc.PaneSendText(paneID, "for i in $(seq 1 120); do echo HD_NH_$i; done\r"); err != nil {
+		t.Fatalf("send_text: %v", err)
+	}
+	waitFor(t, 15*time.Second, "履歴マーカーが出る", func() (bool, error) {
+		rd, err := hc.PaneRead(paneID, "visible")
+		if err != nil {
+			return false, err
+		}
+		return strings.Contains(rd.Text, "HD_NH_120"), nil
+	})
+	cache := NewHistoryCache()
+
+	connect := func(hello []byte) ([]byte, *Bridge, func()) {
+		viewerConn, bridgeConn := net.Pipe()
+		sink := newConnSink(viewerConn)
+		b := New(paneID, bridgeConn, hc)
+		b.Idle = -1
+		b.Logf = t.Logf
+		b.HistoryCache = cache
+		ctx, cancel := context.WithCancel(context.Background())
+		runDone := make(chan error, 1)
+		go func() { runDone <- b.Run(ctx) }()
+		if _, err := viewerConn.Write(append(hello, resizeMagic(500, 160)...)); err != nil {
+			t.Fatalf("write HELLO+RESIZE: %v", err)
+		}
+		waitFor(t, 15*time.Second, "初回 frame (DECSET 2026)", func() (bool, error) {
+			return sink.containsFrom(0, []byte("\x1b[?2026h")), nil
+		})
+		buf := sink.bytesCopy()
+		return buf, b, func() {
+			cancel()
+			viewerConn.Close()
+			select {
+			case <-runDone:
+			case <-time.After(10 * time.Second):
+				t.Fatal("ctx cancel 後 10s で Run が戻らない")
+			}
+		}
+	}
+
+	// 対照（HELLO のみ）: 履歴本文あり。
+	buf, _, stop := connect(helloMagic())
+	if !bytes.Contains(buf, []byte(metaOSC+"v=2;")) || !strings.Contains(string(buf), "HD_NH_1\r") {
+		t.Fatalf("対照（HELLO のみ）で META／履歴本文が無い: %.200q", buf)
+	}
+	stop()
+
+	// 本題（HELLO＋履歴なし HELLO）: META は来る・hist=0・hlines=0・本文なし・hist_end→frame の順。
+	buf, _, stop = connect(append(helloMagic(), scrollBytes(HelloNoHistDy)...))
+	defer stop()
+	iMeta := bytes.Index(buf, []byte(metaOSC+"v=2;"))
+	iEnd := bytes.Index(buf, MetaHistEnd())
+	iFrame := bytes.Index(buf, []byte("\x1b[?2026h"))
+	if iMeta != 0 || iEnd < 0 || iFrame < 0 || iEnd > iFrame {
+		t.Fatalf("順序異常: meta=%d hist_end=%d frame=%d: %.120q", iMeta, iEnd, iFrame, buf)
+	}
+	metaLen := bytes.Index(buf, []byte(metaST)) + len(metaST)
+	meta := string(buf[:metaLen])
+	if !strings.Contains(meta, ";hist=0;hlines=0;") {
+		t.Fatalf("履歴なし HELLO の META が hist=0;hlines=0 でない: %q", meta)
+	}
+	if body := buf[metaLen:iEnd]; len(body) != 0 {
+		t.Fatalf("履歴なし HELLO なのに履歴本文が %d バイト流れた: %.200q", len(body), body)
+	}
+	if strings.Contains(string(buf), "HD_NH_1\r") {
+		t.Fatalf("履歴なし HELLO なのに scrollback 行（HD_NH_1）が流れた")
+	}
+}
+
+// TestBridgeV2HelloAgainResendsHistory — 同じ bridge に viewer が入り直した（relay の
+// viewer slot 置換＝別タブ・リロード。HELLO がもう一度届く）時は、次の observe 世代で
+// META＋履歴を送り直す。「1 接続 1 回」は viewer 1 つにつき 1 回の意味（無通信自切断が
+// 15 分になり、bridge が viewer の入れ替わりより長生きするようになった）。
+func TestBridgeV2HelloAgainResendsHistory(t *testing.T) {
+	_, hc := startHerdr(t)
+	ws, err := hc.WorkspaceCreate()
+	if err != nil {
+		t.Fatalf("workspace.create: %v", err)
+	}
+	paneID := ws.RootPane.PaneID
+	if err := hc.PaneSendText(paneID, "for i in $(seq 1 120); do echo HD_RH_$i; done\r"); err != nil {
+		t.Fatalf("send_text: %v", err)
+	}
+	waitFor(t, 15*time.Second, "履歴マーカーが出る", func() (bool, error) {
+		rd, err := hc.PaneRead(paneID, "visible")
+		if err != nil {
+			return false, err
+		}
+		return strings.Contains(rd.Text, "HD_RH_120"), nil
+	})
+	viewerConn, bridgeConn := net.Pipe()
+	defer viewerConn.Close()
+	sink := newConnSink(viewerConn)
+	b := New(paneID, bridgeConn, hc)
+	b.Idle = -1
+	b.Logf = t.Logf
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runDone := make(chan error, 1)
+	go func() { runDone <- b.Run(ctx) }()
+
+	if _, err := viewerConn.Write(append(helloMagic(), resizeMagic(500, 160)...)); err != nil {
+		t.Fatalf("write HELLO+RESIZE: %v", err)
+	}
+	waitFor(t, 15*time.Second, "初回 frame", func() (bool, error) {
+		return sink.containsFrom(0, []byte("\x1b[?2026h")), nil
+	})
+	off := sink.len()
+	if n := bytes.Count(sink.bytesCopy(), []byte(metaOSC+"v=2")); n != 1 {
+		t.Fatalf("初回の META が %d 回", n)
+	}
+	// 入り直し: HELLO → RESIZE（observe respawn）。META＋履歴がもう一度流れる。
+	if _, err := viewerConn.Write(append(helloMagic(), resizeMagic(500, 160)...)); err != nil {
+		t.Fatalf("write HELLO+RESIZE(2): %v", err)
+	}
+	waitFor(t, 15*time.Second, "2 回目の META＋frame", func() (bool, error) {
+		return sink.containsFrom(off, []byte(metaOSC+"v=2")) && sink.containsFrom(off, []byte("\x1b[?2026h")), nil
+	})
+	second := sink.bytesCopy()[off:]
+	if !strings.Contains(string(second), "HD_RH_1\r") {
+		t.Fatalf("入り直し後の先頭に履歴本文（HD_RH_1）が無い: %.200q", second)
+	}
+	if iMeta, iFrame := bytes.Index(second, []byte(metaOSC+"v=2")), bytes.Index(second, []byte("\x1b[?2026h")); iMeta > iFrame {
+		t.Fatalf("入り直し後の順序異常: meta=%d frame=%d", iMeta, iFrame)
+	}
+	cancel()
+	select {
+	case <-runDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("ctx cancel 後 10s で Run が戻らない")
+	}
+}

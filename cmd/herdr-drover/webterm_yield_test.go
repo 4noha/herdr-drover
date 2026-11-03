@@ -8,7 +8,9 @@ package main
 // （2026-09-06 実測: この列がログに 110 回）。
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	"github.com/4noha/herdr-drover/internal/bridge"
 )
@@ -30,8 +32,9 @@ func TestYieldToNewWake(t *testing.T) {
 		{"空振り（1 バイトも来ていない）＝譲る", &bridgeRun{b: fresh}, true},
 	}
 	for _, c := range cases {
-		if got := yieldToNewWake(c.h); got != c.want {
-			t.Errorf("%s: yieldToNewWake=%v want %v", c.name, got, c.want)
+		if got, why := yieldToNewWake(context.Background(), c.h, time.Now()); got != c.want {
+			t.Errorf("%s: yieldToNewWake=%v want %v（%s）", c.name, got, c.want, why)
 		}
 	}
+	// 生きている bridge（通信あり・pong あり）の判定表は webterm_wake_test.go。
 }

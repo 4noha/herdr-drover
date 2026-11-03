@@ -51,10 +51,11 @@ func TestCMWireTable(t *testing.T) {
 		{
 			// ワイヤ v2 HELLO は SCROLL の dy=0x7fff を予約（旧 producer は
 			// SCROLL として parse-and-ignore＝入力に漏れない）。
-			name:   "SCROLL dy=HelloV2Dy は EvHello、dy=ScrollBottomDy は EvScrollBottom、その他 dy は EvScroll",
-			chunks: [][]byte{scrollBytes(HelloV2Dy), scrollBytes(-3), scrollBytes(ScrollBottomDy), resizeBytes(500, 160)},
+			name:   "SCROLL dy=HelloV2Dy は EvHello、dy=ScrollBottomDy は EvScrollBottom、dy=HelloNoHistDy は EvHelloNoHist、その他 dy は EvScroll",
+			chunks: [][]byte{scrollBytes(HelloV2Dy), scrollBytes(HelloNoHistDy), scrollBytes(-3), scrollBytes(ScrollBottomDy), resizeBytes(500, 160)},
 			want: []Event{
 				{Kind: EvHello, Dy: HelloV2Dy},
+				{Kind: EvHelloNoHist, Dy: HelloNoHistDy},
 				{Kind: EvScroll, Dy: -3},
 				{Kind: EvScrollBottom, Dy: ScrollBottomDy},
 				{Kind: EvResize, Rows: 500, Cols: 160},

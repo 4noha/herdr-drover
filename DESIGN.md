@@ -67,7 +67,7 @@ scan エラー tick は skip＝前回状態維持（cm の空 STATUS flap 教訓
  打鍵として pane に流れる）。payload は `DROVER_WEB_IMAGE_PASTE`（既定 off）が
  false なら drop、true なら一時ファイル化→OS クリップボード→pane へ Ctrl+V(0x16)
  ／その他→pane.send_input
-無通信 30s → BridgeSourceIdle 自切断（quiescence）→ M9 push で自動復帰
+無通信 15 分（2026-11-03 まで 30s）→ 自切断（quiescence）→ M9 push で自動復帰
 ```
 
 ### リモート pane 注入（↗窓相当）

@@ -56,6 +56,10 @@ const (
 	// 用: observe は viewer の RESIZE サイズのまま（v1 と同じ描画）、ストリーム先頭に
 	// **素のテキストの履歴**だけを流す（OSC の META は付けない＝端末にそのまま書ける）。
 	EvHelloHist
+	// EvHelloNoHist は「履歴なし」の v2 HELLO（SCROLL の dy=HelloNoHistDy）。Web viewer が
+	// 本文つき履歴を既に受け取ったページから再接続する時に EvHello の直後に送る＝
+	// producer は META＋hist_end だけ流し、履歴本文（pane.read・最大 1000 行）を省く。
+	EvHelloNoHist
 )
 
 // HelloV2Dy は SCROLL フレームの dy をワイヤ v2 HELLO として予約する値。
@@ -73,6 +77,12 @@ const ScrollBottomDy = 0x7ffe
 // viewer の RESIZE のまま、先頭に履歴を素のテキストで流す。v1 producer は SCROLL を
 // 無視するので旧 PC に送っても無害（履歴が来ないだけ）。
 const HelloHistDy = 0x7ffd
+
+// HelloNoHistDy は Web viewer の「履歴なし v2」HELLO（EvHelloNoHist）。EvHello の後に
+// 送る付加宣言（単独では v2 にならない）。v1 producer は SCROLL として無視し、
+// HelloNoHistDy を知らない v2 producer も SCROLL として無視する＝従来どおり履歴が
+// 流れ viewer 側が捨てるだけ（2026-11-03 まではそれが常態だった）。
+const HelloNoHistDy = 0x7ffc
 
 // maxImageBytes は IMAGE payload の上限（8MiB）。cm と同じく DoS／メモリ
 // 膨張防止で、これを超える長さ宣言は「不正長」としてヘッダごと捨てて
@@ -148,6 +158,8 @@ func (p *CMWireParser) Feed(data []byte) []Event {
 				kind = EvScrollBottom
 			case HelloHistDy:
 				kind = EvHelloHist
+			case HelloNoHistDy:
+				kind = EvHelloNoHist
 			}
 			evs = append(evs, Event{Kind: kind, Dy: dy})
 			p.in = p.in[4:]

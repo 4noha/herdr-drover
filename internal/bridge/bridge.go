@@ -58,10 +58,18 @@ const (
 	backoffMin = 200 * time.Millisecond
 	backoffMax = 5 * time.Second
 
-	// DefaultIdle は quiescence 自切断の既定（cm 本番の IdleClose=30s、
-	// cm cmd/claude-master/main.go:717 と同値）。無通信 30s でデータ線を
-	// 自分から閉じ、次の wake まで解放する＝near-$0 設計の要。
-	DefaultIdle = 30 * time.Second
+	// DefaultIdle は quiescence 自切断の既定。無通信がこれだけ続いたらデータ線を
+	// 自分から閉じ、次の wake まで解放する。
+	//
+	// 2026-11-03 までは 30s（cm 本番の IdleClose=30s と同値＝Cloud Run の「接続中は
+	// 1 vCPU 課金」を避ける near-$0 設計の要）。relay が VM に移り接続を持ち続けても
+	// 課金が変わらなくなったので 15 分へ伸ばした。30s だと止まっている画面でも
+	// 30〜60 秒ごとに切断→再接続→**全画面の描き直し**（observe 再 spawn＋full frame
+	// 約 26KB）が起きていた（ユーザー指摘「差分更新ではなく全更新になる」）。15 分なら
+	// 画面が止まっている間はそのまま繋がったままで描き直しが起きず、再開した出力は
+	// herdr の差分フレームのまま届く。死んだ接続を長く抱えない対策は webterm の
+	// wake 時 ping（wakeShouldYield）と attach の定期 ping（attachlive.go）。
+	DefaultIdle = 15 * time.Minute
 
 	// DefaultFirstByteIdle は「**まだ 1 バイトも受け取っていない** bridge」を
 	// 畳むまでの待ち（v0.5.39）。相手（viewer）が来ていない接続は DefaultIdle
@@ -165,6 +173,9 @@ type Bridge struct {
 	// histOnly は ↗窓 attach の「履歴のみ」HELLO（EvHelloHist）。observe は viewer の
 	// RESIZE サイズのまま、先頭に素のテキストの履歴だけを流す（META/OSC なし）。
 	histOnly atomic.Bool
+	// noHist は Web viewer の「履歴なし v2」HELLO（EvHelloNoHist）。v2 の先頭に META＋
+	// hist_end だけを流し、履歴本文を省く（viewer は既に履歴を持っている再接続）。
+	noHist atomic.Bool
 
 	// cur は現行 observe サブプロセス（テストの respawn／リーク検査用に
 	// mu 越しで観測する）。
@@ -520,6 +531,21 @@ func (b *Bridge) historyPrefix(size winSize) []byte {
 	return append(out, MetaHistEnd()...)
 }
 
+// metaOnlyPrefix は「履歴なし v2」HELLO（EvHelloNoHist）向けの先頭: META＋hist_end だけで
+// 履歴本文を載せない（viewer は既に履歴を持っている＝同じページからの再接続）。hist=0・
+// hlines=0 で送る（viewer 側の「本文つき履歴は 1 回だけ」の判定を動かさない。viewer は
+// 既に受領済みなのでこの区間は捨てる）。scrolled は読む（元 pane の遡り表示は接続ごとに
+// 変わる）。pane.read（長寿命 pane で 4〜16s）は呼ばない。
+func (b *Bridge) metaOnlyPrefix(size winSize) []byte {
+	scrolled := 0
+	if pi, err := b.Herdr.PaneGet(b.Sid); err == nil {
+		scrolled = pi.Scroll.OffsetFromBottom
+	}
+	b.logf("v2: 履歴なし HELLO＝META のみ（履歴本文は省く）")
+	out := MetaBegin(size.cols, size.rows, false, false, 0, scrolled)
+	return append(out, MetaHistEnd()...)
+}
+
 // historyPlain は ↗窓 attach 向けの素の履歴（META/OSC なし）。落とす行数は**元 pane の
 // 可視行数**（pane.get viewport_rows。取れなければ viewer の行数）、詰める CRLF は
 // **viewer（attach pane）の行数**。予算内に取れなければ何も送らない（次の接続で送る
@@ -580,6 +606,20 @@ func (b *Bridge) bump() {
 // dedup が「稼働中の bridge が空振りかどうか」を判断するのに使う（pane や
 // bridge が**在る**ことは、相手と**繋がっている**ことを意味しない）。
 func (b *Bridge) ReceivedAny() bool { return b.gotFirst.Load() }
+
+// LastTraffic は conn で最後にバイトが流れた時刻（両方向。起動時刻が種）。wake の
+// 重複判定（webterm.wakeShouldYield）が「生きているが無通信」の bridge を見分けるのに使う。
+func (b *Bridge) LastTraffic() time.Time { return time.Unix(0, b.last.Load()) }
+
+// Ping は conn が WS ping を持つ（relayclient.Conn）なら相手の生存を確かめる。
+// 持たない conn（テストの net.Pipe 等）は nil＝「不明は生きている扱い」（壊さない側に倒す）。
+// pong は readConn の読み手が受ける＝Run 中にだけ意味がある。
+func (b *Bridge) Ping(ctx context.Context) error {
+	if p, ok := b.Conn.(interface{ Ping(context.Context) error }); ok {
+		return p.Ping(ctx)
+	}
+	return nil
+}
 
 func (b *Bridge) setProc(p *observeProc) {
 	b.mu.Lock()
@@ -648,7 +688,15 @@ func (b *Bridge) readConn(resizeCh chan winSize, connDone chan<- error) {
 					}
 				case EvHello:
 					b.v2.Store(true)
+					// 同じ bridge に viewer が入り直した（relay の viewer slot 置換＝
+					// 別タブ・リロード）なら、次の observe 世代で META＋履歴を送り直す。
+					// 1 接続 1 回の規律は「viewer 1 つにつき 1 回」の意味で、HELLO の
+					// 到来が viewer の切り替わりそのもの。
+					b.histSent.Store(false)
 					b.logf("viewer: ワイヤ v2 HELLO（observe は元 pane 実サイズ・先頭に履歴）")
+				case EvHelloNoHist:
+					b.noHist.Store(true)
+					b.logf("viewer: 履歴なし v2 HELLO（META のみ・履歴本文は省く）")
 				case EvHelloHist:
 					b.histOnly.Store(true)
 					b.logf("viewer: 履歴のみ HELLO（observe は viewer の RESIZE サイズ・先頭に素の履歴）")
@@ -818,9 +866,12 @@ func (b *Bridge) spawnObserve(size winSize) (*observeProc, error) {
 		// respawn 世代では histSent 済みなので送らない。
 		if (b.v2.Load() || b.histOnly.Load()) && b.histSent.CompareAndSwap(false, true) {
 			var prefix []byte
-			if b.v2.Load() {
+			switch {
+			case b.v2.Load() && b.noHist.Load():
+				prefix = b.metaOnlyPrefix(size)
+			case b.v2.Load():
 				prefix = b.historyPrefix(size)
-			} else {
+			default:
 				prefix = b.historyPlain(size)
 			}
 			// 履歴なし（取れなかった／可視画面ぶん以下）は何も書かない。
