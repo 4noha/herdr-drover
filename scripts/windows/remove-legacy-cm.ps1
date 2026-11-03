@@ -34,7 +34,7 @@ foreach($tn in 'claude-master-monitor','claude-master-cloud'){
       Stop-ScheduledTask -TaskName $tn -ErrorAction SilentlyContinue
       Unregister-ScheduledTask -TaskName $tn -Confirm:$false
     }
-  } else { Write-Host "  task $tn: 無し" }
+  } else { Write-Host "  task ${tn}: 無し" }
 }
 
 Step "2. cm のプロセス"
@@ -56,7 +56,7 @@ Step "4. cm のディレクトリを退避"
 if(Test-Path $cm){
   $bak = "$cm.bak-$(Get-Date -Format yyyyMMdd)"
   Act "rename $cm -> $bak" { Rename-Item -Path $cm -NewName (Split-Path $bak -Leaf) }
-} else { Write-Host "  $cm: 無し" }
+} else { Write-Host "  ${cm}: 無し" }
 
 Step "5. herdr-drover を最新へ"
 $hd = Join-Path $env:USERPROFILE '.herdr-drover\bin\herdr-drover.exe'
