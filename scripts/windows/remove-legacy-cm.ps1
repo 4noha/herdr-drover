@@ -13,7 +13,8 @@
 #
 # 行うこと:
 #   1. S4U タスク claude-master-monitor / claude-master-cloud を停止・削除
-#   2. claude-master.exe のプロセスを停止
+#   2. cm の psmux セッション（tmux.exe server -s claude-master）・その中の attach 再試行
+#      ループ（powershell while(\$true)）・claude-master.exe を停止
 #   3. User PATH から cm のシム dir（~\.claude-master\bin）を外す（`claude` が cm に吸われない）
 #   4. ~\.claude-master を ~\.claude-master.bak-<日付> へ退避（削除はしない。~\go\bin の
 #      claude-master.exe も残す＝常駐経路さえ無ければ無害）
@@ -37,9 +38,21 @@ foreach($tn in 'claude-master-monitor','claude-master-cloud'){
   } else { Write-Host "  task ${tn}: 無し" }
 }
 
-Step "2. cm のプロセス"
+Step "2. cm のプロセス（psmux セッションと attach の再試行ループごと）"
+# cm の monitor は psmux（tmux.exe server -s claude-master）の窓ごとに
+# `while ($true) { claude-master.exe cloud attach <sid> ... }` を回している＝
+# claude-master.exe だけ止めても数秒で戻る（2026-11-03 実測: 55 本止めて 26 本復活）。
+# 先にループの shell と psmux server を止める。psmux は cm 専用（herdr は使わない）。
+$all  = @(Get-CimInstance Win32_Process)
+$srv  = @($all | Where-Object { $_.Name -eq 'tmux.exe' -and $_.CommandLine -like '*-s claude-master*' })
+$sids = @($srv | ForEach-Object { $_.ProcessId })
+$loops = @($all | Where-Object { $_.Name -eq 'powershell.exe' -and $sids -contains $_.ParentProcessId -and $_.CommandLine -like '*claude-master*' })
+if($loops.Count -gt 0){ Act "stop $($loops.Count) attach loop shell(s)" { $loops | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } } }
+else { Write-Host "  attach ループの shell: 無し" }
+if($srv.Count -gt 0){ Act "stop $($srv.Count) psmux server (claude-master)" { $srv | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } } }
+else { Write-Host "  psmux server (claude-master): 無し" }
 $ps = @(Get-Process -Name 'claude-master' -ErrorAction SilentlyContinue)
-if($ps.Count -gt 0){ Act "stop $($ps.Count) claude-master.exe" { $ps | Stop-Process -Force } }
+if($ps.Count -gt 0){ Act "stop $($ps.Count) claude-master.exe" { $ps | Stop-Process -Force -ErrorAction SilentlyContinue } }
 else { Write-Host "  claude-master.exe: 動いていない" }
 
 Step "3. User PATH の cm シム"
