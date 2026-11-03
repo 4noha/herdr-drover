@@ -586,3 +586,31 @@ func TestSlaveWakeShortPollWhenRelayDoesNotHold(t *testing.T) {
 		t.Fatalf("2.2 秒で 500ms 間隔なら 3〜6 回のはず（連打していない）: %d", n)
 	}
 }
+
+// 切替先が /slave/* を載せていない（404）時も設定の URL で settings を読み直して解除される。
+func TestSlaveFallsBackWhenHTTPURLReturns404(t *testing.T) {
+	frA, tsA := newFakeRelay(t, "sec")
+	defer tsA.Close()
+	dead := httptest.NewServer(http.NotFoundHandler()) // 全部 404（旧版 relay-only の VM 相当）
+	defer dead.Close()
+	rs := newTestRelayState(tsA, "sec")
+	rs.urls = newRelayURLSource(rs.wsBase, rs.lg)
+	rs.httpURLs = newHTTPURLSource(rs.httpBase, rs.lg)
+	ctx := context.Background()
+	frA.mu.Lock()
+	frA.httpURL = dead.URL
+	frA.mu.Unlock()
+	_ = rs.IsSelfRevoked(ctx)
+	if got := rs.httpBaseNow(); got != dead.URL {
+		t.Fatalf("切替値が入るはず: %q", got)
+	}
+	frA.mu.Lock()
+	frA.httpURL = ""
+	frA.mu.Unlock()
+	if rs.IsSelfRevoked(ctx) {
+		t.Fatal("失効扱いになってはいけない")
+	}
+	if got := rs.httpBaseNow(); got != tsA.URL {
+		t.Fatalf("404 の切替先は設定の URL で読み直して解除されるはず: %q", got)
+	}
+}

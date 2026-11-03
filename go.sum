@@ -22,6 +22,8 @@ github.com/4noha/drover-cloud v0.2.7 h1:N1CvFpba0gIhVB0uoDXJyYj7VB3K6wCaz1BTwNpb
 github.com/4noha/drover-cloud v0.2.7/go.mod h1:85BVxsKi8luKSWwCmndtQvXIXdMHXwGduqZLiapyzRs=
 github.com/4noha/drover-cloud v0.2.8 h1:4jZkday6+p1HzGW6iG80MLyi7ldN6ClKUZ9/nEek9JE=
 github.com/4noha/drover-cloud v0.2.8/go.mod h1:85BVxsKi8luKSWwCmndtQvXIXdMHXwGduqZLiapyzRs=
+github.com/4noha/drover-cloud v0.2.9 h1:t7k6hJqa6VW+5fHYOFKl+YK+v59E8iJZKv0V2n47uFM=
+github.com/4noha/drover-cloud v0.2.9/go.mod h1:85BVxsKi8luKSWwCmndtQvXIXdMHXwGduqZLiapyzRs=
 github.com/Microsoft/go-winio v0.6.2 h1:F2VQgta7ecxGYO8k3ZZz3RS8fVIXVxONVUPlNERoyfY=
 github.com/Microsoft/go-winio v0.6.2/go.mod h1:yd8OoFMLzJbo9gZq8j5qaps8bJ9aShtEA8Ipt1oGCvU=
 github.com/cespare/xxhash/v2 v2.3.0 h1:UL815xU9SqsFlibzuggzjXhog7bL6oX9BbNZnL2UFvs=

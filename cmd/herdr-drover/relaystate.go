@@ -339,9 +339,10 @@ func (rs *relayState) IsSelfRevoked(ctx context.Context) bool {
 		HTTPURL string `json:"http_url"` // /slave/* の接続先（同上）
 	}
 	err := rs.call(ctx, http.MethodGet, "/slave/revoked", nil, &resp)
-	// 切替先（http_url）に届かない時は、設定の URL（Cloud Run）で settings を読み直す＝切替先が
-	// 死んでいても解除（http_url 空）が届く。
-	if err != nil && rs.httpURLs != nil && rs.httpURLs.overridden() && slaveStatus(err) == 0 {
+	// 切替先（http_url）が応えない時（接続不能・404 等。403＝失効は除く）は、設定の URL（Cloud Run）で
+	// settings を読み直す＝切替先が死んでいても／API を載せていなくても解除（http_url 空）が届く。
+	// 実障害（2026-11-03）: VM の relay が旧版のまま /slave/* を 404 にし、slave が切替先に張り付いた。
+	if err != nil && rs.httpURLs != nil && rs.httpURLs.overridden() && slaveStatus(err) != 403 {
 		rs.lg.Printf("slave API %s に届かない（%v）→ 設定の %s で settings を読み直す", rs.httpURLs.get(), err, rs.httpURLs.fallbackURL())
 		err = rs.callAt(ctx, rs.httpURLs.fallbackURL(), http.MethodGet, "/slave/revoked", nil, &resp)
 	}
