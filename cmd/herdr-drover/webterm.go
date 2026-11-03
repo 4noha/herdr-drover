@@ -78,7 +78,7 @@ func yieldToNewWake(h *bridgeRun) bool {
 
 // webTerm は Web ターミナル経路の agent 側状態（WatchWake＋sid 毎 bridge）。
 type webTerm struct {
-	relayURL string
+	relayURL func() string // WS 中継の接続先（relayurl.go・実行中に切り替わる）
 	idle     time.Duration // quiescence 自切断（0=bridge 既定 30s。DROVER_IDLE 由来）
 	// firstByteIdle は「初回データ未着」の自切断猶予（0=bridge 既定 5s。
 	// DROVER_FIRST_BYTE_IDLE 由来）。BUG-8（v0.5.38）で新設した閾値で、当時は
@@ -113,7 +113,7 @@ type webTerm struct {
 	wg     sync.WaitGroup        // WatchWake＋全 bridge の停止待ち（drain 用）
 }
 
-func newWebTerm(relayURL string, idle time.Duration, st agentState, hcli *herdrapi.Client, lg *log.Logger) *webTerm {
+func newWebTerm(relayURL func() string, idle time.Duration, st agentState, hcli *herdrapi.Client, lg *log.Logger) *webTerm {
 	return &webTerm{
 		relayURL: relayURL,
 		idle:     idle,
@@ -232,7 +232,7 @@ func (w *webTerm) handleWake(ctx context.Context, sid string) {
 	dial := w.dialSource
 	if dial == nil {
 		dial = func(c context.Context, s string) (net.Conn, error) {
-			return relayclient.Dial(c, w.relayURL, s, "source")
+			return relayclient.Dial(c, w.relayURL(), s, "source")
 		}
 	}
 	conn, err := dial(bctx, sid)

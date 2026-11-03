@@ -217,7 +217,7 @@ func (w *webTerm) handleSSHForwardWake(ctx context.Context, afSid string) {
 	dial := w.dialSource
 	if dial == nil {
 		dial = func(c context.Context, s string) (net.Conn, error) {
-			return relayclient.Dial(c, w.relayURL, s, "source")
+			return relayclient.Dial(c, w.relayURL(), s, "source")
 		}
 	}
 	conn, err := dial(bctx, afSid)

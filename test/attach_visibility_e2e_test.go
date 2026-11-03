@@ -28,15 +28,25 @@ import (
 type sourceRig struct {
 	srv      *testServer
 	hc       *herdrapi.Client
-	relayURL string
+	relayURL string // 実 relay（ローカル起動）
 	bin      string
 	st       *state.Client
 	pcID     string
 	paneID   string // source のセッション pane（sid）
+	// attachRelayURL は viewer（attach）の CLOUD_RELAY_URL に渡す値（既定 relayURL）。
+	attachRelayURL string
+	agentLog       *syncBuf
 }
 
 // startSourceRig は source 側（agent が動く PC）を立てる。
 func startSourceRig(t *testing.T, pcID string) *sourceRig {
+	return startSourceRigRelayEnv(t, pcID, "")
+}
+
+// startSourceRigRelayEnv は agent の CLOUD_RELAY_URL を envRelay にする（"" なら実 relay）。
+// settings/relay の切替試験では、設定の URL を死んだアドレスにして「切替で来た URL でしか
+// 繋がらない」状況を作る。
+func startSourceRigRelayEnv(t *testing.T, pcID, envRelay string) *sourceRig {
 	t.Helper()
 	if os.Getenv("FIRESTORE_EMULATOR_HOST") == "" {
 		t.Skip("SKIP: gcloud / Java 不在のため Firestore emulator 検証不可")
@@ -51,6 +61,10 @@ func startSourceRig(t *testing.T, pcID string) *sourceRig {
 	}
 	t.Cleanup(func() { st.Close() })
 
+	agentRelay := relayURL
+	if envRelay != "" {
+		agentRelay = envRelay
+	}
 	agent := exec.Command(bin, "agent")
 	agent.Env = []string{
 		"HOME=" + t.TempDir(),
@@ -60,10 +74,10 @@ func startSourceRig(t *testing.T, pcID string) *sourceRig {
 		"DROVER_TICK=1s",
 		"FIRESTORE_EMULATOR_HOST=" + os.Getenv("FIRESTORE_EMULATOR_HOST"),
 		"HERDR_SOCKET_PATH=" + srv.sock,
-		"CLOUD_RELAY_URL=" + relayURL,
+		"CLOUD_RELAY_URL=" + agentRelay,
 	}
-	var agentOut syncBuf
-	agent.Stderr, agent.Stdout = &agentOut, &agentOut
+	agentOut := &syncBuf{}
+	agent.Stderr, agent.Stdout = agentOut, agentOut
 	if err := agent.Start(); err != nil {
 		t.Fatalf("agent start: %v", err)
 	}
@@ -85,7 +99,8 @@ func startSourceRig(t *testing.T, pcID string) *sourceRig {
 		t.Fatalf("workspace.create: %v", err)
 	}
 	t.Cleanup(func() { _ = hc.WorkspaceClose(ws.Workspace.WorkspaceID) })
-	return &sourceRig{srv: srv, hc: hc, relayURL: relayURL, bin: bin, st: st, pcID: pcID, paneID: ws.RootPane.PaneID}
+	return &sourceRig{srv: srv, hc: hc, relayURL: relayURL, bin: bin, st: st, pcID: pcID, paneID: ws.RootPane.PaneID,
+		attachRelayURL: relayURL, agentLog: agentOut}
 }
 
 // tick は source pane で 3 秒ごとに `<prefix>_<n>` を出し続ける（idle にしない＝
@@ -155,7 +170,7 @@ func startViewer(t *testing.T, src *sourceRig, vhc *herdrapi.Client, paneID, vie
 	t.Helper()
 	home := t.TempDir()
 	cmd := fmt.Sprintf("env HOME=%s GCP_PROJECT=%s PC_ID=%s CLOUD_RELAY_URL=%s FIRESTORE_EMULATOR_HOST=%s %s attach %s %s\r",
-		home, projectID, viewerPC, src.relayURL, os.Getenv("FIRESTORE_EMULATOR_HOST"), src.bin, src.pcID, src.paneID)
+		home, projectID, viewerPC, src.attachRelayURL, os.Getenv("FIRESTORE_EMULATOR_HOST"), src.bin, src.pcID, src.paneID)
 	if err := vhc.PaneSendText(paneID, cmd); err != nil {
 		t.Fatalf("attach 起動: %v", err)
 	}

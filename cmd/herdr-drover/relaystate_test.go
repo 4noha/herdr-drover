@@ -43,6 +43,7 @@ type fakeRelay struct {
 	lastGrantTTL int
 	revoked      bool
 	registerVer  string
+	wsURL        string // /slave/revoked に載せる WS 中継先（settings/relay 相当）
 
 	force401Once atomic.Bool // 次の /slave/revoked を 1 回だけ 401 にする
 	wakeN        atomic.Int32
@@ -168,7 +169,10 @@ func newFakeRelay(t *testing.T, secret string) (*fakeRelay, *httptest.Server) {
 		fr.mu.Lock()
 		rev := fr.revoked
 		fr.mu.Unlock()
-		writeJSON(w, map[string]any{"revoked": rev})
+		fr.mu.Lock()
+		wsURL := fr.wsURL
+		fr.mu.Unlock()
+		writeJSON(w, map[string]any{"revoked": rev, "ws_url": wsURL})
 	})
 
 	mux.HandleFunc("/slave/wake", func(w http.ResponseWriter, r *http.Request) {
@@ -458,5 +462,41 @@ func TestNewRelayStateReadsSlaveFile(t *testing.T) {
 	}
 	if rs.httpBase != "https://r.example" {
 		t.Fatalf("wss→https 変換不正: %q", rs.httpBase)
+	}
+}
+
+// /slave/revoked の ws_url で WS 中継の接続先が切り替わり、空に戻れば設定値へ戻る。
+func TestSlaveFollowsRelayWSURL(t *testing.T) {
+	fr, ts := newFakeRelay(t, "sec")
+	defer ts.Close()
+	rs := newTestRelayState(ts, "sec")
+	rs.urls = newRelayURLSource(rs.wsBase, rs.lg)
+	ctx := context.Background()
+	if rs.IsSelfRevoked(ctx) {
+		t.Fatal("失効していないはず")
+	}
+	if got := rs.wsURL(); got != rs.wsBase {
+		t.Fatalf("未設定なら設定値: %q", got)
+	}
+	fr.mu.Lock()
+	fr.wsURL = "wss://relay.4noha.org"
+	fr.mu.Unlock()
+	_ = rs.IsSelfRevoked(ctx)
+	if got := rs.wsURL(); got != "wss://relay.4noha.org" {
+		t.Fatalf("ws_url に切り替わるはず: %q", got)
+	}
+	fr.mu.Lock()
+	fr.wsURL = "http://bad" // ws:// 以外は無視
+	fr.mu.Unlock()
+	_ = rs.IsSelfRevoked(ctx)
+	if got := rs.wsURL(); got != "wss://relay.4noha.org" {
+		t.Fatalf("不正値は無視のはず: %q", got)
+	}
+	fr.mu.Lock()
+	fr.wsURL = ""
+	fr.mu.Unlock()
+	_ = rs.IsSelfRevoked(ctx)
+	if got := rs.wsURL(); got != rs.wsBase {
+		t.Fatalf("空なら設定値へ戻るはず: %q", got)
 	}
 }

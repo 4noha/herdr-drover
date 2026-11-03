@@ -267,11 +267,25 @@ func runOneCloud(ctx context.Context, cfg Config, cl Cloud, primary bool, hcli *
 	}
 	lg.Printf("%sクラウド開始: pc=%s project=%s relay=%s", tag, cl.PCName, cl.Project, cl.RelayURL)
 
+	// WS 中継の接続先（relayurl.go）: settings/relay で一括切替できる。master は Firestore を
+	// real-time に追い、slave は /slave/revoked の ws_url（relayState が持つ）で追う。
+	var relayURL *relayURLSource
+	if rs, ok := st.(*relayState); ok {
+		relayURL = rs.urls
+	} else {
+		relayURL = newRelayURLSource(cl.RelayURL, lg)
+		go func() {
+			if err := scConcrete.WatchRelayURL(ctx, relayURL.set); err != nil && ctx.Err() == nil {
+				lg.Printf("%ssettings/relay の監視終了（設定の relay を使い続ける）: %v", tag, err)
+			}
+		}()
+	}
+
 	// Phase 2 Web ターミナル: relay 設定時のみ制御線（WatchWake）を起動。
 	// SIGTERM は ctx cancel → WatchWake/全 bridge 停止 → 下の drain で bounded 待ち。
 	var wt *webTerm
 	if cl.RelayURL != "" {
-		wt = newWebTerm(cl.RelayURL, cfg.Idle, st, hcli, lg)
+		wt = newWebTerm(relayURL.get, cfg.Idle, st, hcli, lg)
 		// 初回データ未着の自切断猶予（DROVER_FIRST_BYTE_IDLE・既定 0=bridge
 		// 既定 5s＝BUG-8 対策値のまま）。imagePaste と同じく生成後に代入する knob。
 		wt.firstByteIdle = cfg.FirstByteIdle

@@ -109,7 +109,9 @@ type relayState struct {
 	secret   string       // durable refresh secret
 	hc       *http.Client // /slave/* 通常 HTTP（30s timeout）
 	wakeHC   *http.Client // long-poll 専用（timeout 無し・per-request ctx で制御）
-	lg       *log.Logger
+	// urls は WS 中継の接続先（relayurl.go）。/slave/revoked の ws_url で切り替わる。
+	urls *relayURLSource
+	lg   *log.Logger
 
 	tokMu    sync.Mutex
 	token    string
@@ -149,6 +151,7 @@ func newRelayState(relayURL, pcName string, cfg Config, lg *log.Logger) (*relayS
 		"wss://", "https://", 1), "ws://", "http://", 1)
 	return &relayState{
 		wsBase:   wss,
+		urls:     newRelayURLSource(wss, lg),
 		httpBase: httpBase,
 		pc:       pc,
 		secret:   sf.RefreshSecret,
@@ -291,13 +294,25 @@ func (rs *relayState) call(ctx context.Context, method, path string, reqBody, ou
 
 func (rs *relayState) Close() error { return nil }
 
+// wsURL は WS 中継の現在の接続先（settings/relay の切替を反映。urls 無し＝テストの素の構造体なら設定値）。
+func (rs *relayState) wsURL() string {
+	if rs.urls != nil {
+		return rs.urls.get()
+	}
+	return rs.wsBase
+}
+
 // IsSelfRevoked は GET /slave/revoked。network/lookup 失敗は false
 // （可用性優先・state.IsSelfRevoked と同意味論）。
 func (rs *relayState) IsSelfRevoked(ctx context.Context) bool {
 	var resp struct {
-		Revoked bool `json:"revoked"`
+		Revoked bool   `json:"revoked"`
+		WSURL   string `json:"ws_url"` // WS 中継の接続先（settings/relay・空＝設定どおり）
 	}
 	err := rs.call(ctx, http.MethodGet, "/slave/revoked", nil, &resp)
+	if err == nil && rs.urls != nil {
+		rs.urls.set(resp.WSURL)
+	}
 	if err == nil {
 		return resp.Revoked
 	}
@@ -558,7 +573,7 @@ func (rs *relayState) DialSource(ctx context.Context, sid string) (net.Conn, err
 	if err != nil {
 		return nil, err
 	}
-	return dialAuthSession(ctx, rs.wsBase, sid, "source", tok)
+	return dialAuthSession(ctx, rs.wsURL(), sid, "source", tok)
 }
 
 // dialAuthSession は relayclient.Dial のワイヤ契約（URL=/session?sid=&role=・

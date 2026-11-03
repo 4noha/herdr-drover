@@ -240,6 +240,8 @@ type connHolder struct {
 	pendingSince time.Time
 	// sidForm は直近に使った relay sid（形式が変わった時だけログする・attachsid.go）。
 	sidForm string
+	// relayForm は直近に使った relay の URL（変わった時だけログする・relayurl.go）。
+	relayForm string
 	// histDone は「リモートの履歴をこの pane の scrollback へ入れ終えた」印。↗窓は
 	// 常駐 pane で quiescence 再接続が頻繁に起きるため、履歴は**プロセスにつき最初の
 	// 接続の 1 回だけ**要求する（再接続のたびに要求すると同じ履歴が scrollback に
@@ -327,6 +329,17 @@ func (h *connHolder) noteSidForm(injSid, srcVer string) {
 	h.mu.Unlock()
 	if prev != injSid && h.lg != nil {
 		h.lg.Printf("relay sid=%q（リモートの版 %q）", injSid, srcVer)
+	}
+}
+
+// noteRelay は relay の接続先を記録し、変わった時だけ attach.log に残す。
+func (h *connHolder) noteRelay(url string) {
+	h.mu.Lock()
+	prev := h.relayForm
+	h.relayForm = url
+	h.mu.Unlock()
+	if prev != url && h.lg != nil {
+		h.lg.Printf("relay=%s", url)
 	}
 }
 
@@ -697,6 +710,13 @@ func attachOnce(ctx context.Context, st *state.Client, relayURL, sid, viewerPC, 
 	}
 	injSid := injSidFor(sid, viewerPC, srcVer)
 	holder.noteSidForm(injSid, srcVer)
+	// WS 中継の接続先（relayurl.go）: settings/relay があればそれへ。読めなければ設定の URL。
+	if u, err := st.RelayURL(gctx); err != nil {
+		lg.Printf("settings/relay 読取失敗（設定の relay を使う）: %v", err)
+	} else if u != "" && validRelayURL(u) {
+		relayURL = u
+	}
+	holder.noteRelay(relayURL)
 	// viewer 許可を先に置き、リモート agent を起こす（source を bridge させる）。
 	// ⚠ 元から戻り値を捨てている（best-effort）。ここが黙って失敗し続けると source が
 	// bridge を張らず「dial は通るのにフレームが来ない」形の張り付きになるので、
