@@ -270,7 +270,7 @@ Firestore `commands/{pc}/q/{id}` 経由。owner 認証済み Web が投入し、
 | 命令 | sid | 実体 | Ack の位置 | 結合度 |
 |---|---|---|---|---|
 | `restart-daemon`<br>（旧名 `restart-agent`） | — | `launchctl kickstart -k`（**herdr-drover デーモン**） | **先行**（自己 kill するため） | [非依存] |
-| `self-update` | — | selfupdate.Update → `os.Exit(0)` | **先行** | [非依存] |
+| `self-update` | — | selfupdate.Update → `os.Exit(0)`。置換されるのは daemon のバイナリ（binDst）だけ。CLI バイナリ（`~/.local/bin/herdr-drover`）は**再起動後の daemon が起動時に SHA 不一致なら揃える**（v0.5.50・`syncCLIBinaryOnLatestCheck`） | **先行** | [非依存] |
 | `restart-proxy` | 必須 | 当該 sid の bridge respawn（**claude プロセスには触らない**） | 後 | [非依存] |
 | `restart-agent-session` | 空=全部 | エージェントセッションを会話ごと作り直す | 後 | [一般化済] |
 | `update-agent-cli` | 空=全部 | エージェント本体更新＋セッション反映 | 後 | [一般化済] |

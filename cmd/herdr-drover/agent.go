@@ -87,6 +87,11 @@ func cmdAgent(stdout, stderr io.Writer) error {
 	for _, w := range warnConfig(cfg) {
 		lg.Println(w)
 	}
+	// CLI バイナリ（~/.local/bin/herdr-drover・`claude` シムの実体）を稼働バイナリと揃える。
+	// 遠隔 self-update は daemon のバイナリ（binDst）だけを置換して再起動するため、CLI 側が
+	// 旧版のまま取り残されていた（2026-11-03 実測: daemon v0.5.49・CLI v0.5.47）。起動時に
+	// SHA 不一致なら binDst を新 inode で配置する（同 inode／symlink／一致なら何もしない）。
+	syncCLIBinaryOnLatestCheck(lg.Writer())
 
 	// 二重起動ゲート（プロセス単位＝全クラウドで共有）: flock をプロセス生存
 	// 期間中保持する（check-then-write の TOCTOU 排除。詳細は pidfile.go）。
