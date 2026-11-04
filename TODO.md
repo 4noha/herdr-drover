@@ -100,12 +100,23 @@ v0.5.30 で**判定を経過時間ベースへ**変更し、**実 websocket 越�
   ごとに「生存確認失敗」で再接続（12h で 290 回）。ping は**最初のフレームを受けてから**に
   した（`watchLiveness` の armed）。テスト `TestWatchLivenessWaitsForFirstByte`（待たない版で
   FAIL 確認）。ペアリング前は relay の 2 分失効＋無通信自切断が従来どおり扱う。
-- **配信状況**: drover-cloud は `441c6b7`＋tag `v0.2.11` をローカルで作成（push はユーザー）。
-  herdr-drover はこの Mac へ go.work（ローカル drover-cloud）でビルドして反映済み。go.mod の
-  v0.2.11 固定・`GOWORK=off make dist`・release・fleet 配信は drover-cloud の push 後。
-  relay VM / Cloud Run の再デプロイは任意（slave 経路 PushStatusFor の読取 ≈ 3k/時だけ）。
-- **確認項目**: 配信後 1 時間で `BatchGetDocuments` が 4.9 万/時 → 数千/時へ落ちること、
-  `attach.log` の `ping-fail` が止まること（w1:p2M は idle15m か EOF だけになる）。
+- **配信済（2026-11-04 11:21 に 5 台とも v0.5.56）**: drover-cloud `441c6b7`／tag `v0.2.11`、
+  herdr-drover `538bf1b`（go.mod v0.2.11）／tag `v0.5.56`／release・`_fq push`。この Mac は
+  release バイナリで daemon 再起動（10:54）。relay VM / Cloud Run は**未再デプロイ**（slave 経路の
+  PushStatusFor はまだ毎 tick Get＝2 台 × 2 docs × 720/時 ≈ 3k 読み/時。次のデプロイで解消）。
+- **結果（11:17〜11:37 の 10 分バケット・全台更新後）**: BatchGetDocuments 9,400〜10,000/10 分 →
+  **2,400〜2,500/10 分**（LOOKUP 7,100〜8,800 → 1,300、NOT_FOUND 1,100 → 1,150 で不変）。
+  `attach.log` の ping-fail は 0（ただし当該 ↗窓 w1:p2M は作り直し後「非表示」で未接続＝本番確認は
+  その Tab を表示した時）。
+- **残りの読み取り（定常 ≈ 2.6 万/時 ≈ 月 $6〜7・次の候補）**:
+  1. QUERY ≈ 1.1 万/時（更新直後の reconcile 連鎖で一時 2 万超）: `WatchSessions`（CollectionGroup
+     sessions）が `watchMaxLifetime`=5 分ごとの強制再購読で初回スナップショット 65 docs を読む
+     （5 台 × 12/時 × 65 ≈ 3.9k/時）＋ reconcile のたびの `ListSessions` GetAll（他 4 台分）。
+     候補: watchMaxLifetime を 30〜60 分へ／ListSessions を WatchSessions のスナップショットから。
+  2. NOT_FOUND ≈ 7k/時: 各 PC の tick 冒頭 `IsSelfRevoked`（`revoked/<pc>` の Get・設計上
+     「tick 毎 1 read」として許容）＋ slave の `/slave/revoked`。候補: `revoked/<pc>` を listener に。
+  3. LOOKUP ≈ 8k/時: 10 分ごとの再検証（65）・眼鏡ポーリングの `pcs/<pc>`（720/時）・未再デプロイの
+     relay の PushStatusFor（≈ 3k/時）・relay の grant 検証。
 
 ### 2026-11-03: Cloud Run 費用（10 月 ¥77k）の対策 — BUG-16 修正・表示判定・圧縮・同時接続
 - 請求の内訳: egress ¥51k（10/20〜26 に 1 日 200〜330GB・10/27 以降 10GB → BUG-14 修正と時期一致）、CPU ¥24k（WS 常時接続で 3〜4 台張り付き）。
