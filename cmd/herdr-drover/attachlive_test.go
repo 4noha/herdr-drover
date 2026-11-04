@@ -13,6 +13,13 @@ import (
 	"github.com/coder/websocket"
 )
 
+// armedNow は「初バイト受信済み」のチャネル（既存テストは ping の挙動だけを見る）。
+func armedNow() <-chan struct{} {
+	ch := make(chan struct{})
+	close(ch)
+	return ch
+}
+
 type fakePingConn struct {
 	net.Conn
 	n    atomic.Int32
@@ -35,7 +42,7 @@ func TestWatchLivenessCallsOnFailOnce(t *testing.T) {
 	var fails atomic.Int32
 	done := make(chan struct{})
 	go func() {
-		watchLiveness(ctx, c, 20*time.Millisecond, time.Second, func(error) { fails.Add(1) })
+		watchLiveness(ctx, c, armedNow(), 20*time.Millisecond, time.Second, func(error) { fails.Add(1) })
 		close(done)
 	}()
 	select {
@@ -53,7 +60,7 @@ func TestWatchLivenessCallsOnFailOnce(t *testing.T) {
 	defer b.Close()
 	done2 := make(chan struct{})
 	go func() {
-		watchLiveness(ctx, a, time.Millisecond, time.Second, func(error) { t.Error("呼ばれてはいけない") })
+		watchLiveness(ctx, a, armedNow(), time.Millisecond, time.Second, func(error) { t.Error("呼ばれてはいけない") })
 		close(done2)
 	}()
 	select {
@@ -67,7 +74,7 @@ func TestWatchLivenessCallsOnFailOnce(t *testing.T) {
 	ctx2, cancel2 := context.WithCancel(context.Background())
 	done3 := make(chan struct{})
 	go func() {
-		watchLiveness(ctx2, c2, 10*time.Millisecond, time.Second, func(error) { t.Error("ctx 終了で onFail") })
+		watchLiveness(ctx2, c2, armedNow(), 10*time.Millisecond, time.Second, func(error) { t.Error("ctx 終了で onFail") })
 		close(done3)
 	}()
 	time.Sleep(50 * time.Millisecond)
@@ -107,7 +114,7 @@ func TestWatchLivenessDetectsSilentPeerOnRealWebsocket(t *testing.T) {
 	conn := &pingNetConn{Conn: nc, ws: c}
 	failed := make(chan error, 1)
 	start := time.Now()
-	watchLiveness(ctx, conn, 100*time.Millisecond, 700*time.Millisecond, func(err error) { failed <- err })
+	watchLiveness(ctx, conn, armedNow(), 100*time.Millisecond, 700*time.Millisecond, func(err error) { failed <- err })
 	select {
 	case err := <-failed:
 		if time.Since(start) > 5*time.Second {
@@ -126,3 +133,49 @@ type pingNetConn struct {
 }
 
 func (p *pingNetConn) Ping(ctx context.Context) error { return p.ws.Ping(ctx) }
+
+// TestWatchLivenessWaitsForFirstByte — 初バイト（armed）が来るまで ping を送らない。
+// relay は source 待ちの間こちらを読まず pong を返さない（writePeer が最大 2 分ブロック）
+// ので、ペアリング前の ping は「失敗」にしかならない（2026-11-04 実測: source 側 PC が
+// スリープ中の ↗窓が 70 秒ごとに再接続 ×290/12h）。armed 後は従来どおり検出する。
+func TestWatchLivenessWaitsForFirstByte(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	c := &fakePingConn{fail: 1} // ping すれば必ず失敗する相手
+	armed := make(chan struct{})
+	var fails atomic.Int32
+	done := make(chan struct{})
+	go func() {
+		watchLiveness(ctx, c, armed, 10*time.Millisecond, time.Second, func(error) { fails.Add(1) })
+		close(done)
+	}()
+	time.Sleep(150 * time.Millisecond) // interval の 15 倍待っても
+	if n := c.n.Load(); n != 0 || fails.Load() != 0 {
+		t.Fatalf("初バイト前に ping した: pings=%d onFail=%d", n, fails.Load())
+	}
+	close(armed) // 初バイト到着＝ここから生存確認
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("armed 後に ping 失敗を検出しない")
+	}
+	if c.n.Load() != 1 || fails.Load() != 1 {
+		t.Fatalf("armed 後: pings=%d onFail=%d（want 1 / 1）", c.n.Load(), fails.Load())
+	}
+
+	// armed 前に ctx が終わっても onFail は呼ばない。
+	c2 := &fakePingConn{fail: 1}
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	done2 := make(chan struct{})
+	go func() {
+		watchLiveness(ctx2, c2, make(chan struct{}), time.Millisecond, time.Second, func(error) { t.Error("armed 前の ctx 終了で onFail") })
+		close(done2)
+	}()
+	time.Sleep(20 * time.Millisecond)
+	cancel2()
+	select {
+	case <-done2:
+	case <-time.After(time.Second):
+		t.Fatal("armed 前の ctx 終了で watchLiveness が戻らない")
+	}
+}

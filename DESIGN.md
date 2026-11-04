@@ -51,7 +51,9 @@ launchd 常駐 `herdr-drover agent`（pc id = <host>-herdr）
  → producer: pane.list/agent.list（events nudge＋周期 poll backstop）
  → session map（key=pane_id, short_dir=cwd 末尾, window_name=agent/label,
     is_active=AgentStatus）
- → state.PushStatus（content_hash ゲート＝near-$0）／消滅キー DeleteSession
+ → state.PushStatus（content_hash ゲート＝near-$0。差分判定はプロセス内の記憶＝
+    無差分の tick は Firestore を読みも書きもしない・drover-cloud v0.2.11 `state/pushcache.go`）
+    ／消滅キー DeleteSession
  → Firestore pcs/{pc}/sessions/{pane_id} → 既存 Web 端末一覧
 ```
 scan エラー tick は skip＝前回状態維持（cm の空 STATUS flap 教訓）。

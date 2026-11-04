@@ -29,13 +29,25 @@ type pinger interface {
 	Ping(ctx context.Context) error
 }
 
-// watchLiveness は ctx が終わるまで interval ごとに ping を送り、timeout 内に pong が
-// 無ければ onFail(err) を 1 回呼んで戻る。ping できない conn なら何もしない（不明は
-// 生きている扱い＝壊さない側に倒す）。ctx 終了による失敗は報告しない。
-func watchLiveness(ctx context.Context, conn any, interval, timeout time.Duration, onFail func(error)) {
+// watchLiveness は armed（最初のフレームを受けた）が閉じてから、ctx が終わるまで
+// interval ごとに ping を送り、timeout 内に pong が無ければ onFail(err) を 1 回呼んで
+// 戻る。ping できない conn なら何もしない（不明は生きている扱い＝壊さない側に倒す）。
+// ctx 終了による失敗は報告しない。
+//
+// armed を待つ理由: relay（drover-cloud relay.serve）は相手 slot が空の間 writePeer で
+// 最大 2 分ブロックし、その間こちらの conn を読まない＝pong を返さない。source 側の PC が
+// スリープ中などペアリング前の ping は必ず失敗し、70 秒ごとに切って張り直すだけになる
+// （2026-11-04 実測 ×290/12h）。初バイトが来た＝相手が居て relay が読んでいる、が前提。
+// ペアリング前の「相手が来ない」は relay の 2 分失効と無通信自切断が従来どおり扱う。
+func watchLiveness(ctx context.Context, conn any, armed <-chan struct{}, interval, timeout time.Duration, onFail func(error)) {
 	p, ok := conn.(pinger)
 	if !ok {
 		return
+	}
+	select {
+	case <-ctx.Done():
+		return
+	case <-armed:
 	}
 	t := time.NewTicker(interval)
 	defer t.Stop()
@@ -57,3 +69,9 @@ func watchLiveness(ctx context.Context, conn any, interval, timeout time.Duratio
 		}
 	}
 }
+
+// writerFunc は関数を io.Writer にする（attachOnce が「最初のフレームを受けた」を
+// pumpFrames のシグネチャを変えずに拾うため）。
+type writerFunc func(p []byte) (int, error)
+
+func (f writerFunc) Write(p []byte) (int, error) { return f(p) }

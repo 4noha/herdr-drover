@@ -74,6 +74,39 @@ v0.5.30 で**判定を経過時間ベースへ**変更し、**実 websocket 越�
 - **残課題**: (1) fleet 配信は release が要る＝ユーザー確認後。(4) 判定器は `claude -p`（Haiku・
   4〜5s）＝各 PC に claude ログインが要る。無ければ常に停止側（ログに fallback）。
 
+### 2026-11-04: 実費の内訳を実測 — Firestore 読取（PushStatus の毎 tick Get）と viewer ping の誤検出を修正
+
+「費用は抑えられそう？」に Monitoring API（gcloud の access token で curl）で答えた。手順と数字は
+メモリ `cloud-cost-measurement` にも記録。
+
+- **Cloud Run**: billable_instance_time ≈ 72 秒/時・720 req/時＝眼鏡ブリッジ（LAN 上の node・
+  `/glasses/answers?wait=0`・5 秒ポーリング）だけ。無料枠（vCPU 18 万秒/月・200 万 req/月）の内側。
+- **relay VM**（e2-micro 東京＋外部 IP）: 固定 ≈ $11〜12/月（第三者サイトの単価・公式表は未確認）。
+- **Firestore（最大の費目）**: 読取 ≈ 6 万/時（LOOKUP 43k・NOT_FOUND 6k・QUERY 11k）≈ 140 万/日 ≈
+  月 $13〜16。`firestore.googleapis.com/api/request_count` の api_method で **BatchGetDocuments
+  4.9 万/時**＝`state.PushStatus` が **tick（5s）ごとに全 session doc を `ref.Get`** して
+  content_hash を比べていた（5 台 65 docs × 720/時 = 46,800）。書込は ≈ 200/時で無料枠内。
+  push 設計は保たれていて、ローカルの herdr スキャンが 5 秒周期なだけ＝「差分があるか」の
+  判定材料を Firestore から読んでいたのが問題。
+- **修正 1（drover-cloud v0.2.11・`state/pushcache.go`）**: 前回 push した hash/version を
+  プロセス内に記憶。Get は「記憶なし／hash 変化（version +1 のため）／10 分（`PushVerifyEvery`）
+  より古い（外部削除への安全網）」だけ。書込の意味は byte-identical。DeleteSession 系は記憶を
+  捨てる。テスト `TestPushStatusDoesNotReadUnchangedSessions`・`TestPushStatusForDoesNotReadUnchanged`
+  （実エミュレータ・verifyEvery=0＝旧挙動で FAIL 確認）。見込み: 読取 4.7 万/時 → 約 400/時。
+  残りの QUERY ≈ 1.1 万/時（reconcile の ListSessions・slave の long-poll claim 等）は未着手。
+- **修正 2（herdr-drover・`attachlive.go`）**: 2026-11-03 の viewer ping（60s/10s）は **source 不在
+  だと必ず失敗**していた。relay の `writePeer` は相手 slot が空の間（最大 2 分）`nc.Read` を
+  呼ばず pong を返さないため、source 側 PC がスリープ中の ↗窓（d24wt27c3j の w1:p2M）が 70 秒
+  ごとに「生存確認失敗」で再接続（12h で 290 回）。ping は**最初のフレームを受けてから**に
+  した（`watchLiveness` の armed）。テスト `TestWatchLivenessWaitsForFirstByte`（待たない版で
+  FAIL 確認）。ペアリング前は relay の 2 分失効＋無通信自切断が従来どおり扱う。
+- **配信状況**: drover-cloud は `441c6b7`＋tag `v0.2.11` をローカルで作成（push はユーザー）。
+  herdr-drover はこの Mac へ go.work（ローカル drover-cloud）でビルドして反映済み。go.mod の
+  v0.2.11 固定・`GOWORK=off make dist`・release・fleet 配信は drover-cloud の push 後。
+  relay VM / Cloud Run の再デプロイは任意（slave 経路 PushStatusFor の読取 ≈ 3k/時だけ）。
+- **確認項目**: 配信後 1 時間で `BatchGetDocuments` が 4.9 万/時 → 数千/時へ落ちること、
+  `attach.log` の `ping-fail` が止まること（w1:p2M は idle15m か EOF だけになる）。
+
 ### 2026-11-03: Cloud Run 費用（10 月 ¥77k）の対策 — BUG-16 修正・表示判定・圧縮・同時接続
 - 請求の内訳: egress ¥51k（10/20〜26 に 1 日 200〜330GB・10/27 以降 10GB → BUG-14 修正と時期一致）、CPU ¥24k（WS 常時接続で 3〜4 台張り付き）。
 - 済（デプロイ・配信済）: Cloud Run 同時接続 80→250（1 台に集約・CPU 1/3）、relay の permessage-deflate（relay→viewer のみ・drover-cloud v0.2.5・v0.5.47）。

@@ -812,15 +812,25 @@ func attachOnce(ctx context.Context, st *state.Client, relayURL, sid, viewerPC, 
 	// 生存確認（attachlive.go）: 無通信自切断が 15 分なので、黙って死んだ TCP（relay
 	// VM の再起動・NAT 消失）をその間ずっと「接続中」と誤認しないよう定期 WS ping。
 	// pong は下の pumpFrames（読み手）が受ける。失敗したら自分から閉じて backoff 再接続へ。
+	// ⚠ ping は**最初のフレームを受けてから**。relay は相手（source）待ちの間、こちらの
+	// conn を読まない（writePeer が最大 2 分ブロック）ので pong も返らない＝source 側の
+	// PC がスリープ中だと必ず「失敗」になる（2026-11-04 実測: 70 秒ごとに再接続 ×290/12h）。
+	// 初バイトが来た＝ペアリング済みで relay が読んでいる、が ping の前提。
+	firstByte := make(chan struct{})
+	var firstOnce sync.Once
+	outArmed := writerFunc(func(p []byte) (int, error) {
+		firstOnce.Do(func() { close(firstByte) })
+		return out.Write(p)
+	})
 	var pingFail atomic.Bool
-	go watchLiveness(dctx, conn, viewerPingInterval, viewerPingTimeout, func(err error) {
+	go watchLiveness(dctx, conn, firstByte, viewerPingInterval, viewerPingTimeout, func(err error) {
 		pingFail.Store(true)
 		lg.Printf("生存確認（ping）失敗＝切断して再接続: %v", err)
 		conn.Close()
 	})
 
 	pumpStart := time.Now()
-	idleClosed, got, why := pumpFrames(conn, out, DefaultIdle)
+	idleClosed, got, why := pumpFrames(conn, outArmed, DefaultIdle)
 	if askHist && got > 0 {
 		holder.histDone.Store(true)
 	}
