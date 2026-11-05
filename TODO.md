@@ -118,6 +118,21 @@ v0.5.30 で**判定を経過時間ベースへ**変更し、**実 websocket 越�
   3. LOOKUP ≈ 8k/時: 10 分ごとの再検証（65）・眼鏡ポーリングの `pcs/<pc>`（720/時）・未再デプロイの
      relay の PushStatusFor（≈ 3k/時）・relay の grant 検証。
 
+- **確認（2026-11-05 17:00・配信後 30 時間）**: Firestore 読取は **2.4〜2.8 万/時で安定**（LOOKUP 7.8k・
+  NOT_FOUND 6.1〜6.8k・QUERY 10〜14k。深夜は 2.4 万、作業中は 2.8 万）。比較のための直前の状態
+  （11-02・cm 常駐＋BUG-16 の奪い合い＋relay が Cloud Run）: 読取 **46.5 万/時**（LOOKUP 117k・
+  NOT_FOUND 59k・QUERY 288k）、Cloud Run **3,600 秒/時＝常時 1 vCPU 課金**・37k req/時・送信
+  **2.2GB/時（53GB/日）**。11-03 の切替（relay VM・見ていない ↗窓は繋がない・cm 撤去）で読取 6 万/時・
+  Cloud Run 72 秒/時・送信 1MB/時へ、11-04 02Z の v0.5.56 で読取 2.7 万/時へ。relay VM の送信は
+  7MB/時（0.17GB/日）。月額の概算（東京の単価 10 万読取 $0.038・egress $0.12/GB・Cloud Run
+  $0.000024/vCPU 秒で換算）: 11-02 の走り ≈ **$360〜390/月**（egress ≈ $190・Cloud Run ≈ $70・
+  Firestore ≈ $100〜130）→ いま ≈ **$18〜20/月**（VM $11〜12・Firestore $6〜7・egress $1 未満・
+  Cloud Run $0）。Web でセッションを閲覧している間は `/ws` の 1 本が Cloud Run のインスタンスを起こす
+  （11-05 16:26〜17:04 の閲覧 38 分＝2,293 課金秒）＝無料枠 18 万 vCPU 秒/月は閲覧 ≈ 50 時間/月分。
+  測定の罠: gcloud の active project は別プロジェクトに変わっていることがある＝`sa.json` の
+  project_id を明示する（空の `{"unit":"1"}` が返るのは別プロジェクトを見ている時）。
+  `firestore.googleapis.com/api/billable_read_units` は descriptor にあるが点が無い。
+
 ### 2026-11-03: Cloud Run 費用（10 月 ¥77k）の対策 — BUG-16 修正・表示判定・圧縮・同時接続
 - 請求の内訳: egress ¥51k（10/20〜26 に 1 日 200〜330GB・10/27 以降 10GB → BUG-14 修正と時期一致）、CPU ¥24k（WS 常時接続で 3〜4 台張り付き）。
 - 済（デプロイ・配信済）: Cloud Run 同時接続 80→250（1 台に集約・CPU 1/3）、relay の permessage-deflate（relay→viewer のみ・drover-cloud v0.2.5・v0.5.47）。
