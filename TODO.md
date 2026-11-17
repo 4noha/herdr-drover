@@ -30,6 +30,36 @@ v0.5.30 で**判定を経過時間ベースへ**変更し、**実 websocket 越�
 > できない* の記述は**すべて解消済み**（PR #1 merge・`e9bab96` で release に windows 資産。
 > Windows 機の self-update 成功を 7/25 15:52 の Ack で実確認）。
 
+### 2026-11-17: Grok Bot（MCP）からの `send_input` が「文字は入るが送信されない」— bracketed paste で修正・mac-studio 反映済・fleet 未配信
+
+ユーザー報告「入力が送信されないことがよく起こる」。Firestore `commands/*/q` の監査では
+send-input 171 件中 154 件が `done`（daemon は「テキスト入力完了」と**偽陽性**の Ack）、
+`submit=true` の送信の後に Grok Bot が `keys=Enter` を別送して救った痕跡が 4 件（45B/556B/862B/1018B・全部 d24wt。
+ほかに `submit=false` の 2 段送りが 3 件）。`submit=true` の text 送信 85 件のうち 800 文字超は 6 件＝下の paste 窓で
+説明できるのは最大 6 件。45B/556B の 2 件は別の原因（未特定）で、新しい Ack の「送信確認」で可視化される。
+
+- **再現**（隔離 herdr＋実 Claude Code 2.1.326・`cmd/herdr-drover/screenio_live_test.go`
+  `TestLiveSendInputSubmits`。判定は画面でなく Claude Code の transcript）: 旧コードは
+  45B/556B は送信、**1.5KB/5.5KB/8KB は 0/3**。待ち時間を入れても 1.5KB は 800ms でも不送信で、
+  代わりに末尾 478B の**断片だけ**が別メッセージで 4 回送信された。
+- **原因**: PTY が `pane.send_text` のバイト列を **1022B ずつ**読み手へ渡す（生の読み手で実測）。
+  Claude Code の `usePasteHandler` は塊ごとに 800 文字超を貼り付け・未満を打鍵と判定
+  （`PASTE_THRESHOLD=800`・`PASTE_COMPLETION_TIMEOUT_MS=100`）。末尾の塊が 800 未満だと打鍵経路に
+  流れ、直後の Enter は貼り付け窓に吸われる。Codex でも素の多行は送信されない（実測）。
+- **修正**（`screenio.go`）: `text` を **bracketed paste（ESC[200~…ESC[201~）で包んで送る**
+  → 150ms → Enter 別送。Enter 後 3 秒まで `agent_status` が working に変わるのを見て Ack detail に
+  「送信確認=idle→working 0.3s」／「未確認」を残す（**Enter の再送はしない**＝承認ダイアログを
+  誤って承認しうる）。既定 `require_status` に `done` を追加（エラー 17 件中 9 件が
+  「agent_status=done のため拒否」だった）。新コードのライブ試験は 45B〜8KB・多行 600B 含め
+  6/6 全文 1 メッセージ・断片 0。Codex（0.169）でも bracketed で送信確認。
+- **配信状況**: mac-studio は rm→cp→codesign→kickstart で反映。**Grok Bot の相手は d24wt が主
+  ＝release（`gh release create`）→ 各 PC `self-update` が要る**（ユーザー操作）。
+  drover-cloud 側は `mcp/tools_input.go` の schema 既定文字列を `idle|blocked|done` に合わせた
+  だけ（relay 再デプロイ時に反映。動作は daemon 側の既定が決める）。
+- ライブ試験の土台: `scripts/live-claude-pane.py hold`（隔離 server＋実 Claude Code の pane を
+  立てて `live_pane.json` を書く）→ `DROVER_LIVE_PANE_INFO=… go test ./cmd/herdr-drover -run
+  TestLiveSendInput -v`。実 API を叩くので CI では Skip。
+
 ### 2026-10-29: セミオート続行（`auto` / Stop フック）実装・ローカル反映済・fleet 未配信
 
 ユーザー報告「作業がすぐ中断して『つづけて』を連打するループ」の自動化。仕様は

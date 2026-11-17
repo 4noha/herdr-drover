@@ -17,3 +17,6 @@ AGENTS.md
 # go.work はローカル drover-cloud 解決用（PC 固有・リリースは GOWORK=off）。
 go.work
 go.work.sum
+
+# scripts/live-claude-pane.py hold が書く隔離 pane の接続情報（PC ローカル・一時）
+scripts/live_pane.json

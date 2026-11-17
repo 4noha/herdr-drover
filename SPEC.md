@@ -276,6 +276,9 @@ Firestore `commands/{pc}/q/{id}` 経由。owner 認証済み Web が投入し、
 | `update-agent-cli` | 空=全部 | エージェント本体更新＋セッション反映 | 後 | [一般化済] |
 | `update-all` | — | 上記＋自己更新＋再起動 | **先行**（この後 exit する） | [agent 非依存] |
 | `semi-auto` | 必須 | セミオート続行（§2.6）の pane 単位 ON/OFF。`Args["on"]`=`1`/`0`（無ければ反転）。設定ファイル＋Tab 印＋トースト＋自プロセスへ SIGUSR1（即時 re-scan＝session doc の `semi_auto` を即反映） | 後 | [非依存] |
+| `read-pane` | 必須 | `pane.read`（`source`=visible/recent/recent_unwrapped/detection・`lines`≤500）。本文は `mcp_results/{id}` へ（64KB・10 分） | 後 | [非依存] |
+| `send-input` | 必須 | `text`: **bracketed paste（`ESC[200~`…`ESC[201~`）で包んで `pane.send_text`** → 150ms → `pane.send_keys enter`（`submit=false` なら Enter 無し）。`keys`: `pane.send_keys` そのまま。既定 `require_status=idle\|blocked\|done`（`any` で解除）。Enter 後 3 秒まで `agent_status` が working へ変わるのを見て detail に **「送信確認=idle→working 0.3s」／「未確認」** を残す。**Enter は再送しない**（冪等でない: 承認ダイアログが出ていれば再送が承認になる） | 後 | [非依存] |
+| `interrupt` | 必須 | `pane.send_keys C-c`（agent_status のゲート無し） | 後 | [非依存] |
 
 **旧命令名は alias として allowlist に残す**（`restart-claude` / `update-claude` /
 `restart-agent`）。まだ更新していない PC の Web/CLI から投げられなくなるため、
@@ -283,6 +286,14 @@ Firestore `commands/{pc}/q/{id}` 経由。owner 認証済み Web が投入し、
 固定する（旧名は claude 専用だった＝推測ではなく事実）。`restart-agent` だけは
 元々 agent 概念を持たないので空のまま `restart-daemon` になる。**どう解釈したかは
 必ず Ack detail に残す**。
+
+**`send-input` が bracketed paste で包む理由（2026-11-17 実測・`screenio_live_test.go`）**: herdr の
+`pane.send_text` は素のバイト列を PTY に書き、macOS の PTY は読み手へ **1022 バイトずつ**渡す。
+Claude Code（2.1.326）は塊ごとに「800 文字超＝貼り付け・未満＝打鍵」と判定し、貼り付けは 100ms の
+静穏まで後続入力を吸う。素のまま送ると (a) 直後の Enter が改行として吸われて送信されない、
+(b) 末尾の 800 文字未満の塊だけが打鍵経路に流れて**断片だけが別メッセージで送信**される
+（1.5KB で 4 回再現）。Codex も素の多行は送信されない。印で包めば塊の境界に関係なく 1 つの
+貼り付けになり、45B〜8KB × 待ち 0/150/300ms の全試行が全文 1 メッセージで届いた。
 
 **`agent` パラメータ**: 空 = その PC の全エージェント種別（`sid` 空と同型）。
 Cloud 側 `ValidAgents`（canonical 21 種）で投入時に検証する — 未知の値を通すと
@@ -639,6 +650,7 @@ workspace.close  workspace.create  workspace.focus  workspace.list  workspace.re
 |---|---|
 | 接続モデル | **1 接続 = 1 リクエスト**（毎回再接続）。`events.subscribe` のみ長寿命 |
 | 入力注入 | `pane.send_input`(text) は `\r` が落ちる。**`pane.send_text`**（\r 込み）か `pane.send_keys` を使う |
+| 多行・長文の注入 | `pane.send_text` は PTY が **1022B ずつ**読み手へ渡す（TTYHOG）。TUI は塊単位で貼り付け判定するので（Claude Code は 800 文字超／100ms 窓）、**bracketed paste `ESC[200~`…`ESC[201~` で包み、Enter は別送**（§3 `send-input`）。素のまま＋直後の Enter は改行になり送信されない |
 | `terminal session control` | 隠し CLI（`--help` 非掲載）。attach と同じ **pane resize＋lock** |
 | `terminal session observe` | ロック非取得・観測側サイズへ仮想描画（観測 < grid は上寄せクリップ） |
 | pane grid 桁 | `pane.get` は行のみ（`scroll.viewport_rows`＝**pty の真値**。localview の control 縮小で layout より小さくなる）。桁は **`pane.layout` の `rect.width`**（0.9.5・2026-10-29 本番 5 pane で全幅塗り TUI の最大行幅と一致）。headless 隔離サーバでは pty 桁の上界（120≥119）＝observe を広く起動しても右に空き列が出るだけでクリップしない |
