@@ -305,7 +305,11 @@ HD_SKILLS=0      sh install.sh   # Skill は要らない
 解除 → 双子の `agent_session` 一致を確認 → 旧 pane を close・focused は最後）、
 (c) `organize` / `restart-agent-session` / `restart-daemon` の使い分け（**前 2 つは
 再起動後のタブ修復では何もしない**）、(d) 禁則（裸の `pkill herdr`・`↗` 注入 pane・
-外部端末の `terminal session control` ビューアに触らない）。
+外部端末の `terminal session control` ビューアに触らない・信頼ダイアログに代わって答えない）、
+(e) **新しい Tab でエージェントを起こす手順**（herdr 0.9.5: `tab create --workspace` → `pane run`
+に実バイナリ。`agent start` は未信頼 cwd で `agent_not_ready` を返す）、(f) **他の agent への
+入力の送り方**（`agent prompt` が bracketed paste 込みで送る。素の `send-text`＋Enter は多行・
+長文で送信されない＝2026-11-17 実測）。
 
 ### update-agent-cli（エージェント本体の更新 → セッション反映をワンコマンドで）
 
